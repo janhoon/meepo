@@ -1,0 +1,84 @@
+# tmux-agents extension
+
+Current implementation status: **registry + spawn/runtime + control/dashboard foundation**, plus tracked tmux service launches for long-running commands.
+
+Implemented so far:
+- global SQLite bootstrap at `~/.pi/agent/subagents.db`
+- schema + migrations for `agents`, `agent_messages`, `agent_events`, and `artifacts`
+- registry helper functions for create/update/list/get/message/event/artifact operations
+- model-callable coordinator tools:
+  - `subagent_spawn`
+  - `subagent_focus`
+  - `subagent_stop`
+  - `subagent_message`
+  - `subagent_reconcile`
+  - `subagent_capture`
+  - `subagent_list`
+  - `subagent_get`
+  - `subagent_inbox`
+  - `tmux_service_start`
+  - `tmux_service_list`
+  - `tmux_service_get`
+  - `tmux_service_focus`
+  - `tmux_service_stop`
+  - `tmux_service_capture`
+  - `tmux_service_reconcile`
+- lightweight interactive commands and shortcuts:
+  - `/agents`
+  - `/agent-spawn`
+  - `/agent-open <id>`
+  - `/agent-stop <id> [force]`
+  - `/agent-message <id> <kind> <message>`
+  - `/agent-capture <id> [lines]`
+  - `/agent-sync`
+  - `/service-start`
+  - `/services [scope]`
+  - `/service-open <id>`
+  - `/service-stop <id> [force]`
+  - `/service-capture <id> [lines]`
+  - `/service-sync`
+  - `Ctrl+Alt+A`
+  - `Ctrl+Alt+N`
+  - `Ctrl+Alt+J`
+  - `Ctrl+Alt+K`
+- run directory creation under:
+  - `~/.pi/agent/subagents/runs/<agent-id>/`
+  - `~/.pi/agent/services/runs/<service-id>/`
+- generated child artifacts:
+  - `task.md`
+  - `runtime-appendix.md`
+  - `launch.sh`
+  - `session.jsonl` path reservation
+  - `latest-status.json`
+  - `events.jsonl`
+  - `debug.log`
+- generated service artifacts:
+  - `command.txt`
+  - `launch.sh`
+  - `metadata.json`
+  - `latest-status.json`
+  - `output.log`
+- tmux window spawning with stored tmux ids
+- parent-session linkage entries appended into the current pi session
+- child-mode runtime support:
+  - auto `started` event
+  - auto completion fallback on `agent_end`
+  - `subagent_publish` tool for milestone/blocker/question/question_for_user/complete updates
+  - downward child message delivery from registry into the live child session
+  - delivered/acked transitions for downward child messages
+  - live registry + `latest-status.json` preview updates while the child runs
+- interactive dashboard behavior:
+  - list view with scope/filter/sort controls
+  - detail pane with parent/child relationships
+  - in-dashboard focus/stop/reply/capture/spawn/sync actions
+- initial agent profile prompts under `~/.pi/agent/agents/`
+- orchestration skills under `~/.pi/agent/skills/`
+- workflow prompt templates under `~/.pi/agent/prompts/`
+
+Not implemented yet:
+- richer child reply/ack UI polish
+- stronger reconciliation polish around edge cases
+- more capture/transcript options
+- stronger rg-only guard enforcement inside the extension runtime
+
+Use `/reload` in pi after changing files under `~/.pi/agent/extensions/tmux-agents/`.
