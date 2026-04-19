@@ -86,6 +86,7 @@ pi install /path/to/meepo
 - `subagent_message`
 - `subagent_inbox`
 - `subagent_attention`
+- `subagent_cleanup`
 - `subagent_capture`
 - `subagent_reconcile`
 
@@ -112,6 +113,7 @@ pi install /path/to/meepo
 - `/agent-capture <id> [lines]`
 - `/agent-sync`
 - `/agent-attention [scope]`
+- `/agent-cleanup [scope] [force]`
 
 ### Service control
 
@@ -129,7 +131,8 @@ pi install /path/to/meepo
 3. Reply with `subagent_message` instead of juggling detached terminals manually.
 4. Open `/agent-board` when you want a Pi-native board view of waiting, blocked, active, and done work.
 5. Spin up a tracked service with `tmux_service_start` if the task needs an app server, watcher, or dev environment.
-6. Focus, capture, reconcile, or stop anything in the pack as needed.
+6. Run `subagent_cleanup` or `/agent-cleanup` to remove finished tmux child windows once their work has been synthesized.
+7. Focus, capture, reconcile, or stop anything in the pack as needed.
 
 In other words: split the work, keep the replicas coordinated, and avoid the classic "which terminal was doing the important thing?" problem.
 

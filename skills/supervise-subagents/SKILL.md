@@ -24,6 +24,7 @@ Always triage in this order:
 - Use `subagent_list` to understand the current fleet and ownership.
 - Use `subagent_get` only for targeted drill-down.
 - Prefer answering questions and unblocking children before spawning new ones.
+- After completion has been synthesized, use `subagent_cleanup` so old terminal child tmux windows do not pile up.
 - Use `subagent_reconcile` if tmux state or registry state looks stale.
 - Use `subagent_focus` to jump to a child tmux window when live inspection is useful.
 - Do not use `find`; use `grep` and `bash` with `rg --files` for discovery.
@@ -35,5 +36,6 @@ Always triage in this order:
 3. List the current fleet with `subagent_list`.
 4. Triage highest-priority unresolved items.
 5. Send `subagent_message` replies or `subagent_stop` requests where appropriate.
-6. Reconcile stale items if needed.
-7. Summarize the fleet for the user in priority order.
+6. Clean up terminal agents whose work has been synthesized with `subagent_cleanup`.
+7. Reconcile stale items if needed.
+8. Summarize the fleet for the user in priority order.

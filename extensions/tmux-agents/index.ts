@@ -148,6 +148,14 @@ const SubagentAttentionParams = Type.Object({
 	limit: Type.Optional(Type.Integer({ description: "Maximum number of attention items to return.", minimum: 1, maximum: 500, default: 100 })),
 });
 
+const SubagentCleanupParams = Type.Object({
+	scope: Type.Optional(LIST_SCOPE),
+	ids: Type.Optional(Type.Array(Type.String({ description: "Agent id" }), { minItems: 1, maxItems: 100 })),
+	force: Type.Optional(Type.Boolean({ description: "Clean terminal agents even if unresolved non-completion attention items still exist.", default: false })),
+	dryRun: Type.Optional(Type.Boolean({ description: "Preview cleanup candidates without killing tmux targets.", default: false })),
+	limit: Type.Optional(Type.Integer({ description: "Maximum number of agents to inspect for cleanup.", minimum: 1, maximum: 500, default: 100 })),
+});
+
 const SERVICE_SCOPE = StringEnum(["all", "current_project", "current_session"] as const, {
 	description: "Which slice of tracked tmux services to inspect.",
 	default: "current_project",
@@ -438,6 +446,15 @@ function updateFleetUi(ctx: ExtensionContext): void {
 }
 
 const OPEN_ATTENTION_STATES: AttentionItemRecord["state"][] = ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user"];
+const TERMINAL_AGENT_STATES: AgentSummary["state"][] = ["done", "error", "stopped", "lost"];
+
+interface CleanupCandidate {
+	agent: AgentSummary;
+	attentionItems: AttentionItemRecord[];
+	targetExists: boolean;
+	cleanupAllowed: boolean;
+	reason: string;
+}
 
 function buildInboxText(messages: AgentMessageRecord[]): string {
 	if (messages.length === 0) return "No unread child-originated messages.";
@@ -498,6 +515,139 @@ function formatAttentionGateWarning(items: AttentionItemRecord[], agentsById: Ma
 	if (items.length === 0) return "";
 	const preview = items.slice(0, 3).map((item) => `- ${formatAttentionItemLine(item, agentsById.get(item.agentId))}`).join("\n");
 	return `Attention gate: ${items.length} unresolved attention item(s) already exist.\n${preview}`;
+}
+
+function listCleanupCandidates(
+	ctx: ExtensionContext,
+	params: { scope?: "all" | "current_project" | "current_session" | "descendants"; ids?: string[]; force?: boolean; limit?: number },
+): CleanupCandidate[] {
+	const db = getTmuxAgentsDb();
+	const inventory = getTmuxInventory();
+	const agents = params.ids && params.ids.length > 0
+		? listAgents(db, { ids: params.ids, limit: params.limit ?? params.ids.length })
+		: listAgents(db, resolveAgentFilters(ctx, params.scope ?? "current_project", { limit: params.limit }));
+	const attentionByAgent = new Map<string, AttentionItemRecord[]>();
+	const attentionItems = listAttentionItems(db, {
+		agentIds: agents.map((agent) => agent.id),
+		states: OPEN_ATTENTION_STATES,
+		limit: 500,
+	});
+	for (const item of attentionItems) {
+		const items = attentionByAgent.get(item.agentId) ?? [];
+		items.push(item);
+		attentionByAgent.set(item.agentId, items);
+	}
+	return agents
+		.filter((agent) => TERMINAL_AGENT_STATES.includes(agent.state))
+		.map((agent) => {
+			const items = (attentionByAgent.get(agent.id) ?? []).sort((left, right) => left.priority - right.priority || right.updatedAt - left.updatedAt);
+			const targetExists = tmuxTargetExists(
+				{
+					sessionId: agent.tmuxSessionId,
+					sessionName: agent.tmuxSessionName,
+					windowId: agent.tmuxWindowId,
+					paneId: agent.tmuxPaneId,
+				},
+				inventory,
+			);
+			const blockingItems = items.filter((item) => item.kind !== "complete");
+			let cleanupAllowed = targetExists;
+			let reason = !targetExists ? "tmux target already gone" : items.length === 0 ? "no unresolved attention items" : "completion attention can be resolved during cleanup";
+			if (blockingItems.length > 0 && !(params.force ?? false)) {
+				cleanupAllowed = false;
+				reason = `blocked by unresolved ${blockingItems[0]!.kind}`;
+			}
+			if (blockingItems.length > 0 && (params.force ?? false)) {
+				reason = `force cleanup despite unresolved ${blockingItems[0]!.kind}`;
+			}
+			return { agent, attentionItems: items, targetExists, cleanupAllowed, reason };
+		})
+		.filter((candidate) => candidate.targetExists || params.ids?.includes(candidate.agent.id));
+}
+
+function cleanupAgentTarget(candidate: CleanupCandidate, force = false): { agentId: string; cleaned: boolean; reason: string; command: string } {
+	const db = getTmuxAgentsDb();
+	const agent = candidate.agent;
+	const target = {
+		sessionId: agent.tmuxSessionId,
+		sessionName: agent.tmuxSessionName,
+		windowId: agent.tmuxWindowId,
+		paneId: agent.tmuxPaneId,
+	};
+	if (!tmuxTargetExists(target, getTmuxInventory())) {
+		return { agentId: agent.id, cleaned: false, reason: "tmux target already gone", command: "(already gone)" };
+	}
+	const result = stopTmuxTarget(target, true);
+	const now = Date.now();
+	const completionItems = candidate.attentionItems.filter((item) => item.kind === "complete");
+	if (completionItems.length > 0) {
+		updateAttentionItemsForAgent(
+			db,
+			agent.id,
+			{
+				state: "resolved",
+				updatedAt: now,
+				resolvedAt: now,
+				resolutionKind: "cleanup",
+				resolutionSummary: "Agent tmux target cleaned up after completion.",
+			},
+			{ states: OPEN_ATTENTION_STATES, kinds: ["complete"] },
+		);
+	}
+	if (force) {
+		const blockingKinds = candidate.attentionItems.filter((item) => item.kind !== "complete").map((item) => item.kind);
+		if (blockingKinds.length > 0) {
+			updateAttentionItemsForAgent(
+				db,
+				agent.id,
+				{
+					state: "cancelled",
+					updatedAt: now,
+					resolvedAt: now,
+					resolutionKind: "cleanup_force",
+					resolutionSummary: "Agent tmux target force-cleaned while unresolved attention remained.",
+				},
+				{ states: OPEN_ATTENTION_STATES, kinds: ["question", "question_for_user", "blocked"] },
+			);
+		}
+	}
+	createAgentEvent(db, {
+		id: randomUUID(),
+		agentId: agent.id,
+		eventType: "cleaned_up",
+		summary: force ? "Cleaned up tmux target with force." : "Cleaned up tmux target after terminal state.",
+		payload: { command: result.command, force },
+	});
+	updateAgent(db, agent.id, { updatedAt: now });
+	return { agentId: agent.id, cleaned: true, reason: force ? "force-cleaned" : "cleaned", command: result.command };
+}
+
+function formatCleanupCandidates(candidates: CleanupCandidate[], dryRun: boolean): string {
+	if (candidates.length === 0) {
+		return dryRun ? "No terminal agents matched for cleanup preview." : "No terminal agents matched for cleanup.";
+	}
+	const header = dryRun ? `Cleanup preview · ${candidates.length} candidate(s)` : `Cleanup candidates · ${candidates.length}`;
+	const body = candidates
+		.map((candidate) => {
+			const attention = candidate.attentionItems.length > 0 ? candidate.attentionItems.map((item) => item.kind).join(",") : "none";
+			return `${candidate.cleanupAllowed ? "✓" : "-"} ${candidate.agent.id} · ${candidate.agent.state} · ${candidate.reason} · attention=${attention}`;
+		})
+		.join("\n");
+	return `${header}\n\n${body}`;
+}
+
+function formatCleanupResults(
+	results: Array<{ agentId: string; cleaned: boolean; reason: string; command: string }>,
+	skipped: CleanupCandidate[],
+): string {
+	const cleaned = results.filter((result) => result.cleaned);
+	const lines = [
+		`Cleanup finished · ${cleaned.length} cleaned · ${skipped.length} skipped`,
+		"",
+		...cleaned.map((result) => `✓ ${result.agentId} · ${result.reason} · ${result.command}`),
+		...skipped.map((candidate) => `- ${candidate.agent.id} · ${candidate.reason}`),
+	];
+	return lines.join("\n");
 }
 
 function formatSpawnSuccess(result: SpawnSubagentResult): string {
@@ -1926,6 +2076,46 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerTool({
+		name: "subagent_cleanup",
+		label: "Subagent Cleanup",
+		description: "Remove finished child tmux targets after their work has been completed and synthesized.",
+		promptSnippet: "Clean up terminal child tmux windows that no longer need to remain open.",
+		promptGuidelines: [
+			"Use subagent_cleanup after completion has been reviewed or synthesized so old tmux windows do not accumulate.",
+			"Prefer dryRun=true first when you are unsure which agents are eligible.",
+			"Do not clean blocked or question-bearing agents unless force=true is intentional.",
+		],
+		parameters: SubagentCleanupParams,
+		prepareArguments(args) {
+			if (!args || typeof args !== "object") return args;
+			const input = args as { id?: string; ids?: string[] };
+			if (typeof input.id === "string" && !Array.isArray(input.ids)) {
+				return { ids: [input.id] };
+			}
+			return args;
+		},
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const candidates = listCleanupCandidates(ctx, params);
+			const dryRun = params.dryRun ?? false;
+			if (dryRun) {
+				updateFleetUi(ctx);
+				return {
+					content: [{ type: "text", text: formatCleanupCandidates(candidates, true) }],
+					details: { candidates, dryRun: true },
+				};
+			}
+			const ready = candidates.filter((candidate) => candidate.cleanupAllowed);
+			const skipped = candidates.filter((candidate) => !candidate.cleanupAllowed);
+			const results = ready.map((candidate) => cleanupAgentTarget(candidate, params.force ?? false));
+			updateFleetUi(ctx);
+			return {
+				content: [{ type: "text", text: formatCleanupResults(results, skipped) }],
+				details: { candidates, results, skipped, dryRun: false },
+			};
+		},
+	});
+
+	pi.registerTool({
 		name: "tmux_service_start",
 		label: "tmux Service Start",
 		description: "Launch a long-running command in a tracked tmux window and keep it available for focus, capture, and stop operations.",
@@ -2221,6 +2411,42 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 			);
 			const text = buildAttentionText(items, agentsById, false);
 			if (ctx.hasUI) await ctx.ui.editor("subagent attention", text);
+			else ctx.ui.notify(text, "info");
+			updateFleetUi(ctx);
+		},
+	});
+
+	pi.registerCommand("agent-cleanup", {
+		description: "Clean up completed/terminal child tmux targets",
+		handler: async (args, ctx) => {
+			const parts = args?.trim().split(/\s+/).filter(Boolean) ?? [];
+			const force = parts.includes("force") || parts.includes("--force");
+			const scope = parts.find((part) => ["all", "current_project", "current_session", "descendants"].includes(part)) as
+				| "all"
+				| "current_project"
+				| "current_session"
+				| "descendants"
+				| undefined;
+			const id = parts.find((part) => !["all", "current_project", "current_session", "descendants", "force", "--force"].includes(part));
+			if (parts.length > 0 && !scope && !id && !force) {
+				ctx.ui.notify("Usage: /agent-cleanup [<id>|all|current_project|current_session|descendants] [force]", "warning");
+				return;
+			}
+			const candidates = listCleanupCandidates(ctx, { scope: scope ?? "current_project", ids: id ? [id] : undefined, force, limit: 200 });
+			if (candidates.length === 0) {
+				ctx.ui.notify("No terminal agents matched for cleanup.", "info");
+				updateFleetUi(ctx);
+				return;
+			}
+			if (ctx.hasUI) {
+				const ok = await ctx.ui.confirm("Cleanup terminal agents", `${formatCleanupCandidates(candidates, true)}\n\nProceed?`);
+				if (!ok) return;
+			}
+			const ready = candidates.filter((candidate) => candidate.cleanupAllowed);
+			const skipped = candidates.filter((candidate) => !candidate.cleanupAllowed);
+			const results = ready.map((candidate) => cleanupAgentTarget(candidate, force));
+			const text = formatCleanupResults(results, skipped);
+			if (ctx.hasUI) await ctx.ui.editor("subagent cleanup", text);
 			else ctx.ui.notify(text, "info");
 			updateFleetUi(ctx);
 		},

@@ -17,6 +17,7 @@ Implemented so far:
   - `subagent_get`
   - `subagent_inbox`
   - `subagent_attention`
+  - `subagent_cleanup`
   - `tmux_service_start`
   - `tmux_service_list`
   - `tmux_service_get`
@@ -34,6 +35,7 @@ Implemented so far:
   - `/agent-capture <id> [lines]`
   - `/agent-sync`
   - `/agent-attention [scope]`
+  - `/agent-cleanup [scope] [force]`
   - `/service-start`
   - `/services [scope]`
   - `/service-open <id>`
@@ -80,6 +82,10 @@ Implemented so far:
   - Kanban-style TUI lanes for needs-user, waiting, blocked, in-progress, planned, and review/done
   - keyboard navigation across lanes and tickets
   - per-ticket inspect/focus/reply/stop/capture/spawn/sync actions
+- terminal agent cleanup behavior:
+  - cleanup candidates come from terminal agents with live tmux targets
+  - unresolved completion attention can be resolved during cleanup
+  - unresolved blocker/question attention prevents cleanup unless force is intentional
 - initial agent profile prompts under `~/.pi/agent/agents/`
 - orchestration skills under `~/.pi/agent/skills/`
 - workflow prompt templates under `~/.pi/agent/prompts/`
