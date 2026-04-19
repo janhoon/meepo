@@ -6,6 +6,7 @@ import { DynamicBorder } from "@mariozechner/pi-coding-agent";
 import { StringEnum } from "@mariozechner/pi-ai";
 import { Container, Key, type SelectItem, SelectList, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
+import { openAgentsBoard, type AgentsBoardData, type AgentsBoardState, type BoardLaneId, type BoardTicket } from "./board.js";
 import { registerChildRuntime, getChildRuntimeEnvironment } from "./child-runtime.js";
 import { openAgentsDashboard, type AgentsDashboardData, type AgentsDashboardState } from "./dashboard.js";
 import { closeTmuxAgentsDb, getTmuxAgentsDb } from "./db.js";
@@ -18,8 +19,10 @@ import {
 	getAgent,
 	getFleetSummary,
 	listAgents,
+	listAttentionItems,
 	listInboxMessages,
 	updateAgent,
+	updateAttentionItemsForAgent,
 } from "./registry.js";
 import { getService, listServices, updateService } from "./service-registry.js";
 import { readServiceStatus, spawnService, tailFileLines } from "./service-spawn.js";
@@ -35,6 +38,7 @@ import type {
 import type {
 	AgentMessageRecord,
 	AgentSummary,
+	AttentionItemRecord,
 	DeliveryMode,
 	FleetSummary,
 	ListAgentsFilters,
@@ -130,6 +134,18 @@ const SubagentInboxParams = Type.Object({
 	includeDelivered: Type.Optional(
 		Type.Boolean({ description: "Include messages already marked delivered/acked.", default: false }),
 	),
+});
+
+const ATTENTION_AUDIENCE_SCOPE = StringEnum(["all", "coordinator", "user"] as const, {
+	description: "Which audience slice of attention items to inspect.",
+	default: "all",
+});
+
+const SubagentAttentionParams = Type.Object({
+	scope: Type.Optional(LIST_SCOPE),
+	audience: Type.Optional(ATTENTION_AUDIENCE_SCOPE),
+	includeResolved: Type.Optional(Type.Boolean({ description: "Include resolved/cancelled/superseded attention items.", default: false })),
+	limit: Type.Optional(Type.Integer({ description: "Maximum number of attention items to return.", minimum: 1, maximum: 500, default: 100 })),
 });
 
 const SERVICE_SCOPE = StringEnum(["all", "current_project", "current_session"] as const, {
@@ -362,62 +378,66 @@ function resolveAgentFilters(
 }
 
 function formatFleetSummary(summary: FleetSummary): string | undefined {
-	if (summary.active === 0 && summary.blocked === 0 && summary.userQuestions === 0 && summary.unread === 0) {
+	if (summary.active === 0 && summary.attentionOpen === 0 && summary.unread === 0) {
 		return undefined;
 	}
-	const userQuestionLabel = summary.userQuestions === 1 ? "user question" : "user questions";
-	return `🤖 ${summary.active} active · ${summary.blocked} blocked · ${summary.userQuestions} ${userQuestionLabel} · ${summary.unread} unread`;
+	return `🤖 ${summary.active} active · ${summary.blocked} blocked · ${summary.attentionWaitingOnUser} waiting-user · ${summary.attentionOpen} open attention · ${summary.unread} unread`;
 }
 
-function pickAttentionAgents(agents: AgentSummary[]): AgentSummary[] {
-	return [...agents]
-		.sort((left, right) => {
-			const leftPriority =
-				left.latestUnreadMessage?.kind === "question_for_user"
-					? 0
-					: left.latestUnreadMessage?.kind === "question"
-						? 1
-						: left.state === "blocked"
-							? 2
-							: left.latestUnreadMessage?.kind === "complete"
-								? 3
-								: left.unreadCount > 0
-									? 4
-									: 5;
-			const rightPriority =
-				right.latestUnreadMessage?.kind === "question_for_user"
-					? 0
-					: right.latestUnreadMessage?.kind === "question"
-						? 1
-						: right.state === "blocked"
-							? 2
-							: right.latestUnreadMessage?.kind === "complete"
-								? 3
-								: right.unreadCount > 0
-									? 4
-									: 5;
-			if (leftPriority !== rightPriority) return leftPriority - rightPriority;
-			return right.updatedAt - left.updatedAt;
-		})
-		.filter((agent) => agent.state === "blocked" || agent.unreadCount > 0)
-		.slice(0, 4);
+function attentionItemLabel(item: AttentionItemRecord): string {
+	switch (item.kind) {
+		case "question_for_user":
+			return item.state === "waiting_on_user" ? "waiting on user" : "user question";
+		case "question":
+			return "question";
+		case "blocked":
+			return "blocker";
+		case "complete":
+			return "completion";
+		default:
+			return item.kind;
+	}
+}
+
+function attentionItemIcon(item: AttentionItemRecord): string {
+	switch (item.kind) {
+		case "question_for_user":
+			return "❓";
+		case "question":
+			return "?";
+		case "blocked":
+			return "⛔";
+		case "complete":
+			return "✓";
+		default:
+			return "•";
+	}
 }
 
 function updateFleetUi(ctx: ExtensionContext): void {
 	const db = getTmuxAgentsDb();
-	const summary = getFleetSummary(db);
+	const projectKey = getProjectKey(ctx.cwd);
+	const summary = getFleetSummary(db, { projectKey });
 	ctx.ui.setStatus("tmux-agents", formatFleetSummary(summary));
-	const attentionAgents = pickAttentionAgents(listAgents(db, { unreadOnly: false, limit: 50 }));
-	if (attentionAgents.length === 0) {
+	const attentionItems = listAttentionItems(db, {
+		projectKey,
+		states: ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user"],
+		limit: 4,
+	});
+	if (attentionItems.length === 0) {
 		ctx.ui.setWidget("tmux-agents", undefined);
 		return;
 	}
-	const lines = attentionAgents.map((agent) => {
-		const label = agent.latestUnreadMessage ? messageKindLabel(agent.latestUnreadMessage) : agent.state;
-		return `${stateIcon(agent.state)} ${truncateText(agent.title, 40)} · ${label} · ${agent.id}`;
+	const agents = new Map(listAgents(db, { projectKey, limit: 100 }).map((agent) => [agent.id, agent]));
+	const lines = attentionItems.map((item) => {
+		const agent = agents.get(item.agentId);
+		const title = agent ? truncateText(agent.title, 34) : item.agentId;
+		return `${attentionItemIcon(item)} ${title} · ${attentionItemLabel(item)} · ${item.agentId}`;
 	});
 	ctx.ui.setWidget("tmux-agents", lines);
 }
+
+const OPEN_ATTENTION_STATES: AttentionItemRecord["state"][] = ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user"];
 
 function buildInboxText(messages: AgentMessageRecord[]): string {
 	if (messages.length === 0) return "No unread child-originated messages.";
@@ -427,6 +447,57 @@ function buildInboxText(messages: AgentMessageRecord[]): string {
 			return `${message.id} · ${message.kind} · ${message.targetKind} · sender=${message.senderAgentId ?? "-"}\n${payloadText}`;
 		})
 		.join("\n\n");
+}
+
+function resolveAttentionFilters(
+	ctx: ExtensionContext,
+	scope: "all" | "current_project" | "current_session" | "descendants",
+	params: { audience?: "all" | "coordinator" | "user"; includeResolved?: boolean; limit?: number },
+) {
+	const filters: import("./types.js").ListAttentionItemsFilters = {
+		limit: params.limit,
+		states: params.includeResolved ? undefined : OPEN_ATTENTION_STATES,
+	};
+	if (params.audience === "coordinator") filters.audiences = ["coordinator"];
+	if (params.audience === "user") filters.audiences = ["user"];
+	switch (scope) {
+		case "current_project":
+			filters.projectKey = getProjectKey(ctx.cwd);
+			break;
+		case "current_session":
+			filters.spawnSessionId = ctx.sessionManager.getSessionId();
+			filters.spawnSessionFile = ctx.sessionManager.getSessionFile();
+			break;
+		case "descendants":
+			filters.agentIds = getLinkedChildIds(ctx);
+			break;
+		case "all":
+		default:
+			break;
+	}
+	return filters;
+}
+
+function formatAttentionItemLine(item: AttentionItemRecord, agent: AgentSummary | undefined): string {
+	const title = agent ? truncateText(agent.title, 32) : item.agentId;
+	return `${attentionItemIcon(item)} ${item.kind} · ${item.state} · ${item.audience} · ${title} · ${item.agentId}`;
+}
+
+function buildAttentionText(items: AttentionItemRecord[], agentsById: Map<string, AgentSummary>, includeResolved: boolean): string {
+	if (items.length === 0) return includeResolved ? "No attention items matched." : "No open attention items.";
+	return items
+		.map((item) => {
+			const agent = agentsById.get(item.agentId);
+			const payloadText = truncateText(JSON.stringify(item.payload), 180);
+			return `${formatAttentionItemLine(item, agent)}\nsummary: ${item.summary}\npayload: ${payloadText}`;
+		})
+		.join("\n\n");
+}
+
+function formatAttentionGateWarning(items: AttentionItemRecord[], agentsById: Map<string, AgentSummary>): string {
+	if (items.length === 0) return "";
+	const preview = items.slice(0, 3).map((item) => `- ${formatAttentionItemLine(item, agentsById.get(item.agentId))}`).join("\n");
+	return `Attention gate: ${items.length} unresolved attention item(s) already exist.\n${preview}`;
 }
 
 function formatSpawnSuccess(result: SpawnSubagentResult): string {
@@ -493,6 +564,35 @@ function queueDownwardMessage(
 		summary: payload.summary,
 		payload: { deliveryMode, ...payload },
 	});
+	if (kind === "cancel") {
+		updateAttentionItemsForAgent(
+			db,
+			agent.id,
+			{
+				state: "cancelled",
+				updatedAt: Date.now(),
+				resolvedAt: Date.now(),
+				resolutionKind: kind,
+				resolutionSummary: payload.summary,
+			},
+			{ states: ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user"] },
+		);
+	} else if (["answer", "redirect", "priority", "note"].includes(kind)) {
+		updateAttentionItemsForAgent(
+			db,
+			agent.id,
+			{
+				state: "acknowledged",
+				updatedAt: Date.now(),
+				resolutionKind: kind,
+				resolutionSummary: payload.summary,
+			},
+			{
+				states: ["open", "waiting_on_coordinator", "waiting_on_user"],
+				kinds: ["question", "question_for_user", "blocked"],
+			},
+		);
+	}
 	updateAgent(db, agent.id, { updatedAt: Date.now() });
 }
 
@@ -536,6 +636,18 @@ function stopAgentById(id: string, force: boolean, reason?: string): {
 			finishedAt: Date.now(),
 			lastError: reason?.trim() || agent.lastError,
 		});
+		updateAttentionItemsForAgent(
+			getTmuxAgentsDb(),
+			agent.id,
+			{
+				state: "cancelled",
+				updatedAt: Date.now(),
+				resolvedAt: Date.now(),
+				resolutionKind: "force_stop",
+				resolutionSummary: reason?.trim() || "tmux target missing; registry marked stopped.",
+			},
+			{ states: ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user"] },
+		);
 		createAgentEvent(getTmuxAgentsDb(), {
 			id: randomUUID(),
 			agentId: agent.id,
@@ -575,6 +687,18 @@ function stopAgentById(id: string, force: boolean, reason?: string): {
 			finishedAt: Date.now(),
 			lastError: reason?.trim() || agent.lastError,
 		});
+		updateAttentionItemsForAgent(
+			getTmuxAgentsDb(),
+			agent.id,
+			{
+				state: "cancelled",
+				updatedAt: Date.now(),
+				resolvedAt: Date.now(),
+				resolutionKind: "force_stop",
+				resolutionSummary: reason?.trim() || "Force stop issued by coordinator.",
+			},
+			{ states: ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user"] },
+		);
 		createAgentEvent(getTmuxAgentsDb(), {
 			id: randomUUID(),
 			agentId: agent.id,
@@ -1223,6 +1347,101 @@ function buildDashboardData(ctx: ExtensionContext): AgentsDashboardData {
 	};
 }
 
+function boardLaneForAgent(agent: AgentSummary, attention: AttentionItemRecord | undefined): BoardLaneId {
+	if (attention?.kind === "question_for_user") return "needs_user";
+	if (attention?.kind === "blocked" || agent.state === "blocked") return "blocked";
+	if (attention?.kind === "question" || agent.state === "waiting") return "waiting";
+	if (attention?.kind === "complete") return "review_done";
+	if (["launching", "running", "idle"].includes(agent.state)) return "in_progress";
+	if (["done", "error", "stopped", "lost"].includes(agent.state)) return "review_done";
+	return "planned";
+}
+
+function buildBoardScopeData(agents: AgentSummary[], attentionItems: AttentionItemRecord[]): AgentsBoardData["scopes"]["all"] {
+	const attentionByAgent = new Map<string, AttentionItemRecord[]>();
+	for (const item of attentionItems) {
+		const items = attentionByAgent.get(item.agentId) ?? [];
+		items.push(item);
+		attentionByAgent.set(item.agentId, items);
+	}
+	for (const items of attentionByAgent.values()) {
+		items.sort((left, right) => left.priority - right.priority || right.updatedAt - left.updatedAt);
+	}
+	const lanes: Record<BoardLaneId, BoardTicket[]> = {
+		needs_user: [],
+		waiting: [],
+		blocked: [],
+		in_progress: [],
+		planned: [],
+		review_done: [],
+	};
+	const agentsById = new Map<string, AgentSummary>();
+	const ticketsByAgentId = new Map<string, BoardTicket>();
+	for (const agent of agents) {
+		agentsById.set(agent.id, agent);
+		const attention = attentionByAgent.get(agent.id)?.[0];
+		const laneId = boardLaneForAgent(agent, attention);
+		const ticket: BoardTicket = {
+			agentId: agent.id,
+			laneId,
+			title: agent.title,
+			profile: agent.profile,
+			state: agent.state,
+			model: agent.model,
+			updatedAt: Math.max(agent.updatedAt, attention?.updatedAt ?? 0),
+			unreadCount: agent.unreadCount,
+			attentionKind: attention?.kind ?? null,
+			attentionState: attention?.state ?? null,
+			attentionSummary: attention?.summary ?? null,
+			summary: attention?.summary ?? agent.finalSummary ?? agent.lastAssistantPreview ?? agent.task,
+		};
+		lanes[laneId].push(ticket);
+		ticketsByAgentId.set(agent.id, ticket);
+	}
+	for (const laneId of Object.keys(lanes) as BoardLaneId[]) {
+		lanes[laneId].sort((left, right) => {
+			const leftAttention = left.attentionKind ? 0 : 1;
+			const rightAttention = right.attentionKind ? 0 : 1;
+			if (leftAttention !== rightAttention) return leftAttention - rightAttention;
+			return right.updatedAt - left.updatedAt;
+		});
+	}
+	return { lanes, agentsById, ticketsByAgentId };
+}
+
+function buildBoardData(ctx: ExtensionContext): AgentsBoardData {
+	const db = getTmuxAgentsDb();
+	const scopeAgents = {
+		all: listAgents(db, { limit: 200 }),
+		current_project: listAgents(db, { projectKey: getProjectKey(ctx.cwd), limit: 200 }),
+		current_session: listAgents(db, {
+			spawnSessionId: ctx.sessionManager.getSessionId(),
+			spawnSessionFile: ctx.sessionManager.getSessionFile(),
+			limit: 200,
+		}),
+		descendants: listAgents(db, { descendantOf: getLinkedChildIds(ctx), limit: 200 }),
+	};
+	const scopeAttention = {
+		all: listAttentionItems(db, { states: OPEN_ATTENTION_STATES, limit: 500 }),
+		current_project: listAttentionItems(db, { projectKey: getProjectKey(ctx.cwd), states: OPEN_ATTENTION_STATES, limit: 500 }),
+		current_session: listAttentionItems(db, {
+			spawnSessionId: ctx.sessionManager.getSessionId(),
+			spawnSessionFile: ctx.sessionManager.getSessionFile(),
+			states: OPEN_ATTENTION_STATES,
+			limit: 500,
+		}),
+		descendants: listAttentionItems(db, { agentIds: getLinkedChildIds(ctx), states: OPEN_ATTENTION_STATES, limit: 500 }),
+	};
+	return {
+		scopes: {
+			all: buildBoardScopeData(scopeAgents.all, scopeAttention.all),
+			current_project: buildBoardScopeData(scopeAgents.current_project, scopeAttention.current_project),
+			current_session: buildBoardScopeData(scopeAgents.current_session, scopeAttention.current_session),
+			descendants: buildBoardScopeData(scopeAgents.descendants, scopeAttention.descendants),
+		},
+	};
+}
+
 async function runReplyFlow(ctx: ExtensionContext, agentId: string): Promise<void> {
 	const agent = getAgent(getTmuxAgentsDb(), agentId);
 	if (!agent) throw new Error(`Unknown agent id \"${agentId}\".`);
@@ -1312,8 +1531,66 @@ async function runAgentsDashboard(pi: ExtensionAPI, ctx: ExtensionContext, initi
 	return state;
 }
 
+async function runAgentsBoard(pi: ExtensionAPI, ctx: ExtensionContext, initialState: AgentsBoardState): Promise<AgentsBoardState> {
+	let state = initialState;
+	while (ctx.hasUI) {
+		const action = await openAgentsBoard(ctx, buildBoardData(ctx), state);
+		if (!action || action.type === "close") return action?.state ?? state;
+		state = action.state;
+		const selectedId = action.selectedId;
+		if (!selectedId && action.type !== "spawn" && action.type !== "sync") continue;
+		try {
+			switch (action.type) {
+				case "inspect": {
+					const agent = getAgent(getTmuxAgentsDb(), selectedId!);
+					if (agent) await ctx.ui.editor(`Agent ${agent.id}`, formatAgentDetails(agent));
+					break;
+				}
+				case "focus": {
+					const { agent, result } = focusAgentById(selectedId!);
+					lastFocusedActiveAgentId = agent.id;
+					ctx.ui.notify(result.focused ? `Focused ${agent.id}.` : formatFocusResult(agent, result), result.focused ? "info" : "warning");
+					break;
+				}
+				case "stop":
+					await runStopFlow(ctx, selectedId!);
+					break;
+				case "reply":
+					await runReplyFlow(ctx, selectedId!);
+					break;
+				case "capture": {
+					const capture = captureAgentById(selectedId!, 200);
+					await ctx.ui.editor(`Capture ${capture.agent.id}`, capture.content || "(empty capture)");
+					break;
+				}
+				case "spawn":
+					await runSpawnWizard(pi, ctx);
+					break;
+				case "sync": {
+					const result = reconcileAgents(ctx, { scope: state.scope, activeOnly: false, limit: 200 });
+					ctx.ui.notify(formatReconcileResult(result), "info");
+					break;
+				}
+				case "close":
+				default:
+					return state;
+			}
+		} catch (error) {
+			ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+		}
+		updateFleetUi(ctx);
+	}
+	return state;
+}
+
 async function runSpawnWizard(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
 	if (!ctx.hasUI) return;
+	const gateItems = listAttentionItems(getTmuxAgentsDb(), resolveAttentionFilters(ctx, "current_project", { limit: 5 }));
+	if (gateItems.length > 0) {
+		const gateAgents = new Map(listAgents(getTmuxAgentsDb(), { projectKey: getProjectKey(ctx.cwd), limit: 100 }).map((agent) => [agent.id, agent]));
+		const ok = await ctx.ui.confirm("Open attention items", `${formatAttentionGateWarning(gateItems, gateAgents)}\n\nSpawn anyway?`);
+		if (!ok) return;
+	}
 	const profile = await chooseProfile(ctx);
 	if (!profile) return;
 	const title = await ctx.ui.input("Child title:", `${profile.name} task`);
@@ -1372,6 +1649,9 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 		blockedOnly: false,
 		unreadOnly: false,
 	};
+	let boardState: AgentsBoardState = {
+		scope: "current_project",
+	};
 
 	function cycleActiveAgent(ctx: ExtensionContext, direction: 1 | -1): void {
 		const agents = listAgents(getTmuxAgentsDb(), { projectKey: getProjectKey(ctx.cwd), activeOnly: true, limit: 200 });
@@ -1398,15 +1678,19 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 		promptSnippet: "Spawn a tracked tmux-backed child agent in a new window using a named profile, task, and optional cwd/model/tools overrides.",
 		promptGuidelines: [
 			"Use subagent_spawn when work should be delegated into an isolated child context.",
+			"Before spawning more work, inspect unresolved attention with subagent_attention and handle blockers/questions first when appropriate.",
 			"Pick the most appropriate profile and keep the delegated task narrowly scoped.",
 			"Do not pass `find` in tool overrides. Use `grep` and `bash` with `rg --files` instead.",
 		],
 		parameters: SubagentSpawnParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const gateItems = listAttentionItems(getTmuxAgentsDb(), resolveAttentionFilters(ctx, "current_project", { limit: 5 }));
+			const gateAgents = new Map(listAgents(getTmuxAgentsDb(), { projectKey: getProjectKey(ctx.cwd), limit: 100 }).map((agent) => [agent.id, agent]));
 			const result = spawnChildFromParams(pi, ctx, params);
+			const warning = formatAttentionGateWarning(gateItems, gateAgents);
 			return {
-				content: [{ type: "text", text: formatSpawnSuccess(result) }],
-				details: result,
+				content: [{ type: "text", text: `${warning ? `${warning}\n\n` : ""}${formatSpawnSuccess(result)}` }],
+				details: { result, attentionGate: gateItems },
 			};
 		},
 	});
@@ -1617,6 +1901,31 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerTool({
+		name: "subagent_attention",
+		label: "Subagent Attention",
+		description: "List open attention items derived from child questions, blockers, and completions.",
+		promptSnippet: "List open attention items for coordinator or user triage.",
+		promptGuidelines: [
+			"Use subagent_attention before spawning more work or giving a confident status answer when child questions, blockers, or completions may be pending.",
+			"Prefer this over raw inbox reads when you need the unresolved queue rather than low-level mailbox rows.",
+		],
+		parameters: SubagentAttentionParams,
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const scope = params.scope ?? "current_project";
+			const filters = resolveAttentionFilters(ctx, scope, params);
+			const items = listAttentionItems(getTmuxAgentsDb(), filters);
+			const agentsById = new Map(
+				listAgents(getTmuxAgentsDb(), { ids: [...new Set(items.map((item) => item.agentId))], limit: 200 }).map((agent) => [agent.id, agent]),
+			);
+			updateFleetUi(ctx);
+			return {
+				content: [{ type: "text", text: buildAttentionText(items, agentsById, params.includeResolved ?? false) }],
+				details: { scope, filters, items },
+			};
+		},
+	});
+
+	pi.registerTool({
 		name: "tmux_service_start",
 		label: "tmux Service Start",
 		description: "Launch a long-running command in a tracked tmux window and keep it available for focus, capture, and stop operations.",
@@ -1775,6 +2084,14 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 		},
 	});
 
+	pi.registerCommand("agent-board", {
+		description: "Open the tmux subagents Kanban-style board",
+		handler: async (_args, ctx) => {
+			boardState = await runAgentsBoard(pi, ctx, boardState);
+			updateFleetUi(ctx);
+		},
+	});
+
 	pi.registerCommand("agent-spawn", {
 		description: "Interactive tmux subagent spawn wizard",
 		handler: async (_args, ctx) => {
@@ -1889,6 +2206,26 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 		},
 	});
 
+	pi.registerCommand("agent-attention", {
+		description: "List unresolved subagent attention items",
+		handler: async (args, ctx) => {
+			const scope = (args?.trim() as "all" | "current_project" | "current_session" | "descendants" | undefined) ?? "current_project";
+			if (!["all", "current_project", "current_session", "descendants"].includes(scope)) {
+				ctx.ui.notify("Usage: /agent-attention [all|current_project|current_session|descendants]", "warning");
+				return;
+			}
+			const filters = resolveAttentionFilters(ctx, scope, { limit: 200 });
+			const items = listAttentionItems(getTmuxAgentsDb(), filters);
+			const agentsById = new Map(
+				listAgents(getTmuxAgentsDb(), { ids: [...new Set(items.map((item) => item.agentId))], limit: 200 }).map((agent) => [agent.id, agent]),
+			);
+			const text = buildAttentionText(items, agentsById, false);
+			if (ctx.hasUI) await ctx.ui.editor("subagent attention", text);
+			else ctx.ui.notify(text, "info");
+			updateFleetUi(ctx);
+		},
+	});
+
 	pi.registerCommand("service-start", {
 		description: "Interactive tmux service spawn wizard",
 		handler: async (_args, ctx) => {
@@ -1983,6 +2320,14 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 		description: "Open tracked tmux agents dashboard",
 		handler: async (ctx) => {
 			dashboardState = await runAgentsDashboard(pi, ctx, dashboardState);
+			updateFleetUi(ctx);
+		},
+	});
+
+	pi.registerShortcut(Key.ctrlAlt("b"), {
+		description: "Open tracked tmux agents board",
+		handler: async (ctx) => {
+			boardState = await runAgentsBoard(pi, ctx, boardState);
 			updateFleetUi(ctx);
 		},
 	});

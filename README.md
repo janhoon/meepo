@@ -85,6 +85,7 @@ pi install /path/to/meepo
 - `subagent_stop`
 - `subagent_message`
 - `subagent_inbox`
+- `subagent_attention`
 - `subagent_capture`
 - `subagent_reconcile`
 
@@ -103,12 +104,14 @@ pi install /path/to/meepo
 ### Agent control
 
 - `/agents`
+- `/agent-board`
 - `/agent-spawn`
 - `/agent-open <id>`
 - `/agent-stop <id> [force]`
 - `/agent-message <id> <kind> <message>`
 - `/agent-capture <id> [lines]`
 - `/agent-sync`
+- `/agent-attention [scope]`
 
 ### Service control
 
@@ -124,8 +127,9 @@ pi install /path/to/meepo
 1. Spawn a scout or planner.
 2. Let the child report back with a question, blocker, or completion.
 3. Reply with `subagent_message` instead of juggling detached terminals manually.
-4. Spin up a tracked service with `tmux_service_start` if the task needs an app server, watcher, or dev environment.
-5. Focus, capture, reconcile, or stop anything in the pack as needed.
+4. Open `/agent-board` when you want a Pi-native board view of waiting, blocked, active, and done work.
+5. Spin up a tracked service with `tmux_service_start` if the task needs an app server, watcher, or dev environment.
+6. Focus, capture, reconcile, or stop anything in the pack as needed.
 
 In other words: split the work, keep the replicas coordinated, and avoid the classic "which terminal was doing the important thing?" problem.
 

@@ -26,12 +26,26 @@ export const MESSAGE_KINDS = [
 ] as const;
 export const DELIVERY_MODES = ["immediate", "steer", "follow_up", "idle_only"] as const;
 export const MESSAGE_STATUSES = ["queued", "delivered", "acked", "failed", "expired"] as const;
+export const ATTENTION_ITEM_KINDS = ["question", "question_for_user", "blocked", "complete"] as const;
+export const ATTENTION_ITEM_AUDIENCES = ["coordinator", "user"] as const;
+export const ATTENTION_ITEM_STATES = [
+	"open",
+	"acknowledged",
+	"waiting_on_coordinator",
+	"waiting_on_user",
+	"resolved",
+	"cancelled",
+	"superseded",
+] as const;
 
 export type AgentState = (typeof AGENT_STATES)[number];
 export type MessageTargetKind = (typeof MESSAGE_TARGET_KINDS)[number];
 export type MessageKind = (typeof MESSAGE_KINDS)[number];
 export type DeliveryMode = (typeof DELIVERY_MODES)[number];
 export type MessageStatus = (typeof MESSAGE_STATUSES)[number];
+export type AttentionItemKind = (typeof ATTENTION_ITEM_KINDS)[number];
+export type AttentionItemAudience = (typeof ATTENTION_ITEM_AUDIENCES)[number];
+export type AttentionItemState = (typeof ATTENTION_ITEM_STATES)[number];
 
 export interface SessionChildLinkEntryData {
 	childId: string;
@@ -161,6 +175,27 @@ export interface AgentSummary {
 	latestUnreadMessage: AgentMessageRecord | null;
 }
 
+export interface AttentionItemRecord {
+	id: string;
+	messageId: string | null;
+	agentId: string;
+	threadId: string;
+	projectKey: string;
+	spawnSessionId: string | null;
+	spawnSessionFile: string | null;
+	audience: AttentionItemAudience;
+	kind: AttentionItemKind;
+	priority: number;
+	state: AttentionItemState;
+	summary: string;
+	payload: unknown;
+	createdAt: number;
+	updatedAt: number;
+	resolvedAt: number | null;
+	resolutionKind: string | null;
+	resolutionSummary: string | null;
+}
+
 export interface CreateAgentInput {
 	id: string;
 	parentAgentId?: string | null;
@@ -249,6 +284,38 @@ export interface CreateArtifactInput {
 	createdAt?: number;
 }
 
+export interface CreateAttentionItemInput {
+	id: string;
+	messageId?: string | null;
+	agentId: string;
+	threadId: string;
+	projectKey: string;
+	spawnSessionId?: string | null;
+	spawnSessionFile?: string | null;
+	audience: AttentionItemAudience;
+	kind: AttentionItemKind;
+	priority: number;
+	state: AttentionItemState;
+	summary: string;
+	payload?: unknown;
+	createdAt?: number;
+	updatedAt?: number;
+	resolvedAt?: number | null;
+	resolutionKind?: string | null;
+	resolutionSummary?: string | null;
+}
+
+export interface UpdateAttentionItemInput {
+	state?: AttentionItemState;
+	priority?: number;
+	summary?: string;
+	payload?: unknown;
+	updatedAt?: number;
+	resolvedAt?: number | null;
+	resolutionKind?: string | null;
+	resolutionSummary?: string | null;
+}
+
 export interface ListAgentsFilters {
 	ids?: string[];
 	projectKey?: string;
@@ -270,9 +337,23 @@ export interface ListInboxFilters {
 	limit?: number;
 }
 
+export interface ListAttentionItemsFilters {
+	projectKey?: string;
+	spawnSessionId?: string;
+	spawnSessionFile?: string;
+	agentIds?: string[];
+	states?: AttentionItemState[];
+	audiences?: AttentionItemAudience[];
+	kinds?: AttentionItemKind[];
+	limit?: number;
+}
+
 export interface FleetSummary {
 	active: number;
 	blocked: number;
 	userQuestions: number;
 	unread: number;
+	attentionOpen: number;
+	attentionWaitingOnUser: number;
+	attentionCompletions: number;
 }

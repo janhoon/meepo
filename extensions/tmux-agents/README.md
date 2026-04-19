@@ -16,6 +16,7 @@ Implemented so far:
   - `subagent_list`
   - `subagent_get`
   - `subagent_inbox`
+  - `subagent_attention`
   - `tmux_service_start`
   - `tmux_service_list`
   - `tmux_service_get`
@@ -25,12 +26,14 @@ Implemented so far:
   - `tmux_service_reconcile`
 - lightweight interactive commands and shortcuts:
   - `/agents`
+  - `/agent-board`
   - `/agent-spawn`
   - `/agent-open <id>`
   - `/agent-stop <id> [force]`
   - `/agent-message <id> <kind> <message>`
   - `/agent-capture <id> [lines]`
   - `/agent-sync`
+  - `/agent-attention [scope]`
   - `/service-start`
   - `/services [scope]`
   - `/service-open <id>`
@@ -38,6 +41,7 @@ Implemented so far:
   - `/service-capture <id> [lines]`
   - `/service-sync`
   - `Ctrl+Alt+A`
+  - `Ctrl+Alt+B`
   - `Ctrl+Alt+N`
   - `Ctrl+Alt+J`
   - `Ctrl+Alt+K`
@@ -64,6 +68,7 @@ Implemented so far:
   - auto `started` event
   - auto completion fallback on `agent_end`
   - `subagent_publish` tool for milestone/blocker/question/question_for_user/complete updates
+  - first-class attention items for question/blocker/completion events
   - downward child message delivery from registry into the live child session
   - delivered/acked transitions for downward child messages
   - live registry + `latest-status.json` preview updates while the child runs
@@ -71,11 +76,17 @@ Implemented so far:
   - list view with scope/filter/sort controls
   - detail pane with parent/child relationships
   - in-dashboard focus/stop/reply/capture/spawn/sync actions
+- first-pass Pi-native board behavior:
+  - Kanban-style TUI lanes for needs-user, waiting, blocked, in-progress, planned, and review/done
+  - keyboard navigation across lanes and tickets
+  - per-ticket inspect/focus/reply/stop/capture/spawn/sync actions
 - initial agent profile prompts under `~/.pi/agent/agents/`
 - orchestration skills under `~/.pi/agent/skills/`
 - workflow prompt templates under `~/.pi/agent/prompts/`
 
 Not implemented yet:
+- manual lane movement / persistent planned-ticket management
+- richer attention-queue UI and coordinator routing polish
 - richer child reply/ack UI polish
 - stronger reconciliation polish around edge cases
 - more capture/transcript options

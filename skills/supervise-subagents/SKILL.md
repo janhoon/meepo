@@ -19,7 +19,9 @@ Always triage in this order:
 
 ## Rules
 
-- Use `subagent_inbox` and `subagent_list` as the primary supervision surfaces.
+- Use `subagent_attention` as the primary unresolved-attention queue.
+- Use `subagent_inbox` when you need the raw mailbox rows behind an attention item.
+- Use `subagent_list` to understand the current fleet and ownership.
 - Use `subagent_get` only for targeted drill-down.
 - Prefer answering questions and unblocking children before spawning new ones.
 - Use `subagent_reconcile` if tmux state or registry state looks stale.
@@ -28,9 +30,10 @@ Always triage in this order:
 
 ## Suggested loop
 
-1. Read `subagent_inbox`.
-2. List the current fleet with `subagent_list`.
-3. Triage highest-priority unread items.
-4. Send `subagent_message` replies or `subagent_stop` requests where appropriate.
-5. Reconcile stale items if needed.
-6. Summarize the fleet for the user in priority order.
+1. Read `subagent_attention`.
+2. Use `subagent_inbox` only when you need the raw published message details.
+3. List the current fleet with `subagent_list`.
+4. Triage highest-priority unresolved items.
+5. Send `subagent_message` replies or `subagent_stop` requests where appropriate.
+6. Reconcile stale items if needed.
+7. Summarize the fleet for the user in priority order.

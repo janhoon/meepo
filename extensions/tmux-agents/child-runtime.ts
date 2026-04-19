@@ -8,7 +8,15 @@ import { StringEnum } from "@mariozechner/pi-ai";
 import { Type } from "@sinclair/typebox";
 import { randomUUID } from "node:crypto";
 import { getTmuxAgentsDb } from "./db.js";
-import { createAgentEvent, createAgentMessage, listMessagesForRecipient, markAgentMessages, updateAgent } from "./registry.js";
+import {
+	createAgentEvent,
+	createAgentMessage,
+	createAttentionItem,
+	getAgent,
+	listMessagesForRecipient,
+	markAgentMessages,
+	updateAgent,
+} from "./registry.js";
 import type { AgentMessageRecord, ChildRuntimeEnvironment, RuntimeStatusSnapshot, SubagentPublishPayload } from "./types.js";
 
 const CHILD_PUBLISH_KIND = StringEnum(["milestone", "blocked", "question", "question_for_user", "note", "complete"] as const, {
@@ -112,6 +120,21 @@ function writeLatestStatus(environment: ChildRuntimeEnvironment, snapshot: Runti
 	writeFileSync(join(environment.runDir, "latest-status.json"), `${JSON.stringify(snapshot, null, 2)}\n`);
 }
 
+function attentionPriority(kind: SubagentPublishPayload["kind"]): number | null {
+	switch (kind) {
+		case "question_for_user":
+			return 0;
+		case "question":
+			return 1;
+		case "blocked":
+			return 2;
+		case "complete":
+			return 3;
+		default:
+			return null;
+	}
+}
+
 function updateStatus(
 	environment: ChildRuntimeEnvironment,
 	ctx: ExtensionContext,
@@ -144,6 +167,7 @@ function publishChildUpdate(
 ): void {
 	const db = getTmuxAgentsDb();
 	const fullPayload: SubagentPublishPayload = { kind, ...payload };
+	const agent = getAgent(db, environment.childId);
 	createAgentEvent(db, {
 		id: randomUUID(),
 		agentId: environment.childId,
@@ -151,17 +175,38 @@ function publishChildUpdate(
 		summary: payload.summary,
 		payload: fullPayload,
 	});
+	const messageId = randomUUID();
+	const targetKind = kind === "question_for_user" ? "user" : "primary";
 	createAgentMessage(db, {
-		id: randomUUID(),
+		id: messageId,
 		threadId: environment.childId,
 		senderAgentId: environment.childId,
 		recipientAgentId: environment.parentAgentId,
-		targetKind: kind === "question_for_user" ? "user" : "primary",
+		targetKind,
 		kind,
 		deliveryMode: kind === "blocked" || kind === "question" || kind === "question_for_user" ? "immediate" : "follow_up",
 		payload: fullPayload,
 		status: "queued",
 	});
+	const priority = attentionPriority(kind);
+	if (priority !== null) {
+		const attentionKind = kind as "question" | "question_for_user" | "blocked" | "complete";
+		createAttentionItem(db, {
+			id: messageId,
+			messageId,
+			agentId: environment.childId,
+			threadId: environment.childId,
+			projectKey: agent?.projectKey ?? "unknown",
+			spawnSessionId: environment.spawnSessionId,
+			spawnSessionFile: environment.spawnSessionFile,
+			audience: targetKind === "user" ? "user" : "coordinator",
+			kind: attentionKind,
+			priority,
+			state: kind === "question_for_user" ? "waiting_on_user" : "waiting_on_coordinator",
+			summary: payload.summary,
+			payload: fullPayload,
+		});
+	}
 	appendRunEvent(environment, kind, payload.summary, fullPayload);
 	updateAgent(db, environment.childId, {
 		state,

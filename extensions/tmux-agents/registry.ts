@@ -3,14 +3,18 @@ import type {
 	AgentMessageRecord,
 	AgentState,
 	AgentSummary,
+	AttentionItemRecord,
 	CreateAgentEventInput,
 	CreateAgentInput,
 	CreateAgentMessageInput,
 	CreateArtifactInput,
+	CreateAttentionItemInput,
 	FleetSummary,
 	ListAgentsFilters,
+	ListAttentionItemsFilters,
 	ListInboxFilters,
 	UpdateAgentInput,
+	UpdateAttentionItemInput,
 } from "./types.js";
 
 const ACTIVE_STATES: AgentState[] = ["launching", "running", "idle", "waiting", "blocked"];
@@ -114,6 +118,29 @@ function toMailboxRecord(row: Record<string, unknown>): AgentMessageRecord {
 		createdAt: Number(row.created_at),
 		deliveredAt: (row.delivered_at as number | null) ?? null,
 		ackedAt: (row.acked_at as number | null) ?? null,
+	};
+}
+
+function toAttentionItemRecord(row: Record<string, unknown>): AttentionItemRecord {
+	return {
+		id: row.id as string,
+		messageId: (row.message_id as string | null) ?? null,
+		agentId: row.agent_id as string,
+		threadId: row.thread_id as string,
+		projectKey: row.project_key as string,
+		spawnSessionId: (row.spawn_session_id as string | null) ?? null,
+		spawnSessionFile: (row.spawn_session_file as string | null) ?? null,
+		audience: row.audience as AttentionItemRecord["audience"],
+		kind: row.kind as AttentionItemRecord["kind"],
+		priority: Number(row.priority ?? 0),
+		state: row.state as AttentionItemRecord["state"],
+		summary: row.summary as string,
+		payload: safeJsonParse(row.payload_json as string | null, null),
+		createdAt: Number(row.created_at),
+		updatedAt: Number(row.updated_at),
+		resolvedAt: (row.resolved_at as number | null) ?? null,
+		resolutionKind: (row.resolution_kind as string | null) ?? null,
+		resolutionSummary: (row.resolution_summary as string | null) ?? null,
 	};
 }
 
@@ -296,6 +323,194 @@ export function createArtifact(db: DatabaseSync, input: CreateArtifactInput): vo
 		input.metadata === undefined ? null : JSON.stringify(input.metadata),
 		input.createdAt ?? Date.now(),
 	);
+}
+
+export function createAttentionItem(db: DatabaseSync, input: CreateAttentionItemInput): void {
+	const createdAt = input.createdAt ?? Date.now();
+	const updatedAt = input.updatedAt ?? createdAt;
+	db.prepare(
+		`INSERT OR REPLACE INTO attention_items (
+			id,
+			message_id,
+			agent_id,
+			thread_id,
+			project_key,
+			spawn_session_id,
+			spawn_session_file,
+			audience,
+			kind,
+			priority,
+			state,
+			summary,
+			payload_json,
+			created_at,
+			updated_at,
+			resolved_at,
+			resolution_kind,
+			resolution_summary
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	).run(
+		input.id,
+		input.messageId ?? null,
+		input.agentId,
+		input.threadId,
+		input.projectKey,
+		input.spawnSessionId ?? null,
+		input.spawnSessionFile ?? null,
+		input.audience,
+		input.kind,
+		input.priority,
+		input.state,
+		input.summary,
+		input.payload === undefined ? null : JSON.stringify(input.payload),
+		createdAt,
+		updatedAt,
+		input.resolvedAt ?? null,
+		input.resolutionKind ?? null,
+		input.resolutionSummary ?? null,
+	);
+}
+
+export function updateAttentionItem(db: DatabaseSync, id: string, patch: UpdateAttentionItemInput): void {
+	const assignments: string[] = [];
+	const params: unknown[] = [];
+	if (patch.state !== undefined) {
+		assignments.push("state = ?");
+		params.push(patch.state);
+	}
+	if (patch.priority !== undefined) {
+		assignments.push("priority = ?");
+		params.push(patch.priority);
+	}
+	if (patch.summary !== undefined) {
+		assignments.push("summary = ?");
+		params.push(patch.summary);
+	}
+	if (patch.payload !== undefined) {
+		assignments.push("payload_json = ?");
+		params.push(JSON.stringify(patch.payload));
+	}
+	if (patch.updatedAt !== undefined) {
+		assignments.push("updated_at = ?");
+		params.push(patch.updatedAt);
+	}
+	if (patch.resolvedAt !== undefined) {
+		assignments.push("resolved_at = ?");
+		params.push(patch.resolvedAt);
+	}
+	if (patch.resolutionKind !== undefined) {
+		assignments.push("resolution_kind = ?");
+		params.push(patch.resolutionKind);
+	}
+	if (patch.resolutionSummary !== undefined) {
+		assignments.push("resolution_summary = ?");
+		params.push(patch.resolutionSummary);
+	}
+	if (assignments.length === 0) return;
+	params.push(id);
+	db.prepare(`UPDATE attention_items SET ${assignments.join(", ")} WHERE id = ?`).run(...params);
+}
+
+export function updateAttentionItemsForAgent(
+	db: DatabaseSync,
+	agentId: string,
+	patch: UpdateAttentionItemInput,
+	filters: {
+		states?: AttentionItemRecord["state"][];
+		kinds?: AttentionItemRecord["kind"][];
+		audiences?: AttentionItemRecord["audience"][];
+	} = {},
+): number {
+	const assignments: string[] = [];
+	const params: unknown[] = [];
+	if (patch.state !== undefined) {
+		assignments.push("state = ?");
+		params.push(patch.state);
+	}
+	if (patch.priority !== undefined) {
+		assignments.push("priority = ?");
+		params.push(patch.priority);
+	}
+	if (patch.summary !== undefined) {
+		assignments.push("summary = ?");
+		params.push(patch.summary);
+	}
+	if (patch.payload !== undefined) {
+		assignments.push("payload_json = ?");
+		params.push(JSON.stringify(patch.payload));
+	}
+	assignments.push("updated_at = ?");
+	params.push(patch.updatedAt ?? Date.now());
+	if (patch.resolvedAt !== undefined) {
+		assignments.push("resolved_at = ?");
+		params.push(patch.resolvedAt);
+	}
+	if (patch.resolutionKind !== undefined) {
+		assignments.push("resolution_kind = ?");
+		params.push(patch.resolutionKind);
+	}
+	if (patch.resolutionSummary !== undefined) {
+		assignments.push("resolution_summary = ?");
+		params.push(patch.resolutionSummary);
+	}
+	const where: string[] = ["agent_id = ?"];
+	params.push(agentId);
+	if (filters.states && filters.states.length > 0) {
+		where.push(`state IN (${makePlaceholders(filters.states.length)})`);
+		params.push(...filters.states);
+	}
+	if (filters.kinds && filters.kinds.length > 0) {
+		where.push(`kind IN (${makePlaceholders(filters.kinds.length)})`);
+		params.push(...filters.kinds);
+	}
+	if (filters.audiences && filters.audiences.length > 0) {
+		where.push(`audience IN (${makePlaceholders(filters.audiences.length)})`);
+		params.push(...filters.audiences);
+	}
+	const result = db.prepare(`UPDATE attention_items SET ${assignments.join(", ")} WHERE ${where.join(" AND ")}`).run(...params) as {
+		changes?: number;
+	};
+	return Number(result.changes ?? 0);
+}
+
+export function listAttentionItems(db: DatabaseSync, filters: ListAttentionItemsFilters = {}): AttentionItemRecord[] {
+	if (filters.agentIds && filters.agentIds.length === 0) return [];
+	const where: string[] = [];
+	const params: unknown[] = [];
+	if (filters.projectKey) {
+		where.push("project_key = ?");
+		params.push(filters.projectKey);
+	}
+	addSessionScopeFilter(where, params, filters.spawnSessionId, filters.spawnSessionFile, "attention_items");
+	if (filters.agentIds && filters.agentIds.length > 0) {
+		where.push(`agent_id IN (${makePlaceholders(filters.agentIds.length)})`);
+		params.push(...filters.agentIds);
+	}
+	if (filters.states && filters.states.length > 0) {
+		where.push(`state IN (${makePlaceholders(filters.states.length)})`);
+		params.push(...filters.states);
+	}
+	if (filters.audiences && filters.audiences.length > 0) {
+		where.push(`audience IN (${makePlaceholders(filters.audiences.length)})`);
+		params.push(...filters.audiences);
+	}
+	if (filters.kinds && filters.kinds.length > 0) {
+		where.push(`kind IN (${makePlaceholders(filters.kinds.length)})`);
+		params.push(...filters.kinds);
+	}
+	const limit = Math.max(1, Math.min(filters.limit ?? 100, 500));
+	params.push(limit);
+	const whereClause = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
+	const rows = db
+		.prepare(
+			`SELECT *
+			 FROM attention_items
+			 ${whereClause}
+			 ORDER BY priority ASC, updated_at DESC, created_at ASC
+			 LIMIT ?`,
+		)
+		.all(...params) as Array<Record<string, unknown>>;
+	return rows.map(toAttentionItemRecord);
 }
 
 export function listDescendantAgentIds(db: DatabaseSync, parentIds: string[]): string[] {
@@ -563,6 +778,14 @@ export function getFleetSummary(
 	}
 	addSessionScopeFilter(where, params, filters.spawnSessionId, filters.spawnSessionFile);
 	const whereClause = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
+	const attentionWhere: string[] = ["state IN ('open', 'acknowledged', 'waiting_on_coordinator', 'waiting_on_user')"];
+	const attentionParams: unknown[] = [];
+	if (filters.projectKey) {
+		attentionWhere.push("project_key = ?");
+		attentionParams.push(filters.projectKey);
+	}
+	addSessionScopeFilter(attentionWhere, attentionParams, filters.spawnSessionId, filters.spawnSessionFile, "attention_items");
+	const attentionWhereClause = attentionWhere.length > 0 ? `WHERE ${attentionWhere.join(" AND ")}` : "";
 	const row = db
 		.prepare(
 			`SELECT
@@ -570,10 +793,10 @@ export function getFleetSummary(
 				SUM(CASE WHEN a.state = 'blocked' THEN 1 ELSE 0 END) AS blocked,
 				SUM(CASE WHEN EXISTS (
 					SELECT 1
-					FROM agent_messages m
-					WHERE m.sender_agent_id = a.id
-						AND m.status = 'queued'
-						AND m.kind = 'question_for_user'
+					FROM attention_items ai
+					WHERE ai.agent_id = a.id
+						AND ai.state IN ('open', 'acknowledged', 'waiting_on_user')
+						AND ai.kind = 'question_for_user'
 				) THEN 1 ELSE 0 END) AS user_questions,
 				COALESCE(SUM((
 					SELECT COUNT(*)
@@ -581,16 +804,34 @@ export function getFleetSummary(
 					WHERE m.sender_agent_id = a.id
 						AND m.status = 'queued'
 						AND m.target_kind IN ('primary', 'user')
-				)), 0) AS unread
+				)), 0) AS unread,
+				(
+					SELECT COUNT(*)
+					FROM attention_items
+					${attentionWhereClause}
+				) AS attention_open,
+				(
+					SELECT COUNT(*)
+					FROM attention_items
+					${attentionWhereClause} AND audience = 'user'
+				) AS attention_waiting_on_user,
+				(
+					SELECT COUNT(*)
+					FROM attention_items
+					${attentionWhereClause} AND kind = 'complete'
+				) AS attention_completions
 			FROM agents a
 			${whereClause}`,
 		)
-		.get(...ACTIVE_STATES, ...params) as
+		.get(...ACTIVE_STATES, ...attentionParams, ...attentionParams, ...attentionParams, ...params) as
 		| {
 				active?: number | null;
 				blocked?: number | null;
 				user_questions?: number | null;
 				unread?: number | null;
+				attention_open?: number | null;
+				attention_waiting_on_user?: number | null;
+				attention_completions?: number | null;
 		  }
 		| undefined;
 	return {
@@ -598,5 +839,8 @@ export function getFleetSummary(
 		blocked: Number(row?.blocked ?? 0),
 		userQuestions: Number(row?.user_questions ?? 0),
 		unread: Number(row?.unread ?? 0),
+		attentionOpen: Number(row?.attention_open ?? 0),
+		attentionWaitingOnUser: Number(row?.attention_waiting_on_user ?? 0),
+		attentionCompletions: Number(row?.attention_completions ?? 0),
 	};
 }
