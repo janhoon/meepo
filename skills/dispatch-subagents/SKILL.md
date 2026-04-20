@@ -9,13 +9,16 @@ Use this skill when work should be split across specialized child agents or isol
 
 ## Rules
 
+- The board tracks tasks, not agents.
+- Prefer existing task tickets before creating new ones.
 - Prefer existing active children before spawning duplicates.
+- Attach new children to an existing `taskId` whenever possible.
 - Choose the narrowest useful profile:
   - `scout` for recon and file discovery
-  - `planner` for implementation planning
+  - `planner` for task refinement and implementation planning
   - `worker` for execution
   - `reviewer` for review and verification
-  - `coordinator-helper` for synthesis across multiple children
+  - `coordinator-helper` for synthesis across multiple tasks/children
 - Keep each child task focused and concrete.
 - Include exact file paths and expected deliverables in the delegated task.
 - Do not ask children to use `find`.
@@ -23,15 +26,19 @@ Use this skill when work should be split across specialized child agents or isol
 
 ## Suggested flow
 
-1. Use `subagent_list` to inspect already tracked children.
-2. If no suitable child exists, use `subagent_spawn` with a clear title, task, and profile.
-3. Tell the child exactly what outcome you want, not just the topic area.
-4. Rely on proactive child reporting through `subagent_publish` / inbox updates.
-5. Use `subagent_inbox` and `subagent_get` to supervise without polling for status generation.
+1. Use `task_list` to inspect whether the work already has a task.
+2. Create the task with `task_create` if needed.
+3. Use `subagent_list` to inspect already tracked children.
+4. If no suitable child exists, use `subagent_spawn` with a clear title, task, profile, and `taskId`.
+5. Tell the child exactly what outcome you want, not just the topic area.
+6. If a planner creates follow-on tasks, inspect them with `task_list` / `task_get` and then spawn the next agent against the selected task id.
+7. Rely on proactive child reporting through inbox/task updates instead of status polling.
+8. Use `subagent_inbox`, `subagent_get`, and `task_get` to supervise without polling for status generation.
 
 ## Task-writing pattern
 
 A good delegated task includes:
+- linked task id
 - scope
 - exact files or directories to start from
 - required output format
@@ -41,4 +48,4 @@ Example:
 
 - Title: `auth scout`
 - Profile: `scout`
-- Task: `Map the authentication flow for login and token refresh. Start with src/auth and src/api. Return exact file paths, key functions, and the first file a worker should edit. If blocked, publish one concrete question.`
+- Task: `Task task_abc123. Map the authentication flow for login and token refresh. Start with src/auth and src/api. Return exact file paths, key functions, and the first file a worker should edit. If blocked, publish one concrete question and recommend the task state.`

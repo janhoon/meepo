@@ -80,7 +80,8 @@ This tracker follows `TMUX_SUBAGENTS_IMPLEMENTATION.md`.
 
 ### 6. Commands and shortcuts
 - [x] `/agents`
-- [x] `/agent-spawn`
+- [x] `/task-board`
+- [x] `/task-spawn`
 - [x] `/agent-open`
 - [x] `/agent-stop`
 - [x] `/agent-message`
@@ -225,7 +226,7 @@ These items are easy to regress and should be verified repeatedly.
   - `subagent_message`
   - `subagent_capture`
   - `subagent_reconcile`
-  - `/agent-spawn`
+  - `/task-spawn`
   - `/agent-open`
   - `/agent-stop`
   - `/agent-message`
@@ -265,7 +266,7 @@ These items are easy to regress and should be verified repeatedly.
   - `implement-and-review`
 - Smoke-tested extension load via:
   - `pi --no-session -p '/agent-sync'`
-  - `pi --no-session -p '/agent-spawn'`
+  - `pi --no-session -p '/task-spawn'`
   - `pi --no-session -p '/agent-message foo answer hi'`
   - `pi --no-session -p '/agent-stop foo force'`
   - `pi --no-session -p '/agent-capture foo 50'`

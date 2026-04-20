@@ -1,12 +1,22 @@
 # tmux-agents extension
 
-Current implementation status: **registry + spawn/runtime + control/dashboard foundation**, plus tracked tmux service launches for long-running commands.
+Current implementation status: **task-first board + task registry + agent/runtime control foundation**, plus tracked tmux service launches for long-running commands.
 
 Implemented so far:
 - global SQLite bootstrap at `~/.pi/agent/subagents.db`
 - schema + migrations for `agents`, `agent_messages`, `agent_events`, and `artifacts`
 - registry helper functions for create/update/list/get/message/event/artifact operations
 - model-callable coordinator tools:
+  - `task_create`
+  - `task_list`
+  - `task_get`
+  - `task_update`
+  - `task_move`
+  - `task_note`
+  - `task_link_agent`
+  - `task_unlink_agent`
+  - `task_attention`
+  - `task_reconcile`
   - `subagent_spawn`
   - `subagent_focus`
   - `subagent_stop`
@@ -27,8 +37,17 @@ Implemented so far:
   - `tmux_service_reconcile`
 - lightweight interactive commands and shortcuts:
   - `/agents`
-  - `/agent-board`
-  - `/agent-spawn`
+  - `/task-board`
+  - `/tasks`
+  - `/task-new`
+  - `/task-open <id>`
+  - `/task-move <id> [state]`
+  - `/task-note <id> <message>`
+  - `/task-link-agent <task-id> <agent-id> [role]`
+  - `/task-unlink-agent <task-id> <agent-id>`
+  - `/task-attention [scope]`
+  - `/task-sync [scope]`
+  - `/task-spawn [task-id]`
   - `/agent-open <id>`
   - `/agent-stop <id> [force]`
   - `/agent-message <id> <kind> <message>`
@@ -79,10 +98,12 @@ Implemented so far:
   - list view with scope/filter/sort controls
   - detail pane with parent/child relationships
   - in-dashboard focus/stop/reply/capture/spawn/sync actions
-- first-pass Pi-native board behavior:
-  - Kanban-style TUI lanes for needs-user, waiting, blocked, in-progress, planned, and review/done
-  - keyboard navigation across lanes and tickets
-  - per-ticket inspect/focus/reply/stop/capture/spawn/sync actions
+- Pi-native task board behavior:
+  - Kanban-style TUI lanes for todo, blocked, in-progress, in-review, and done
+  - board cards represent tasks, not agents
+  - linked agents remain available for focus/reply/stop/capture from the selected task
+  - keyboard navigation across lanes and tasks
+  - per-task inspect/focus/reply/stop/capture/spawn/move/sync actions
 - terminal agent cleanup behavior:
   - cleanup candidates come from terminal agents with live tmux targets
   - unresolved completion attention can be resolved during cleanup
@@ -92,7 +113,7 @@ Implemented so far:
 - workflow prompt templates under `~/.pi/agent/prompts/`
 
 Not implemented yet:
-- manual lane movement / persistent planned-ticket management
+- richer task decomposition / subtask UX
 - richer attention-queue UI and coordinator routing polish
 - richer child reply/ack UI polish
 - stronger reconciliation polish around edge cases

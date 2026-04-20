@@ -435,7 +435,8 @@ Reconcile registry state against tmux/session reality.
 ## Required slash commands
 
 - `/agents` — open dashboard
-- `/agent-spawn` — spawn wizard
+- `/task-board` — open task board
+- `/task-spawn [task-id]` — spawn wizard
 - `/agent-open <id>` — focus tmux target
 - `/agent-stop <id>` — stop target
 - `/agent-message <id> ...` — send downward message

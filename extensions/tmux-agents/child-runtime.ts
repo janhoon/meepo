@@ -8,6 +8,8 @@ import { StringEnum } from "@mariozechner/pi-ai";
 import { Type } from "@sinclair/typebox";
 import { randomUUID } from "node:crypto";
 import { getTmuxAgentsDb } from "./db.js";
+import { TASK_STATES, TASK_WAITING_ON_VALUES } from "./task-types.js";
+import { applyChildPublishToLinkedTask } from "./task-registry.js";
 import {
 	createAgentEvent,
 	createAgentMessage,
@@ -29,6 +31,12 @@ import type {
 const CHILD_PUBLISH_KIND = StringEnum(["milestone", "blocked", "question", "question_for_user", "note", "complete"] as const, {
 	description: "Type of child-originated update to publish to the registry.",
 });
+const TASK_STATUS = StringEnum(TASK_STATES, {
+	description: "Optional linked-task status recommendation for this update.",
+});
+const TASK_WAITING_ON = StringEnum(TASK_WAITING_ON_VALUES, {
+	description: "Optional linked-task waiting-on target when blocked.",
+});
 
 const DOWNWARD_MESSAGE_POLL_MS = 2000;
 
@@ -40,6 +48,15 @@ const PublishParams = Type.Object({
 	attempted: Type.Optional(Type.String({ description: "What was attempted before getting blocked." })),
 	answerNeeded: Type.Optional(Type.String({ description: "The exact answer or decision needed." })),
 	recommendedNextAction: Type.Optional(Type.String({ description: "Suggested next step for the coordinator." })),
+	taskStatus: Type.Optional(TASK_STATUS),
+	waitingOn: Type.Optional(TASK_WAITING_ON),
+	blockedReason: Type.Optional(Type.String({ description: "Optional linked-task blocker summary." })),
+	taskSummary: Type.Optional(Type.String({ description: "Optional linked-task summary to store." })),
+	acceptanceCriteria: Type.Optional(Type.Array(Type.String(), { maxItems: 100 })),
+	planSteps: Type.Optional(Type.Array(Type.String(), { maxItems: 100 })),
+	validationSteps: Type.Optional(Type.Array(Type.String(), { maxItems: 100 })),
+	reviewSummary: Type.Optional(Type.String({ description: "Optional linked-task review summary." })),
+	finalSummary: Type.Optional(Type.String({ description: "Optional linked-task final summary." })),
 });
 
 function isAssistantMessage(message: AgentMessage): message is AssistantMessage {
@@ -156,6 +173,7 @@ export function getChildRuntimeEnvironment(): ChildRuntimeEnvironment | null {
 		runDir,
 		profile,
 		allowedTools,
+		taskId: process.env.PI_TMUX_AGENTS_TASK_ID?.trim() || null,
 		parentAgentId: process.env.PI_TMUX_AGENTS_PARENT_AGENT_ID?.trim() || null,
 		spawnSessionId: process.env.PI_TMUX_AGENTS_SPAWN_SESSION_ID?.trim() || null,
 		spawnSessionFile: process.env.PI_TMUX_AGENTS_SPAWN_SESSION_FILE?.trim() || null,
@@ -269,6 +287,23 @@ function publishChildUpdate(
 		updatedAt: Date.now(),
 		finishedAt: kind === "complete" ? Date.now() : undefined,
 	});
+	applyChildPublishToLinkedTask(db, {
+		agentId: environment.childId,
+		profile: environment.profile,
+		kind,
+		summary: payload.summary,
+		details: payload.details,
+		files: payload.files,
+		taskStatus: payload.taskStatus,
+		waitingOn: payload.waitingOn,
+		blockedReason: payload.blockedReason,
+		taskSummary: payload.taskSummary,
+		acceptanceCriteria: payload.acceptanceCriteria,
+		planSteps: payload.planSteps,
+		validationSteps: payload.validationSteps,
+		reviewSummary: payload.reviewSummary,
+		finalSummary: payload.finalSummary,
+	});
 }
 
 export function registerChildRuntime(pi: ExtensionAPI, environment: ChildRuntimeEnvironment): void {
@@ -329,8 +364,8 @@ export function registerChildRuntime(pi: ExtensionAPI, environment: ChildRuntime
 		promptGuidelines: [
 			"Use subagent_publish proactively for milestones, blockers, concrete questions, and final completion handoffs.",
 			"After acting on a coordinator answer, redirect, cancel, or priority message, publish a concise note or completion update so the coordinator does not need pane capture.",
-			"For blockers, include what you tried and the exact answer needed.",
-			"For completion, include files changed/involved, blockers remaining, and a recommended next action.",
+			"For blockers, include what you tried, the exact answer needed, and waitingOn/taskStatus when relevant.",
+			"For completion, include files changed/involved, blockers remaining, a recommended next action, and taskStatus when the linked task should move.",
 		],
 		parameters: PublishParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -341,6 +376,15 @@ export function registerChildRuntime(pi: ExtensionAPI, environment: ChildRuntime
 				attempted: params.attempted,
 				answerNeeded: params.answerNeeded,
 				recommendedNextAction: params.recommendedNextAction,
+				taskStatus: params.taskStatus,
+				waitingOn: params.waitingOn,
+				blockedReason: params.blockedReason,
+				taskSummary: params.taskSummary,
+				acceptanceCriteria: params.acceptanceCriteria,
+				planSteps: params.planSteps,
+				validationSteps: params.validationSteps,
+				reviewSummary: params.reviewSummary,
+				finalSummary: params.finalSummary,
 			};
 			const nextState =
 				params.kind === "blocked"

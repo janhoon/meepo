@@ -25,9 +25,9 @@ So yes: the repo is literally about coordinating a small army of Meepos.
 
 ## What this package adds to Pi
 
-### tmux-backed subagents
+### Task-first tmux-backed subagents
 
-Spawn focused child agents in isolated tmux windows, track their lifecycle, and keep structured state in a registry.
+Capture work as tracked tasks first, then spawn focused child agents in isolated tmux windows to execute against those tasks. Agent lifecycle remains visible, but the board now reflects task lifecycle instead of agent lifecycle.
 
 ### Replica-to-parent communication
 
@@ -51,6 +51,7 @@ The package also includes reusable agent profiles, orchestration skills, and pro
   - `communicate-subagents`
   - `handoff-subagents`
   - `supervise-subagents`
+  - `manage-tasks`
 - `prompts/`
   - `implement`
   - `implement-and-review`
@@ -76,9 +77,22 @@ pi install /path/to/meepo
 
 ## Main tools
 
+### Task tools
+
+- `task_create`
+- `task_list`
+- `task_get`
+- `task_update`
+- `task_move`
+- `task_note`
+- `task_link_agent`
+- `task_unlink_agent`
+- `task_attention`
+- `task_reconcile`
+
 ### Subagent tools
 
-- `subagent_spawn`
+- `subagent_spawn` (task-aware; auto-creates a task if `taskId` is omitted)
 - `subagent_list`
 - `subagent_get`
 - `subagent_focus`
@@ -102,11 +116,20 @@ pi install /path/to/meepo
 
 ## Interactive commands
 
-### Agent control
+### Task and agent control
 
+- `/task-board`
+- `/tasks [scope]`
+- `/task-new`
+- `/task-open <id>`
+- `/task-move <id> [state]`
+- `/task-note <id> <message>`
+- `/task-link-agent <task-id> <agent-id> [role]`
+- `/task-unlink-agent <task-id> <agent-id>`
+- `/task-attention [scope]`
+- `/task-sync [scope]`
+- `/task-spawn [task-id]`
 - `/agents`
-- `/agent-board`
-- `/agent-spawn`
 - `/agent-open <id>`
 - `/agent-stop <id> [force]`
 - `/agent-message <id> <kind> <message>`
@@ -126,22 +149,24 @@ pi install /path/to/meepo
 
 ## A typical flow
 
-1. Spawn a scout or planner.
-2. Let the child report back with a question, blocker, or completion.
-3. Reply with `subagent_message` instead of juggling detached terminals manually.
-4. Open `/agent-board` when you want a Pi-native board view of waiting, blocked, active, and done work.
-5. Spin up a tracked service with `tmux_service_start` if the task needs an app server, watcher, or dev environment.
-6. Run `subagent_cleanup` or `/agent-cleanup` to remove finished tmux child windows once their work has been synthesized.
-7. Focus, capture, reconcile, or stop anything in the pack as needed.
+1. Create or locate a task with `task_create` / `task_list`.
+2. Spawn a scout, planner, worker, or reviewer against that `taskId`.
+3. Let the child report back with a question, blocker, or completion.
+4. Reply with `subagent_message` and move the task with `task_move` when the real work state changes.
+5. Open `/task-board` when you want a Pi-native board view of `todo`, `blocked`, `in_progress`, `in_review`, and `done` work.
+6. Spin up a tracked service with `tmux_service_start` if the task needs an app server, watcher, or dev environment.
+7. Run `subagent_cleanup` or `/agent-cleanup` to remove finished tmux child windows once their work has been synthesized.
+8. Focus, capture, reconcile, or stop anything in the pack as needed.
 
 In other words: split the work, keep the replicas coordinated, and avoid the classic "which terminal was doing the important thing?" problem.
 
 ## Notes
 
 - Child agents report upward proactively through the registry instead of relying on status polling.
+- The task board is task-first. Agents are linked executors, not the board cards themselves.
 - Search policy is ripgrep-first. `find` is intentionally excluded from the normal workflow.
 - Agent profiles live in `agents/` because the extension resolves them relative to its package layout.
-- The real superpower here is not just spawning more agents. It is keeping them legible.
+- The real superpower here is not just spawning more agents. It is keeping the task graph legible.
 
 ## Docs
 

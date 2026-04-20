@@ -5,7 +5,21 @@ import { parseFrontmatter } from "@mariozechner/pi-coding-agent";
 import type { SubagentProfile } from "./types.js";
 
 const DEFAULT_PROFILE_TOOLS = ["read", "bash", "edit", "write"];
-const ALLOWED_BUILTIN_TOOLS = new Set(["read", "bash", "grep", "ls", "edit", "write"]);
+const ALLOWED_BUILTIN_TOOLS = new Set([
+	"read",
+	"bash",
+	"grep",
+	"ls",
+	"edit",
+	"write",
+	"task_create",
+	"task_list",
+	"task_get",
+	"task_update",
+	"task_move",
+	"task_note",
+	"task_attention",
+]);
 
 function isDirectory(path: string): boolean {
 	try {
@@ -28,7 +42,7 @@ export function normalizeBuiltinTools(tools: string[] | undefined): string[] {
 		if (!trimmed || seen.has(trimmed)) continue;
 		if (!ALLOWED_BUILTIN_TOOLS.has(trimmed)) {
 			throw new Error(
-				`Unsupported built-in tool \"${trimmed}\". Allowed tools: ${Array.from(ALLOWED_BUILTIN_TOOLS).join(", ")}.`,
+				`Unsupported child tool \"${trimmed}\". Allowed tools: ${Array.from(ALLOWED_BUILTIN_TOOLS).join(", ")}.`,
 			);
 		}
 		seen.add(trimmed);

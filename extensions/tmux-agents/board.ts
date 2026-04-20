@@ -1,29 +1,30 @@
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
-import type { AgentSummary, AttentionItemRecord } from "./types.js";
+import type { AgentSummary } from "./types.js";
+import type { TaskRecord, TaskWaitingOn } from "./task-types.js";
 
 export type BoardScope = "current_project" | "current_session" | "descendants" | "all";
-export type BoardLaneId = "needs_user" | "waiting" | "blocked" | "in_progress" | "planned" | "review_done";
+export type BoardLaneId = "todo" | "blocked" | "in_progress" | "in_review" | "done";
 
 export interface BoardTicket {
-	agentId: string;
+	taskId: string;
 	laneId: BoardLaneId;
 	title: string;
-	profile: string;
-	state: AgentSummary["state"];
-	model: string | null;
+	priority: number;
+	priorityLabel: string | null;
+	waitingOn: TaskWaitingOn | null;
+	blockedReason: string | null;
 	updatedAt: number;
-	unreadCount: number;
-	attentionKind: AttentionItemRecord["kind"] | null;
-	attentionState: AttentionItemRecord["state"] | null;
-	attentionSummary: string | null;
+	activeAgentCount: number;
+	linkedProfiles: string[];
+	openAttentionCount: number;
 	summary: string;
 }
 
 export interface AgentsBoardScopeData {
 	lanes: Record<BoardLaneId, BoardTicket[]>;
-	agentsById: Map<string, AgentSummary>;
-	ticketsByAgentId: Map<string, BoardTicket>;
+	tasksById: Map<string, TaskRecord>;
+	agentsByTaskId: Map<string, AgentSummary[]>;
 }
 
 export interface AgentsBoardData {
@@ -33,32 +34,30 @@ export interface AgentsBoardData {
 export interface AgentsBoardState {
 	scope: BoardScope;
 	selectedLaneId?: BoardLaneId;
-	selectedAgentId?: string;
+	selectedTaskId?: string;
 }
 
 export interface AgentsBoardAction {
-	type: "close" | "inspect" | "focus" | "stop" | "reply" | "capture" | "spawn" | "sync";
+	type: "close" | "inspect" | "focus" | "stop" | "reply" | "capture" | "spawn" | "sync" | "move" | "create";
 	selectedId?: string;
 	state: AgentsBoardState;
 }
 
-const LANE_ORDER: BoardLaneId[] = ["needs_user", "waiting", "blocked", "in_progress", "planned", "review_done"];
+const LANE_ORDER: BoardLaneId[] = ["todo", "blocked", "in_progress", "in_review", "done"];
 const SCOPE_ORDER: BoardScope[] = ["current_project", "current_session", "descendants", "all"];
 
 function laneLabel(laneId: BoardLaneId): string {
 	switch (laneId) {
-		case "needs_user":
-			return "Needs User";
-		case "waiting":
-			return "Waiting";
+		case "todo":
+			return "To Do";
 		case "blocked":
 			return "Blocked";
 		case "in_progress":
 			return "In Progress";
-		case "planned":
-			return "Planned";
-		case "review_done":
-			return "Review/Done";
+		case "in_review":
+			return "In Review";
+		case "done":
+			return "Done";
 		default:
 			return laneId;
 	}
@@ -66,42 +65,16 @@ function laneLabel(laneId: BoardLaneId): string {
 
 function laneIcon(laneId: BoardLaneId): string {
 	switch (laneId) {
-		case "needs_user":
-			return "❓";
-		case "waiting":
-			return "?";
+		case "todo":
+			return "○";
 		case "blocked":
 			return "⛔";
 		case "in_progress":
 			return "▶";
-		case "planned":
-			return "○";
-		case "review_done":
-			return "✓";
-		default:
-			return "•";
-	}
-}
-
-function stateIcon(state: AgentSummary["state"]): string {
-	switch (state) {
-		case "launching":
-		case "running":
-			return "▶";
-		case "idle":
-			return "◌";
-		case "waiting":
-			return "?";
-		case "blocked":
-			return "⛔";
+		case "in_review":
+			return "◍";
 		case "done":
 			return "✓";
-		case "error":
-			return "✗";
-		case "stopped":
-			return "■";
-		case "lost":
-			return "!";
 		default:
 			return "•";
 	}
@@ -118,6 +91,21 @@ function short(text: string | null | undefined, max = 60): string {
 	const single = text.replace(/\s+/g, " ").trim();
 	if (single.length <= max) return single;
 	return `${single.slice(0, Math.max(0, max - 1)).trimEnd()}…`;
+}
+
+function waitingBadge(waitingOn: TaskWaitingOn | null): string {
+	switch (waitingOn) {
+		case "user":
+			return "user";
+		case "coordinator":
+			return "coord";
+		case "service":
+			return "svc";
+		case "external":
+			return "ext";
+		default:
+			return "";
+	}
 }
 
 class AgentsBoardComponent {
@@ -160,27 +148,31 @@ class AgentsBoardComponent {
 			this.state.selectedLaneId = firstLane;
 		}
 		const laneTickets = this.getLaneTickets(this.state.selectedLaneId);
-		if (laneTickets.some((ticket) => ticket.agentId === this.state.selectedAgentId)) {
+		if (laneTickets.some((ticket) => ticket.taskId === this.state.selectedTaskId)) {
 			return;
 		}
 		if (laneTickets.length > 0) {
-			this.state.selectedAgentId = laneTickets[0]!.agentId;
+			this.state.selectedTaskId = laneTickets[0]!.taskId;
 			return;
 		}
 		const fallbackLane = this.getFirstNonEmptyLane();
 		if (!fallbackLane) {
-			this.state.selectedAgentId = undefined;
+			this.state.selectedTaskId = undefined;
 			return;
 		}
 		this.state.selectedLaneId = fallbackLane;
-		this.state.selectedAgentId = this.getLaneTickets(fallbackLane)[0]?.agentId;
+		this.state.selectedTaskId = this.getLaneTickets(fallbackLane)[0]?.taskId;
 	}
 
 	private getSelectedTicket(): BoardTicket | null {
 		this.ensureSelection();
-		const agentId = this.state.selectedAgentId;
-		if (!agentId) return null;
-		return this.getScopeData().ticketsByAgentId.get(agentId) ?? null;
+		const taskId = this.state.selectedTaskId;
+		if (!taskId) return null;
+		for (const laneId of LANE_ORDER) {
+			const ticket = this.getLaneTickets(laneId).find((item) => item.taskId === taskId);
+			if (ticket) return ticket;
+		}
+		return null;
 	}
 
 	private moveLane(delta: number): void {
@@ -189,8 +181,8 @@ class AgentsBoardComponent {
 		const nextLane = LANE_ORDER[nextIndex] ?? LANE_ORDER[0]!;
 		this.state.selectedLaneId = nextLane;
 		const tickets = this.getLaneTickets(nextLane);
-		if (!tickets.some((ticket) => ticket.agentId === this.state.selectedAgentId)) {
-			this.state.selectedAgentId = tickets[0]?.agentId;
+		if (!tickets.some((ticket) => ticket.taskId === this.state.selectedTaskId)) {
+			this.state.selectedTaskId = tickets[0]?.taskId;
 		}
 		this.ensureSelection();
 	}
@@ -201,9 +193,9 @@ class AgentsBoardComponent {
 		if (!laneId) return;
 		const tickets = this.getLaneTickets(laneId);
 		if (tickets.length === 0) return;
-		const currentIndex = Math.max(0, tickets.findIndex((ticket) => ticket.agentId === this.state.selectedAgentId));
+		const currentIndex = Math.max(0, tickets.findIndex((ticket) => ticket.taskId === this.state.selectedTaskId));
 		const nextIndex = Math.max(0, Math.min(tickets.length - 1, currentIndex + delta));
-		this.state.selectedAgentId = tickets[nextIndex]?.agentId;
+		this.state.selectedTaskId = tickets[nextIndex]?.taskId;
 	}
 
 	private cycleScope(): void {
@@ -216,19 +208,15 @@ class AgentsBoardComponent {
 		const selected = this.getSelectedTicket();
 		return {
 			type,
-			selectedId: selected?.agentId,
-			state: { ...this.state, selectedAgentId: selected?.agentId },
+			selectedId: selected?.taskId,
+			state: { ...this.state, selectedTaskId: selected?.taskId },
 		};
-	}
-
-	private ticketIcon(ticket: BoardTicket): string {
-		return ticket.attentionKind ? laneIcon(ticket.laneId) : stateIcon(ticket.state);
 	}
 
 	private renderLane(laneId: BoardLaneId, width: number): string[] {
 		const tickets = this.getLaneTickets(laneId);
 		const selectedLane = this.state.selectedLaneId === laneId;
-		const selectedIndex = tickets.findIndex((ticket) => ticket.agentId === this.state.selectedAgentId);
+		const selectedIndex = tickets.findIndex((ticket) => ticket.taskId === this.state.selectedTaskId);
 		const visibleCount = this.boardRows - 1;
 		const start =
 			selectedIndex >= 0
@@ -242,11 +230,18 @@ class AgentsBoardComponent {
 		);
 		for (let index = start; index < end; index++) {
 			const ticket = tickets[index]!;
-			const selected = selectedLane && ticket.agentId === this.state.selectedAgentId;
+			const selected = selectedLane && ticket.taskId === this.state.selectedTaskId;
 			const prefix = selected ? ">" : " ";
-			const unread = ticket.unreadCount > 0 ? ` ${ticket.unreadCount}` : "";
-			const line = `${prefix} ${this.ticketIcon(ticket)} ${ticket.profile[0]?.toUpperCase() ?? "?"} ${short(ticket.title, Math.max(8, width - 8))}${unread}`;
-			lines.push(selected ? this.theme.fg("accent", padToWidth(line, width)) : padToWidth(line, width));
+			const flags = [
+				ticket.priority <= 1 ? `P${ticket.priority}` : null,
+				waitingBadge(ticket.waitingOn),
+				ticket.activeAgentCount > 0 ? `${ticket.activeAgentCount}a` : null,
+				ticket.openAttentionCount > 0 ? `${ticket.openAttentionCount}!` : null,
+			]
+				.filter((value): value is string => Boolean(value))
+				.join(" ");
+			const body = `${prefix} ${laneIcon(ticket.laneId)} ${short(ticket.title, Math.max(8, width - 8))}${flags ? ` ${flags}` : ""}`;
+			lines.push(selected ? this.theme.fg("accent", padToWidth(body, width)) : padToWidth(body, width));
 		}
 		while (lines.length < this.boardRows) {
 			lines.push(this.theme.fg("dim", padToWidth("·", width)));
@@ -257,33 +252,36 @@ class AgentsBoardComponent {
 	private renderDetails(width: number): string[] {
 		const selected = this.getSelectedTicket();
 		const lines: string[] = [];
-		lines.push(this.theme.fg("accent", this.theme.bold("Selected ticket")));
+		lines.push(this.theme.fg("accent", this.theme.bold("Selected task")));
 		if (!selected) {
-			lines.push(this.theme.fg("muted", "No ticket selected."));
+			lines.push(this.theme.fg("muted", "No task selected."));
 			return lines;
 		}
-		const agent = this.getScopeData().agentsById.get(selected.agentId);
-		lines.push(`${this.ticketIcon(selected)} ${selected.title} · ${selected.agentId} · ${selected.profile}${selected.model ? ` · ${selected.model}` : ""}`);
-		lines.push(`lane: ${laneLabel(selected.laneId)} · state: ${selected.state} · unread: ${selected.unreadCount}`);
-		lines.push(`attention: ${selected.attentionKind ? `${selected.attentionKind} · ${selected.attentionState ?? "-"}` : "-"}`);
-		lines.push(`summary: ${short(selected.attentionSummary ?? selected.summary, Math.max(20, width - 10))}`);
-		lines.push(`task: ${short(agent?.task, Math.max(20, width - 8))}`);
-		lines.push(`preview: ${short(agent?.lastAssistantPreview ?? agent?.finalSummary, Math.max(20, width - 11))}`);
-		lines.push(`tmux: ${agent?.tmuxSessionName ?? agent?.tmuxSessionId ?? "-"} / ${agent?.tmuxWindowId ?? "-"} / ${agent?.tmuxPaneId ?? "-"}`);
+		const task = this.getScopeData().tasksById.get(selected.taskId);
+		const linkedAgents = this.getScopeData().agentsByTaskId.get(selected.taskId) ?? [];
+		lines.push(`${laneIcon(selected.laneId)} ${selected.title} · ${selected.taskId}`);
+		lines.push(`lane: ${laneLabel(selected.laneId)} · priority: ${selected.priority}${selected.priorityLabel ? ` (${selected.priorityLabel})` : ""}`);
+		lines.push(`waiting: ${selected.waitingOn ?? "-"} · active agents: ${selected.activeAgentCount} · open attention: ${selected.openAttentionCount}`);
+		lines.push(`summary: ${short(task?.summary ?? selected.summary, Math.max(24, width - 10))}`);
+		lines.push(`blocked: ${short(task?.blockedReason ?? selected.blockedReason, Math.max(24, width - 10))}`);
+		lines.push(`plan: ${short(task?.planSteps.join(" | "), Math.max(24, width - 7))}`);
+		lines.push(`validation: ${short(task?.validationSteps.join(" | "), Math.max(24, width - 13))}`);
+		lines.push(`files: ${short(task?.files.join(", "), Math.max(24, width - 8))}`);
+		lines.push(`agents: ${linkedAgents.length > 0 ? short(linkedAgents.map((agent) => `${agent.id}:${agent.profile}:${agent.state}`).join(", "), Math.max(24, width - 9)) : "-"}`);
 		return lines.map((line) => truncateToWidth(line, width));
 	}
 
 	render(width: number): string[] {
 		this.ensureSelection();
 		const separator = " │ ";
-		const laneWidth = Math.max(12, Math.floor((width - separator.length * (LANE_ORDER.length - 1)) / LANE_ORDER.length));
+		const laneWidth = Math.max(14, Math.floor((width - separator.length * (LANE_ORDER.length - 1)) / LANE_ORDER.length));
 		const lines: string[] = [];
-		lines.push(truncateToWidth(`${this.theme.fg("accent", this.theme.bold("tmux agents board"))} · scope:${this.state.scope}`, width));
+		lines.push(truncateToWidth(`${this.theme.fg("accent", this.theme.bold("tmux tasks board"))} · scope:${this.state.scope}`, width));
 		lines.push(
 			truncateToWidth(
 				this.theme.fg(
 					"dim",
-					"auto-refresh 5s · ←→ lanes · ↑↓ tickets · enter inspect · o open · x stop · r reply · c capture · n spawn · y sync · f scope · esc close",
+					"auto-refresh 5s · ←→ lanes · ↑↓ tasks · enter inspect · s spawn · m move · n new · o open agent · x stop agent · r reply · c capture · y sync · f scope · esc close",
 				),
 				width,
 			),
@@ -330,7 +328,9 @@ class AgentsBoardComponent {
 		if (data === "x") return void this.done(this.makeAction("stop"));
 		if (data === "r") return void this.done(this.makeAction("reply"));
 		if (data === "c") return void this.done(this.makeAction("capture"));
-		if (data === "n") return void this.done(this.makeAction("spawn"));
+		if (data === "s") return void this.done(this.makeAction("spawn"));
+		if (data === "n") return void this.done(this.makeAction("create"));
+		if (data === "m") return void this.done(this.makeAction("move"));
 		if (data === "y") return void this.done(this.makeAction("sync"));
 		if (data === "f") {
 			this.cycleScope();

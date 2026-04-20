@@ -4,6 +4,8 @@ import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { ensureTmuxAgentsRuntimePaths } from "./paths.js";
 import { createAgent, createAgentEvent, createArtifact, updateAgent } from "./registry.js";
+import { getTask } from "./task-registry.js";
+import type { TaskRecord } from "./task-types.js";
 import type { CreateAgentInput, SessionChildLinkEntryData, SpawnSubagentInput, SpawnSubagentResult, SubagentProfile } from "./types.js";
 import { getTmuxAgentsDb } from "./db.js";
 import { getProjectKey } from "./project.js";
@@ -27,6 +29,8 @@ interface CreateRunArtifactsOptions {
 	model: string | null;
 	tools: string[];
 	priority: string | null;
+	taskId: string | null;
+	taskRecord?: TaskRecord | null;
 	parentAgentId: string | null;
 	spawnSessionId: string | null;
 	spawnSessionFile: string | null;
@@ -79,6 +83,7 @@ function sanitizeWindowName(title: string, agentId: string): string {
 }
 
 function buildTaskFileContent(options: CreateRunArtifactsOptions): string {
+	const taskRecord = options.taskRecord;
 	return [
 		`# ${options.title}`,
 		"",
@@ -86,13 +91,33 @@ function buildTaskFileContent(options: CreateRunArtifactsOptions): string {
 		`Profile: ${options.profile.name}`,
 		`Working directory: ${options.spawnCwd}`,
 		options.priority ? `Priority: ${options.priority}` : null,
+		options.taskId ? `Task id: ${options.taskId}` : null,
+		taskRecord ? `Task status: ${taskRecord.status}` : null,
 		"",
-		"## Task",
+		taskRecord ? "## Linked task" : null,
+		taskRecord ? taskRecord.title : null,
+		taskRecord?.summary ? `Summary: ${taskRecord.summary}` : null,
+		taskRecord?.description ? `Description: ${taskRecord.description}` : null,
+		taskRecord && taskRecord.acceptanceCriteria.length > 0 ? "" : null,
+		taskRecord && taskRecord.acceptanceCriteria.length > 0 ? "### Acceptance Criteria" : null,
+		...(taskRecord?.acceptanceCriteria ?? []).map((item) => `- ${item}`),
+		taskRecord && taskRecord.planSteps.length > 0 ? "" : null,
+		taskRecord && taskRecord.planSteps.length > 0 ? "### Plan Steps" : null,
+		...(taskRecord?.planSteps ?? []).map((item, index) => `${index + 1}. ${item}`),
+		taskRecord && taskRecord.validationSteps.length > 0 ? "" : null,
+		taskRecord && taskRecord.validationSteps.length > 0 ? "### Validation" : null,
+		...(taskRecord?.validationSteps ?? []).map((item) => `- ${item}`),
+		taskRecord && taskRecord.files.length > 0 ? "" : null,
+		taskRecord && taskRecord.files.length > 0 ? "### Relevant Files" : null,
+		...(taskRecord?.files ?? []).map((item) => `- ${item}`),
+		"",
+		"## Delegated task",
 		options.task,
 		"",
 		"## Coordination requirements",
 		"- Use exact file paths in every substantive update.",
 		"- Use `subagent_publish` for milestones, blockers, questions, and completion handoffs.",
+		"- Include a task-state recommendation in substantive completion or blocker updates when relevant.",
 		"- Ask one concrete question at a time when clarification is required.",
 		"- Do not use `find`; use `grep` and `bash` with `rg --files` instead.",
 	]
@@ -109,17 +134,19 @@ function buildRuntimeAppendixContent(options: CreateRunArtifactsOptions, session
 		`Run directory: ${runDir}`,
 		`Session file: ${sessionFile}`,
 		`Parent agent id: ${options.parentAgentId ?? "none"}`,
+		`Task id: ${options.taskId ?? "none"}`,
 		`Spawn session id: ${options.spawnSessionId ?? "none"}`,
 		`Spawn session file: ${options.spawnSessionFile ?? "none"}`,
 		"",
 		"Reporting contract:",
 		"- The runtime marks you started automatically when work begins.",
 		"- Use `subagent_publish` whenever you hit a milestone, blocker, question, or completion handoff.",
+		"- Your updates are attached to a tracked task when a task id is present.",
 		"- Include concise summaries and exact file paths when relevant.",
 		"- For blockers, include what you tried and the exact answer you need.",
 		"- For user-facing clarification, publish `question_for_user`.",
 		"- For coordinator clarification, publish `question`.",
-		"- For completion, include completed work, files changed/files involved, blockers remaining, and a recommended next action.",
+		"- For completion, include completed work, files changed/files involved, blockers remaining, a recommended next action, and the recommended task status when relevant.",
 		"",
 		"Search policy:",
 		"- Never use `find`.",
@@ -173,6 +200,7 @@ function buildLaunchScriptContent(
 		`export PI_TMUX_AGENTS_RUN_DIR=${shellQuote(dirname(paths.sessionFile))}`,
 		`export PI_TMUX_AGENTS_PROFILE=${shellQuote(options.profile.name)}`,
 		`export PI_TMUX_AGENTS_ALLOWED_TOOLS=${shellQuote(options.tools.join(","))}`,
+		`export PI_TMUX_AGENTS_TASK_ID=${shellQuote(options.taskId ?? "")}`,
 		`export PI_TMUX_AGENTS_PARENT_AGENT_ID=${shellQuote(options.parentAgentId ?? "")}`,
 		`export PI_TMUX_AGENTS_SPAWN_SESSION_ID=${shellQuote(options.spawnSessionId ?? "")}`,
 		`export PI_TMUX_AGENTS_SPAWN_SESSION_FILE=${shellQuote(options.spawnSessionFile ?? "")}`,
@@ -213,6 +241,7 @@ function writeRunArtifacts(options: CreateRunArtifactsOptions): {
 				state: "launching",
 				title: options.title,
 				task: options.task,
+				taskId: options.taskId,
 				updatedAt: Date.now(),
 			},
 			null,
@@ -259,6 +288,7 @@ export function spawnSubagent(input: SpawnSubagentInput): SpawnSubagentResult {
 	const agentId = input.agentId ?? `sa_${now.toString(36)}_${randomUUID().slice(0, 8)}`;
 	const spawnCwd = resolve(input.spawnCwd);
 	const tools = [...input.tools];
+	const db = getTmuxAgentsDb();
 	const createRunOptions: CreateRunArtifactsOptions = {
 		agentId,
 		title: input.title,
@@ -268,12 +298,16 @@ export function spawnSubagent(input: SpawnSubagentInput): SpawnSubagentResult {
 		model: input.model,
 		tools,
 		priority: input.priority,
+		taskId: input.taskId,
+		taskRecord: input.taskId ? getTask(db, input.taskId) : null,
 		parentAgentId: input.parentAgentId,
 		spawnSessionId: input.spawnSessionId,
 		spawnSessionFile: input.spawnSessionFile,
 	};
+	if (input.taskId && !createRunOptions.taskRecord) {
+		throw new Error(`Unknown task id \"${input.taskId}\".`);
+	}
 	const runArtifacts = writeRunArtifacts(createRunOptions);
-	const db = getTmuxAgentsDb();
 	const agentRecord: CreateAgentInput = {
 		id: agentId,
 		parentAgentId: input.parentAgentId,
@@ -281,6 +315,7 @@ export function spawnSubagent(input: SpawnSubagentInput): SpawnSubagentResult {
 		spawnSessionFile: input.spawnSessionFile,
 		spawnCwd,
 		projectKey: getProjectKey(spawnCwd),
+		taskId: input.taskId,
 		profile: input.profile.name,
 		title: input.title,
 		task: input.task,
@@ -370,6 +405,7 @@ export function spawnSubagent(input: SpawnSubagentInput): SpawnSubagentResult {
 		tmuxSessionName: tmuxTarget.sessionName,
 		tmuxWindowId: tmuxTarget.windowId,
 		tmuxPaneId: tmuxTarget.paneId,
+		taskId: input.taskId,
 		createdAt: now,
 	};
 	return {
@@ -379,6 +415,7 @@ export function spawnSubagent(input: SpawnSubagentInput): SpawnSubagentResult {
 		spawnCwd,
 		runDir: runArtifacts.runDir,
 		sessionFile: runArtifacts.sessionFile,
+		taskId: input.taskId,
 		tmuxSessionId: tmuxTarget.sessionId,
 		tmuxSessionName: tmuxTarget.sessionName,
 		tmuxWindowId: tmuxTarget.windowId,

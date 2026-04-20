@@ -1,3 +1,5 @@
+import type { TaskState, TaskWaitingOn } from "./task-types.js";
+
 export const AGENT_STATES = [
 	"launching",
 	"running",
@@ -60,6 +62,7 @@ export interface SessionChildLinkEntryData {
 	tmuxSessionName?: string | null;
 	tmuxWindowId?: string | null;
 	tmuxPaneId?: string | null;
+	taskId?: string | null;
 	createdAt: number;
 }
 
@@ -81,6 +84,7 @@ export interface SpawnSubagentInput {
 	model: string | null;
 	tools: string[];
 	priority: string | null;
+	taskId: string | null;
 	parentAgentId: string | null;
 	spawnSessionId: string | null;
 	spawnSessionFile: string | null;
@@ -93,6 +97,7 @@ export interface SpawnSubagentResult {
 	spawnCwd: string;
 	runDir: string;
 	sessionFile: string;
+	taskId: string | null;
 	tmuxSessionId: string;
 	tmuxSessionName: string;
 	tmuxWindowId: string;
@@ -105,6 +110,7 @@ export interface ChildRuntimeEnvironment {
 	runDir: string;
 	profile: string;
 	allowedTools: string[];
+	taskId: string | null;
 	parentAgentId: string | null;
 	spawnSessionId: string | null;
 	spawnSessionFile: string | null;
@@ -130,6 +136,15 @@ export interface SubagentPublishPayload {
 	attempted?: string;
 	answerNeeded?: string;
 	recommendedNextAction?: string;
+	taskStatus?: TaskState;
+	waitingOn?: TaskWaitingOn;
+	blockedReason?: string;
+	taskSummary?: string;
+	acceptanceCriteria?: string[];
+	planSteps?: string[];
+	validationSteps?: string[];
+	reviewSummary?: string;
+	finalSummary?: string;
 }
 
 export interface DownwardMessagePayload {
@@ -162,6 +177,7 @@ export interface AgentSummary {
 	spawnSessionFile: string | null;
 	spawnCwd: string;
 	projectKey: string;
+	taskId: string | null;
 	profile: string;
 	title: string;
 	task: string;
@@ -213,6 +229,7 @@ export interface CreateAgentInput {
 	spawnSessionFile?: string | null;
 	spawnCwd: string;
 	projectKey: string;
+	taskId?: string | null;
 	profile: string;
 	title: string;
 	task: string;
@@ -240,6 +257,7 @@ export interface UpdateAgentInput {
 	spawnSessionFile?: string | null;
 	spawnCwd?: string;
 	projectKey?: string;
+	taskId?: string | null;
 	profile?: string;
 	title?: string;
 	task?: string;
