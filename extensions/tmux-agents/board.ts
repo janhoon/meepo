@@ -185,8 +185,15 @@ class AgentsBoardComponent {
 
 	private moveLane(delta: number): void {
 		const currentIndex = Math.max(0, LANE_ORDER.indexOf(this.state.selectedLaneId ?? LANE_ORDER[0]!));
-		const nextIndex = (currentIndex + delta + LANE_ORDER.length) % LANE_ORDER.length;
-		const nextLane = LANE_ORDER[nextIndex] ?? LANE_ORDER[0]!;
+		let nextLane = this.state.selectedLaneId ?? LANE_ORDER[0]!;
+		for (let step = 1; step <= LANE_ORDER.length; step++) {
+			const nextIndex = (currentIndex + delta * step + LANE_ORDER.length * step) % LANE_ORDER.length;
+			const candidateLane = LANE_ORDER[nextIndex] ?? LANE_ORDER[0]!;
+			if (this.getLaneTickets(candidateLane).length > 0) {
+				nextLane = candidateLane;
+				break;
+			}
+		}
 		this.state.selectedLaneId = nextLane;
 		const tickets = this.getLaneTickets(nextLane);
 		if (!tickets.some((ticket) => ticket.agentId === this.state.selectedAgentId)) {
