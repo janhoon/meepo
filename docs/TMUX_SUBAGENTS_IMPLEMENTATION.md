@@ -423,6 +423,10 @@ Important:
 ### `subagent_capture`
 Capture extra context from tmux pane or transcript.
 
+Important:
+- this is a debug/fallback tool, not the normal supervision path
+- prefer `subagent_attention`, `subagent_inbox`, `subagent_get`, and structured downward/upward messages first
+
 ### `subagent_reconcile`
 Reconcile registry state against tmux/session reality.
 

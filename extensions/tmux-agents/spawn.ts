@@ -131,6 +131,16 @@ function buildRuntimeAppendixContent(options: CreateRunArtifactsOptions, session
 		"- Ask only one concrete question at a time.",
 		"- Keep context minimal and path-specific.",
 		"- Publish the question immediately instead of waiting silently.",
+		"",
+		"Downward message handling contract:",
+		"- Coordinator messages are the primary control plane; do not rely on pane capture for coordination.",
+		"- Messages may include an action policy:",
+		"  - `fyi`: treat as context; continue unless it materially changes the plan.",
+		"  - `resume_if_blocked`: if this resolves your blocker/wait, resume immediately and publish a brief note.",
+		"  - `replan`: revise your plan before more substantive work and publish a brief note if the plan changes.",
+		"  - `interrupt_and_replan`: stop the current approach, replan now, and publish a brief note.",
+		"  - `stop`: stop current work gracefully and publish a completion-style handoff or cancellation summary.",
+		"- After acting on an answer, redirect, cancel, or priority message, publish a concise note or completion update with exact file paths when relevant.",
 	]
 		.join("\n");
 }

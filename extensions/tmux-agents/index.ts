@@ -40,6 +40,8 @@ import type {
 	AgentSummary,
 	AttentionItemRecord,
 	DeliveryMode,
+	DownwardMessageActionPolicy,
+	DownwardMessagePayload,
 	FleetSummary,
 	ListAgentsFilters,
 	RuntimeStatusSnapshot,
@@ -82,6 +84,10 @@ const DELIVERY_MODE = StringEnum(["immediate", "steer", "follow_up", "idle_only"
 	default: "immediate",
 });
 
+const DOWNWARD_ACTION_POLICY = StringEnum(["fyi", "resume_if_blocked", "replan", "interrupt_and_replan", "stop"] as const, {
+	description: "How the child should react to this coordinator message.",
+});
+
 const SubagentFocusParams = Type.Object({
 	id: Type.String({ description: "Tracked child agent id to focus in tmux." }),
 });
@@ -98,6 +104,8 @@ const SubagentMessageParams = Type.Object({
 	summary: Type.String({ description: "Short message summary for the child." }),
 	details: Type.Optional(Type.String({ description: "Additional context for the child." })),
 	files: Type.Optional(Type.Array(Type.String({ description: "Relevant file path" }), { maxItems: 100 })),
+	actionPolicy: Type.Optional(DOWNWARD_ACTION_POLICY),
+	inReplyToMessageId: Type.Optional(Type.String({ description: "Optional child-originated message id this responds to." })),
 	deliveryMode: Type.Optional(DELIVERY_MODE),
 });
 
@@ -689,13 +697,33 @@ function readLatestStatus(agent: AgentSummary): RuntimeStatusSnapshot | null {
 	}
 }
 
+function defaultDownwardActionPolicy(kind: "answer" | "note" | "redirect" | "cancel" | "priority"): DownwardMessageActionPolicy {
+	switch (kind) {
+		case "answer":
+			return "resume_if_blocked";
+		case "redirect":
+			return "interrupt_and_replan";
+		case "cancel":
+			return "stop";
+		case "priority":
+			return "replan";
+		case "note":
+		default:
+			return "fyi";
+	}
+}
+
 function queueDownwardMessage(
 	agent: AgentSummary,
 	kind: "answer" | "note" | "redirect" | "cancel" | "priority",
-	payload: { summary: string; details?: string; files?: string[] },
+	payload: DownwardMessagePayload,
 	deliveryMode: DeliveryMode,
 ): void {
 	const db = getTmuxAgentsDb();
+	const fullPayload: DownwardMessagePayload = {
+		...payload,
+		actionPolicy: payload.actionPolicy ?? defaultDownwardActionPolicy(kind),
+	};
 	createAgentMessage(db, {
 		id: randomUUID(),
 		threadId: agent.id,
@@ -704,15 +732,15 @@ function queueDownwardMessage(
 		targetKind: "child",
 		kind,
 		deliveryMode,
-		payload,
+		payload: fullPayload,
 		status: "queued",
 	});
 	createAgentEvent(db, {
 		id: randomUUID(),
 		agentId: agent.id,
 		eventType: `downward_${kind}`,
-		summary: payload.summary,
-		payload: { deliveryMode, ...payload },
+		summary: fullPayload.summary,
+		payload: { deliveryMode, ...fullPayload },
 	});
 	if (kind === "cancel") {
 		updateAttentionItemsForAgent(
@@ -723,11 +751,11 @@ function queueDownwardMessage(
 				updatedAt: Date.now(),
 				resolvedAt: Date.now(),
 				resolutionKind: kind,
-				resolutionSummary: payload.summary,
+				resolutionSummary: fullPayload.summary,
 			},
 			{ states: ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user"] },
 		);
-	} else if (["answer", "redirect", "priority", "note"].includes(kind)) {
+	} else if (["answer", "redirect", "priority"].includes(kind)) {
 		updateAttentionItemsForAgent(
 			db,
 			agent.id,
@@ -735,7 +763,7 @@ function queueDownwardMessage(
 				state: "acknowledged",
 				updatedAt: Date.now(),
 				resolutionKind: kind,
-				resolutionSummary: payload.summary,
+				resolutionSummary: fullPayload.summary,
 			},
 			{
 				states: ["open", "waiting_on_coordinator", "waiting_on_user"],
@@ -1632,7 +1660,7 @@ async function runStopFlow(ctx: ExtensionContext, agentId: string): Promise<void
 async function runAgentsDashboard(pi: ExtensionAPI, ctx: ExtensionContext, initialState: AgentsDashboardState): Promise<AgentsDashboardState> {
 	let state = initialState;
 	while (ctx.hasUI) {
-		const action = await openAgentsDashboard(ctx, buildDashboardData(ctx), state);
+		const action = await openAgentsDashboard(ctx, () => buildDashboardData(ctx), state, 5000);
 		if (!action || action.type === "close") return action?.state ?? state;
 		state = action.state;
 		const selectedId = action.selectedId;
@@ -1684,7 +1712,7 @@ async function runAgentsDashboard(pi: ExtensionAPI, ctx: ExtensionContext, initi
 async function runAgentsBoard(pi: ExtensionAPI, ctx: ExtensionContext, initialState: AgentsBoardState): Promise<AgentsBoardState> {
 	let state = initialState;
 	while (ctx.hasUI) {
-		const action = await openAgentsBoard(ctx, buildBoardData(ctx), state);
+		const action = await openAgentsBoard(ctx, () => buildBoardData(ctx), state, 5000);
 		if (!action || action.type === "close") return action?.state ?? state;
 		state = action.state;
 		const selectedId = action.selectedId;
@@ -1888,11 +1916,14 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "subagent_message",
 		label: "Subagent Message",
-		description: "Send a structured downward message to a tracked child agent.",
-		promptSnippet: "Send structured answer, note, redirect, cancel, or priority updates to a tracked child agent.",
+		description: "Send a structured control-plane message to a tracked child agent.",
+		promptSnippet: "Send structured answer, note, redirect, cancel, or priority updates to a tracked child agent, with an explicit action policy when useful.",
 		promptGuidelines: [
 			"Use subagent_message to answer child questions, redirect work, cancel, or change priority.",
+			"Prefer messages plus child publish updates over transcript capture for normal orchestration.",
 			"Keep the message concrete and minimal, with exact file paths when relevant.",
+			"Use actionPolicy when you need the child to replan, resume, or stop instead of merely reading the note.",
+			"When replying to a specific child blocker/question, include inReplyToMessageId when available from subagent_inbox or subagent_get.",
 		],
 		parameters: SubagentMessageParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -1911,16 +1942,30 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 			) {
 				throw new Error(`Cannot message agent ${agent.id} because its tmux target is missing. Reconcile first.`);
 			}
+			const kind = params.kind as "answer" | "note" | "redirect" | "cancel" | "priority";
+			const actionPolicy = params.actionPolicy ?? defaultDownwardActionPolicy(kind);
 			queueDownwardMessage(
 				agent,
-				params.kind,
-				{ summary: params.summary, details: params.details, files: params.files },
+				kind,
+				{
+					summary: params.summary,
+					details: params.details,
+					files: params.files,
+					actionPolicy,
+					inReplyToMessageId: params.inReplyToMessageId,
+				},
 				params.deliveryMode ?? "immediate",
 			);
 			updateFleetUi(ctx);
 			return {
-				content: [{ type: "text", text: `Queued ${params.kind} message for ${agent.id}.` }],
-				details: { agentId: agent.id, kind: params.kind, deliveryMode: params.deliveryMode ?? "immediate" },
+				content: [{ type: "text", text: `Queued ${kind} message for ${agent.id} (${actionPolicy}).` }],
+				details: {
+					agentId: agent.id,
+					kind,
+					actionPolicy,
+					inReplyToMessageId: params.inReplyToMessageId ?? null,
+					deliveryMode: params.deliveryMode ?? "immediate",
+				},
 			};
 		},
 	});
@@ -1928,10 +1973,11 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "subagent_capture",
 		label: "Subagent Capture",
-		description: "Capture recent tmux pane output for a tracked child agent.",
-		promptSnippet: "Capture recent tmux pane output from a tracked subagent for extra context.",
+		description: "Debug-only: capture recent tmux pane output for a tracked child agent.",
+		promptSnippet: "Debug a tracked subagent by capturing recent tmux pane output only when structured reporting is insufficient.",
 		promptGuidelines: [
-			"Use subagent_capture when you need recent live pane output or transcript context from a child tmux session.",
+			"Prefer subagent_attention, subagent_inbox, subagent_get, and subagent_message for normal orchestration.",
+			"Use subagent_capture only when child reporting is stale, missing, or clearly inconsistent and you need raw transcript context.",
 		],
 		parameters: SubagentCaptureParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -2344,7 +2390,7 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("agent-capture", {
-		description: "Capture recent tmux pane output for a tracked child",
+		description: "Debug-capture recent tmux pane output for a tracked child",
 		handler: async (args, ctx) => {
 			const parts = args?.trim().split(/\s+/) ?? [];
 			const id = parts[0];

@@ -17,7 +17,14 @@ import {
 	markAgentMessages,
 	updateAgent,
 } from "./registry.js";
-import type { AgentMessageRecord, ChildRuntimeEnvironment, RuntimeStatusSnapshot, SubagentPublishPayload } from "./types.js";
+import type {
+	AgentMessageRecord,
+	ChildRuntimeEnvironment,
+	DownwardMessageActionPolicy,
+	DownwardMessagePayload,
+	RuntimeStatusSnapshot,
+	SubagentPublishPayload,
+} from "./types.js";
 
 const CHILD_PUBLISH_KIND = StringEnum(["milestone", "blocked", "question", "question_for_user", "note", "complete"] as const, {
 	description: "Type of child-originated update to publish to the registry.",
@@ -54,24 +61,70 @@ function truncateText(value: string, maxLength = 400): string {
 	return `${singleLine.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
 }
 
+function defaultDownwardActionPolicy(kind: AgentMessageRecord["kind"]): DownwardMessageActionPolicy {
+	switch (kind) {
+		case "answer":
+			return "resume_if_blocked";
+		case "redirect":
+			return "interrupt_and_replan";
+		case "cancel":
+			return "stop";
+		case "priority":
+			return "replan";
+		case "note":
+		default:
+			return "fyi";
+	}
+}
+
+function expectedHandlingLines(actionPolicy: DownwardMessageActionPolicy): string[] {
+	switch (actionPolicy) {
+		case "resume_if_blocked":
+			return [
+				"If this resolves your current blocker or waiting state, resume work now.",
+				"Publish a concise note once you resume so the coordinator can track progress without capture.",
+				"If you are still blocked after this message, publish one concrete blocker or question immediately.",
+			];
+		case "replan":
+			return [
+				"Revise your plan before the next substantive tool call if this changes your priorities.",
+				"Publish a concise note if the plan or file focus changes.",
+			];
+		case "interrupt_and_replan":
+			return [
+				"Stop the current approach and replan before more substantive work.",
+				"Publish a concise note after adopting this redirect, with exact file paths when relevant.",
+			];
+		case "stop":
+			return [
+				"Stop current work gracefully.",
+				"Publish a completion-style handoff or cancellation summary before exiting if possible.",
+			];
+		case "fyi":
+		default:
+			return [
+				"Treat this as additional context. Continue unless it materially changes your plan.",
+				"Publish a concise note only if this changes your course of action.",
+			];
+	}
+}
+
 function formatDownwardMessage(message: AgentMessageRecord): string {
-	const payload = (message.payload && typeof message.payload === "object" ? message.payload : {}) as {
-		summary?: string;
-		details?: string;
-		files?: string[];
-		attempted?: string;
-		answerNeeded?: string;
-		recommendedNextAction?: string;
-	};
-	const lines = [`[Coordinator ${message.kind}]`];
+	const payload = (message.payload && typeof message.payload === "object" ? message.payload : {}) as DownwardMessagePayload;
+	const actionPolicy = payload.actionPolicy ?? defaultDownwardActionPolicy(message.kind);
+	const lines = [`[Coordinator ${message.kind} · action ${actionPolicy}]`];
 	if (payload.summary) lines.push(payload.summary);
 	if (payload.details) lines.push("", payload.details);
 	if (Array.isArray(payload.files) && payload.files.length > 0) {
 		lines.push("", `Files: ${payload.files.join(", ")}`);
 	}
-	if (payload.attempted) lines.push("", `Attempted: ${payload.attempted}`);
-	if (payload.answerNeeded) lines.push("", `Answer needed: ${payload.answerNeeded}`);
-	if (payload.recommendedNextAction) lines.push("", `Recommended next action: ${payload.recommendedNextAction}`);
+	if (payload.inReplyToMessageId) {
+		lines.push("", `Replying to message: ${payload.inReplyToMessageId}`);
+	}
+	lines.push("", "Expected handling:");
+	for (const line of expectedHandlingLines(actionPolicy)) {
+		lines.push(`- ${line}`);
+	}
 	return lines.join("\n");
 }
 
@@ -275,6 +328,7 @@ export function registerChildRuntime(pi: ExtensionAPI, environment: ChildRuntime
 		promptSnippet: "Publish milestone/blocker/question/complete updates upward to the coordinator registry.",
 		promptGuidelines: [
 			"Use subagent_publish proactively for milestones, blockers, concrete questions, and final completion handoffs.",
+			"After acting on a coordinator answer, redirect, cancel, or priority message, publish a concise note or completion update so the coordinator does not need pane capture.",
 			"For blockers, include what you tried and the exact answer needed.",
 			"For completion, include files changed/involved, blockers remaining, and a recommended next action.",
 		],

@@ -125,12 +125,17 @@ class AgentsBoardComponent {
 	private state: AgentsBoardState;
 
 	constructor(
-		private readonly data: AgentsBoardData,
+		private data: AgentsBoardData,
 		private readonly theme: ExtensionContext["ui"]["theme"],
 		private readonly done: (result: AgentsBoardAction | null) => void,
 		initialState: AgentsBoardState,
 	) {
 		this.state = { ...initialState };
+		this.ensureSelection();
+	}
+
+	setData(data: AgentsBoardData): void {
+		this.data = data;
 		this.ensureSelection();
 	}
 
@@ -278,7 +283,7 @@ class AgentsBoardComponent {
 			truncateToWidth(
 				this.theme.fg(
 					"dim",
-					"←→ lanes · ↑↓ tickets · enter inspect · o open · x stop · r reply · c capture · n spawn · y sync · f scope · esc close",
+					"auto-refresh 5s · ←→ lanes · ↑↓ tickets · enter inspect · o open · x stop · r reply · c capture · n spawn · y sync · f scope · esc close",
 				),
 				width,
 			),
@@ -336,12 +341,25 @@ class AgentsBoardComponent {
 
 export async function openAgentsBoard(
 	ctx: ExtensionContext,
-	data: AgentsBoardData,
+	getData: () => AgentsBoardData,
 	initialState: AgentsBoardState,
+	autoRefreshMs = 5000,
 ): Promise<AgentsBoardAction | null> {
 	if (!ctx.hasUI) return null;
 	return ctx.ui.custom<AgentsBoardAction | null>((tui, theme, _keybindings, done) => {
-		const component = new AgentsBoardComponent(data, theme, done, initialState);
+		const component = new AgentsBoardComponent(getData(), theme, done, initialState);
+		const interval =
+			autoRefreshMs > 0
+				? setInterval(() => {
+					try {
+						component.setData(getData());
+						component.invalidate();
+						tui.requestRender();
+					} catch {
+						// Keep showing the last successful board snapshot on refresh errors.
+					}
+				}, autoRefreshMs)
+				: undefined;
 		return {
 			render(width: number) {
 				return component.render(width);
@@ -352,6 +370,9 @@ export async function openAgentsBoard(
 			handleInput(data: string) {
 				component.handleInput(data);
 				tui.requestRender();
+			},
+			dispose() {
+				if (interval) clearInterval(interval);
 			},
 		};
 	});

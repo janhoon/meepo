@@ -137,12 +137,17 @@ class AgentsDashboardComponent {
 	private readonly listHeight = 12;
 
 	constructor(
-		private readonly data: AgentsDashboardData,
+		private data: AgentsDashboardData,
 		private readonly theme: ExtensionContext["ui"]["theme"],
 		private readonly done: (result: AgentsDashboardAction | null) => void,
 		initialState: AgentsDashboardState,
 	) {
 		this.state = { ...initialState };
+		this.ensureSelection();
+	}
+
+	setData(data: AgentsDashboardData): void {
+		this.data = data;
 		this.ensureSelection();
 	}
 
@@ -277,7 +282,7 @@ class AgentsDashboardComponent {
 		);
 		lines.push(
 			truncateToWidth(
-				this.theme.fg("dim", "↑↓ move · enter details · o open · x stop · r reply · c capture · n spawn · y sync · f scope · t sort · a/b/u filters · esc close"),
+				this.theme.fg("dim", "auto-refresh 5s · ↑↓ move · enter details · o open · x stop · r reply · c capture · n spawn · y sync · f scope · t sort · a/b/u filters · esc close"),
 				width,
 			),
 		);
@@ -339,12 +344,25 @@ class AgentsDashboardComponent {
 
 export async function openAgentsDashboard(
 	ctx: ExtensionContext,
-	data: AgentsDashboardData,
+	getData: () => AgentsDashboardData,
 	initialState: AgentsDashboardState,
+	autoRefreshMs = 5000,
 ): Promise<AgentsDashboardAction | null> {
 	if (!ctx.hasUI) return null;
 	return ctx.ui.custom<AgentsDashboardAction | null>((tui, theme, _keybindings, done) => {
-		const component = new AgentsDashboardComponent(data, theme, done, initialState);
+		const component = new AgentsDashboardComponent(getData(), theme, done, initialState);
+		const interval =
+			autoRefreshMs > 0
+				? setInterval(() => {
+					try {
+						component.setData(getData());
+						component.invalidate();
+						tui.requestRender();
+					} catch {
+						// Keep showing the last successful dashboard snapshot on refresh errors.
+					}
+				}, autoRefreshMs)
+				: undefined;
 		return {
 			render(width: number) {
 				return component.render(width);
@@ -355,6 +373,9 @@ export async function openAgentsDashboard(
 			handleInput(data: string) {
 				component.handleInput(data);
 				tui.requestRender();
+			},
+			dispose() {
+				if (interval) clearInterval(interval);
 			},
 		};
 	});

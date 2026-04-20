@@ -25,6 +25,7 @@ export const MESSAGE_KINDS = [
 	"complete",
 ] as const;
 export const DELIVERY_MODES = ["immediate", "steer", "follow_up", "idle_only"] as const;
+export const DOWNWARD_ACTION_POLICIES = ["fyi", "resume_if_blocked", "replan", "interrupt_and_replan", "stop"] as const;
 export const MESSAGE_STATUSES = ["queued", "delivered", "acked", "failed", "expired"] as const;
 export const ATTENTION_ITEM_KINDS = ["question", "question_for_user", "blocked", "complete"] as const;
 export const ATTENTION_ITEM_AUDIENCES = ["coordinator", "user"] as const;
@@ -42,6 +43,7 @@ export type AgentState = (typeof AGENT_STATES)[number];
 export type MessageTargetKind = (typeof MESSAGE_TARGET_KINDS)[number];
 export type MessageKind = (typeof MESSAGE_KINDS)[number];
 export type DeliveryMode = (typeof DELIVERY_MODES)[number];
+export type DownwardMessageActionPolicy = (typeof DOWNWARD_ACTION_POLICIES)[number];
 export type MessageStatus = (typeof MESSAGE_STATUSES)[number];
 export type AttentionItemKind = (typeof ATTENTION_ITEM_KINDS)[number];
 export type AttentionItemAudience = (typeof ATTENTION_ITEM_AUDIENCES)[number];
@@ -128,6 +130,14 @@ export interface SubagentPublishPayload {
 	attempted?: string;
 	answerNeeded?: string;
 	recommendedNextAction?: string;
+}
+
+export interface DownwardMessagePayload {
+	summary: string;
+	details?: string;
+	files?: string[];
+	actionPolicy?: DownwardMessageActionPolicy;
+	inReplyToMessageId?: string;
 }
 
 export interface AgentMessageRecord {

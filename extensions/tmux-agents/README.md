@@ -72,6 +72,7 @@ Implemented so far:
   - `subagent_publish` tool for milestone/blocker/question/question_for_user/complete updates
   - first-class attention items for question/blocker/completion events
   - downward child message delivery from registry into the live child session
+  - action-policy-aware downward messages (`fyi`, `resume_if_blocked`, `replan`, `interrupt_and_replan`, `stop`)
   - delivered/acked transitions for downward child messages
   - live registry + `latest-status.json` preview updates while the child runs
 - interactive dashboard behavior:
@@ -95,7 +96,7 @@ Not implemented yet:
 - richer attention-queue UI and coordinator routing polish
 - richer child reply/ack UI polish
 - stronger reconciliation polish around edge cases
-- more capture/transcript options
+- more capture/transcript options, but keep capture debug-only relative to the message/inbox control plane
 - stronger rg-only guard enforcement inside the extension runtime
 
 Use `/reload` in pi after changing files under `~/.pi/agent/extensions/tmux-agents/`.
