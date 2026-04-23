@@ -1,0 +1,555 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Meepo RPC Orchestrator Architecture</title>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --panel: #111831;
+      --panel-2: #16203f;
+      --text: #e8eefc;
+      --muted: #aab7d8;
+      --border: #2a3767;
+      --accent: #7cc7ff;
+      --accent-2: #8bffb0;
+      --warn: #ffd479;
+      --danger: #ff9a9a;
+      --purple: #c6a8ff;
+      --shadow: 0 16px 50px rgba(0,0,0,.35);
+      --radius: 18px;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace;
+      --sans: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: linear-gradient(180deg, #07101f 0%, #0b1020 35%, #0b1020 100%); color: var(--text); font-family: var(--sans); }
+    body { padding: 32px; }
+    .page { max-width: 1380px; margin: 0 auto; }
+    .hero {
+      background: radial-gradient(circle at top left, rgba(124,199,255,.18), transparent 35%),
+                  radial-gradient(circle at top right, rgba(139,255,176,.12), transparent 28%),
+                  linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.015));
+      border: 1px solid var(--border);
+      border-radius: 24px;
+      padding: 28px 30px;
+      box-shadow: var(--shadow);
+      margin-bottom: 22px;
+    }
+    h1 { margin: 0 0 10px; font-size: 40px; line-height: 1.05; letter-spacing: -.02em; }
+    h2 { margin: 0 0 12px; font-size: 26px; }
+    h3 { margin: 0 0 10px; font-size: 18px; }
+    p { color: var(--muted); line-height: 1.6; margin: 8px 0; }
+    .badges { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+    .badge {
+      padding: 8px 12px; border-radius: 999px; border: 1px solid var(--border);
+      background: rgba(255,255,255,.04); color: var(--text); font-size: 13px; font-weight: 600;
+    }
+    .grid { display: grid; gap: 18px; }
+    .grid.two { grid-template-columns: 1.15fr .85fr; }
+    .grid.three { grid-template-columns: repeat(3, 1fr); }
+    .panel {
+      background: linear-gradient(180deg, rgba(255,255,255,.035), rgba(255,255,255,.02));
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px 18px 16px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+    .panel.alt { background: linear-gradient(180deg, rgba(124,199,255,.05), rgba(255,255,255,.02)); }
+    .small { font-size: 13px; }
+    .muted { color: var(--muted); }
+    .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 18px; }
+    .kpi {
+      padding: 14px; border: 1px solid var(--border); border-radius: 16px;
+      background: rgba(255,255,255,.03);
+    }
+    .kpi .n { font-size: 28px; font-weight: 800; letter-spacing: -.02em; }
+    .legend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 8px; }
+    .legend span { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+    .dot { width: 12px; height: 12px; border-radius: 999px; display: inline-block; }
+    .dot.up { background: var(--warn); }
+    .dot.down { background: var(--accent); }
+    .dot.state { background: var(--accent-2); }
+    .dot.attn { background: var(--danger); }
+    .list { margin: 10px 0 0; padding-left: 18px; color: var(--muted); }
+    .list li { margin: 8px 0; }
+    .steps { display: grid; gap: 12px; margin-top: 10px; }
+    .step {
+      display: grid; grid-template-columns: 40px 1fr; gap: 12px; align-items: start;
+      padding: 14px; border: 1px solid var(--border); border-radius: 16px; background: rgba(255,255,255,.03);
+    }
+    .num {
+      width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center;
+      background: rgba(124,199,255,.12); color: var(--text); font-weight: 800;
+      border: 1px solid rgba(124,199,255,.35);
+    }
+    code, pre { font-family: var(--mono); }
+    pre {
+      white-space: pre-wrap; word-break: break-word; margin: 0;
+      background: #0a1328; border: 1px solid var(--border); border-radius: 16px; padding: 14px;
+      color: #d8e2ff; font-size: 13px; line-height: 1.5;
+    }
+    .pill-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+    .pill {
+      font-size: 12px; padding: 7px 10px; border-radius: 999px; border: 1px solid var(--border);
+      background: rgba(255,255,255,.035);
+    }
+    .svg-wrap { overflow: auto; border-radius: 16px; border: 1px solid var(--border); background: #0a1328; }
+    svg { display: block; width: 100%; height: auto; }
+    .footer { margin-top: 18px; color: var(--muted); font-size: 13px; }
+    .banner {
+      border: 1px solid rgba(139,255,176,.35); background: rgba(139,255,176,.08);
+      color: #dfffea; border-radius: 16px; padding: 14px 16px; margin-top: 14px;
+      font-weight: 600;
+    }
+    @media (max-width: 1120px) {
+      .grid.two, .grid.three, .kpis { grid-template-columns: 1fr; }
+      body { padding: 16px; }
+      h1 { font-size: 32px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <section class="hero">
+      <div class="small muted">Recommended design for tmux-backed child agents that must be responsive to child questions, blockers, and completions</div>
+      <h1>RPC Orchestrator Architecture</h1>
+      <p>
+        This design keeps your current <strong>separate child processes + tmux windows + global registry</strong>,
+        but replaces one-way child streaming with a real control plane using <code>pi --mode rpc</code>.
+        The key change is: <strong>the coordinator must supervise asynchronously</strong> instead of waiting inside one long blocking subagent tool call.
+      </p>
+      <div class="badges">
+        <div class="badge">Child transport: <strong>RPC</strong></div>
+        <div class="badge">Source of truth: <strong>SQLite registry</strong></div>
+        <div class="badge">Human visibility: <strong>tmux + dashboard + task board</strong></div>
+        <div class="badge">Parent wake-up: <strong>sendUserMessage / steer / followUp</strong></div>
+        <div class="badge">Restart safety: <strong>reconcile registry + tmux + run dirs</strong></div>
+      </div>
+      <div class="kpis">
+        <div class="kpi"><div class="small muted">Why RPC</div><div class="n">2-way</div><div class="small muted">observe children and reply to them</div></div>
+        <div class="kpi"><div class="small muted">Coordinator model</div><div class="n">async</div><div class="small muted">spawn fast, supervise later</div></div>
+        <div class="kpi"><div class="small muted">Registry role</div><div class="n">durable</div><div class="small muted">mailbox, attention, recovery</div></div>
+        <div class="kpi"><div class="small muted">tmux role</div><div class="n">human</div><div class="small muted">inspection + focus + manual rescue</div></div>
+      </div>
+    </section>
+
+    <section class="grid two">
+      <div class="panel alt">
+        <h2>1. System topology</h2>
+        <p>The child runtime is split into two layers: a <strong>durable state plane</strong> and a <strong>live transport plane</strong>.</p>
+        <div class="legend">
+          <span><i class="dot state"></i> durable state / persistence</span>
+          <span><i class="dot up"></i> upward child events</span>
+          <span><i class="dot down"></i> downward parent control</span>
+          <span><i class="dot attn"></i> attention surfaced to coordinator/user</span>
+        </div>
+        <div class="svg-wrap" style="margin-top:12px;">
+          <svg viewBox="0 0 1200 760" xmlns="http://www.w3.org/2000/svg" aria-label="Topology diagram">
+            <defs>
+              <style>
+                .box{fill:#111831;stroke:#2a3767;stroke-width:2}
+                .box2{fill:#16203f;stroke:#3d4f8c;stroke-width:2}
+                .title{fill:#e8eefc;font:700 24px Inter,system-ui,sans-serif}
+                .label{fill:#aab7d8;font:500 16px Inter,system-ui,sans-serif}
+                .small{fill:#aab7d8;font:500 14px Inter,system-ui,sans-serif}
+                .arrowUp{stroke:#ffd479;stroke-width:4;fill:none;marker-end:url(#mUp)}
+                .arrowDown{stroke:#7cc7ff;stroke-width:4;fill:none;marker-end:url(#mDown)}
+                .arrowState{stroke:#8bffb0;stroke-width:3.5;fill:none;marker-end:url(#mState)}
+              </style>
+              <marker id="mUp" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+                <polygon points="0,0 10,5 0,10" fill="#ffd479" />
+              </marker>
+              <marker id="mDown" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+                <polygon points="0,0 10,5 0,10" fill="#7cc7ff" />
+              </marker>
+              <marker id="mState" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+                <polygon points="0,0 10,5 0,10" fill="#8bffb0" />
+              </marker>
+            </defs>
+
+            <rect class="box2" x="40" y="36" rx="20" ry="20" width="1120" height="120"/>
+            <text class="title" x="72" y="80">Coordinator Pi Session</text>
+            <text class="label" x="72" y="112">TUI + task board + dashboard + extension hooks</text>
+            <text class="small" x="72" y="136">Attention router • wake-up bridge • reply tools • reconcile tools</text>
+
+            <rect class="box" x="60" y="220" rx="18" ry="18" width="300" height="170"/>
+            <text class="title" x="84" y="258">Global Registry</text>
+            <text class="label" x="84" y="290">SQLite: agents, messages, events, tasks</text>
+            <text class="small" x="84" y="318">source of truth across restarts</text>
+            <text class="small" x="84" y="344">attention queue, mailbox, delivery/ack</text>
+
+            <rect class="box" x="60" y="450" rx="18" ry="18" width="300" height="170"/>
+            <text class="title" x="84" y="488">Run Directories</text>
+            <text class="label" x="84" y="520">task.md • runtime-appendix.md</text>
+            <text class="label" x="84" y="545">session.jsonl • latest-status.json</text>
+            <text class="small" x="84" y="575">recovery + forensic debug artifacts</text>
+
+            <rect class="box2" x="450" y="220" rx="18" ry="18" width="290" height="170"/>
+            <text class="title" x="474" y="258">RPC Child Host A</text>
+            <text class="label" x="474" y="290">spawn child • read events • send commands</text>
+            <text class="small" x="474" y="318">normalizes child signals into mailbox updates</text>
+            <text class="small" x="474" y="344">bridges parent replies back via RPC</text>
+
+            <rect class="box2" x="450" y="450" rx="18" ry="18" width="290" height="170"/>
+            <text class="title" x="474" y="488">RPC Child Host B…N</text>
+            <text class="label" x="474" y="520">same contract per child</text>
+            <text class="small" x="474" y="548">parallel children, independent backpressure</text>
+
+            <rect class="box" x="820" y="190" rx="18" ry="18" width="320" height="210"/>
+            <text class="title" x="844" y="230">Child Pi Session A</text>
+            <text class="label" x="844" y="262">pi --mode rpc in tmux window</text>
+            <text class="small" x="844" y="290">agent profile + runtime appendix</text>
+            <text class="small" x="844" y="318">can publish question / blocked / milestone / complete</text>
+            <text class="small" x="844" y="346">can receive answer / redirect / cancel / priority</text>
+
+            <rect class="box" x="820" y="450" rx="18" ry="18" width="320" height="170"/>
+            <text class="title" x="844" y="488">Child Pi Session B…N</text>
+            <text class="label" x="844" y="520">one tmux window per child</text>
+            <text class="small" x="844" y="548">human can focus, inspect, or intervene manually</text>
+
+            <path class="arrowState" d="M360 305 C400 305, 410 305, 450 305"/>
+            <path class="arrowState" d="M360 535 C400 535, 410 535, 450 535"/>
+            <path class="arrowState" d="M205 390 C205 420, 205 430, 205 450"/>
+            <path class="arrowState" d="M600 390 C600 420, 600 430, 600 450"/>
+
+            <path class="arrowUp" d="M820 290 C790 290, 780 300, 740 300"/>
+            <path class="arrowDown" d="M740 345 C775 345, 790 332, 820 332"/>
+
+            <path class="arrowUp" d="M820 520 C790 520, 780 530, 740 530"/>
+            <path class="arrowDown" d="M740 575 C775 575, 790 562, 820 562"/>
+
+            <path class="arrowUp" d="M570 220 C570 185, 570 172, 570 156"/>
+            <path class="arrowDown" d="M630 156 C630 178, 630 195, 630 220"/>
+
+            <text class="small" x="676" y="185">wake coordinator</text>
+            <text class="small" x="738" y="275">upward events</text>
+            <text class="small" x="738" y="360">downward commands</text>
+            <text class="small" x="379" y="287">persist state</text>
+          </svg>
+        </div>
+        <div class="banner">Rule #1: <strong>subagent_spawn</strong> should launch a tracked child quickly and return. Supervision happens afterward through the registry + RPC hosts, not inside one long-running tool call.</div>
+      </div>
+
+      <div class="panel">
+        <h2>2. Core design rules</h2>
+        <div class="steps">
+          <div class="step"><div class="num">1</div><div><h3>Separate the planes</h3><p><strong>RPC</strong> is the live transport. <strong>SQLite + run dirs</strong> are the durable state. tmux is for human visibility, not the source of truth.</p></div></div>
+          <div class="step"><div class="num">2</div><div><h3>Never block the coordinator</h3><p>Do not hold the parent inside a long child-running tool invocation. Spawn, register, and return; then supervise via attention items and injected messages.</p></div></div>
+          <div class="step"><div class="num">3</div><div><h3>Normalize every child signal</h3><p>Questions, blockers, milestones, and completions are converted into <code>agent_messages</code> + <code>agent_events</code> + attention state.</p></div></div>
+          <div class="step"><div class="num">4</div><div><h3>Wake the parent intentionally</h3><p>Idle coordinator: trigger a turn now. Busy coordinator: queue <code>steer</code> or <code>followUp</code> based on urgency.</p></div></div>
+          <div class="step"><div class="num">5</div><div><h3>Ack every downward message</h3><p>Parent reply becomes a registry row first, then is delivered to the child via RPC, then acked after child intake succeeds.</p></div></div>
+          <div class="step"><div class="num">6</div><div><h3>Recover on restart</h3><p>On startup, reconcile tmux, registry, and run dirs; reconnect live RPC hosts where possible; keep unread mailbox state even if no host is attached yet.</p></div></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="grid three" style="margin-top:18px;">
+      <div class="panel">
+        <h2>3. Main runtime modules</h2>
+        <div class="pill-row">
+          <span class="pill">rpc-child-host.ts</span>
+          <span class="pill">child-event-normalizer.ts</span>
+          <span class="pill">attention-router.ts</span>
+          <span class="pill">coordinator-wakeup.ts</span>
+          <span class="pill">downward-delivery.ts</span>
+          <span class="pill">reconcile.ts</span>
+        </div>
+        <ul class="list">
+          <li><strong>RPC Child Host</strong>: owns stdio connection to one <code>pi --mode rpc</code> child.</li>
+          <li><strong>Child Event Normalizer</strong>: maps raw RPC events into registry updates and previews.</li>
+          <li><strong>Attention Router</strong>: decides whether the coordinator, the user, or nobody needs to be interrupted.</li>
+          <li><strong>Coordinator Wake-up Bridge</strong>: injects parent messages using <code>sendUserMessage</code>/<code>sendMessage</code>.</li>
+          <li><strong>Downward Delivery</strong>: turns a parent decision into child <code>prompt</code>/<code>steer</code>/<code>follow_up</code> RPC commands.</li>
+          <li><strong>Reconcile</strong>: restores state after restart and marks lost/stopped/done accurately.</li>
+        </ul>
+      </div>
+      <div class="panel">
+        <h2>4. Registry contracts</h2>
+        <ul class="list">
+          <li><strong>agents</strong>: current child state, tmux ids, run dir, last preview, final summary.</li>
+          <li><strong>agent_messages</strong>: mailbox rows with delivery mode and ack state.</li>
+          <li><strong>agent_events</strong>: immutable audit log of lifecycle and transport events.</li>
+          <li><strong>tasks</strong>: task-first board remains the thing the coordinator reasons about.</li>
+        </ul>
+        <pre>Child signal  → normalize → persist → attention? → wake coordinator?
+Parent decision → persist mailbox row → deliver via RPC → ack</pre>
+      </div>
+      <div class="panel">
+        <h2>5. Delivery policy mapping</h2>
+        <ul class="list">
+          <li><strong>immediate</strong>: send now if the target is idle; otherwise upgrade to <code>steer</code> if urgent.</li>
+          <li><strong>steer</strong>: deliver after current turn finishes tool calls.</li>
+          <li><strong>follow_up</strong>: deliver after the current run completes.</li>
+          <li><strong>idle_only</strong>: store durably, deliver only once target is fully idle.</li>
+        </ul>
+        <pre>Urgent child question/blocker   → coordinator: steer
+Non-urgent milestone            → coordinator: followUp or no wakeup
+Question for user               → user attention item + visible UI
+Coordinator answer to child     → child: steer / follow_up per action policy</pre>
+      </div>
+    </section>
+
+    <section class="grid two" style="margin-top:18px;">
+      <div class="panel alt">
+        <h2>6. Upward path: child → orchestrator</h2>
+        <div class="svg-wrap">
+          <svg viewBox="0 0 1100 520" xmlns="http://www.w3.org/2000/svg" aria-label="Upward flow">
+            <defs>
+              <style>
+                .b{fill:#111831;stroke:#2a3767;stroke-width:2}
+                .t{fill:#e8eefc;font:700 20px Inter,system-ui,sans-serif}
+                .s{fill:#aab7d8;font:500 14px Inter,system-ui,sans-serif}
+                .au{stroke:#ffd479;stroke-width:4;fill:none;marker-end:url(#mu)}
+                .ad{stroke:#7cc7ff;stroke-width:4;fill:none;marker-end:url(#md)}
+                .ag{stroke:#8bffb0;stroke-width:4;fill:none;marker-end:url(#mg)}
+              </style>
+              <marker id="mu" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><polygon points="0,0 10,5 0,10" fill="#ffd479"/></marker>
+              <marker id="md" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><polygon points="0,0 10,5 0,10" fill="#7cc7ff"/></marker>
+              <marker id="mg" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><polygon points="0,0 10,5 0,10" fill="#8bffb0"/></marker>
+            </defs>
+            <rect class="b" x="30" y="80" rx="18" ry="18" width="180" height="100"/>
+            <text class="t" x="55" y="118">Child agent</text>
+            <text class="s" x="55" y="146">question / blocked /</text>
+            <text class="s" x="55" y="166">milestone / complete</text>
+
+            <rect class="b" x="260" y="80" rx="18" ry="18" width="185" height="100"/>
+            <text class="t" x="286" y="118">RPC host</text>
+            <text class="s" x="286" y="146">message_end / turn_end</text>
+            <text class="s" x="286" y="166">tool events / state</text>
+
+            <rect class="b" x="495" y="80" rx="18" ry="18" width="190" height="100"/>
+            <text class="t" x="520" y="118">Normalizer</text>
+            <text class="s" x="520" y="146">map to mailbox row,</text>
+            <text class="s" x="520" y="166">event log, preview</text>
+
+            <rect class="b" x="735" y="80" rx="18" ry="18" width="165" height="100"/>
+            <text class="t" x="763" y="118">Registry</text>
+            <text class="s" x="763" y="146">durable message,</text>
+            <text class="s" x="763" y="166">state, attention</text>
+
+            <rect class="b" x="945" y="80" rx="18" ry="18" width="135" height="100"/>
+            <text class="t" x="968" y="118">Router</text>
+            <text class="s" x="968" y="146">wake or not?</text>
+            <text class="s" x="968" y="166">who owns it?</text>
+
+            <rect class="b" x="310" y="320" rx="18" ry="18" width="230" height="120"/>
+            <text class="t" x="336" y="362">Coordinator wake-up</text>
+            <text class="s" x="336" y="392">idle → prompt now</text>
+            <text class="s" x="336" y="412">busy → steer / followUp</text>
+
+            <rect class="b" x="620" y="320" rx="18" ry="18" width="230" height="120"/>
+            <text class="t" x="650" y="362">Coordinator session</text>
+            <text class="s" x="650" y="392">LLM reasons about child message</text>
+            <text class="s" x="650" y="412">and chooses next action</text>
+
+            <path class="au" d="M210 130 C230 130, 238 130, 260 130"/>
+            <path class="au" d="M445 130 C466 130, 474 130, 495 130"/>
+            <path class="ag" d="M685 130 C710 130, 715 130, 735 130"/>
+            <path class="ag" d="M900 130 C920 130, 925 130, 945 130"/>
+            <path class="ad" d="M1012 180 C1012 255, 820 255, 820 320"/>
+            <path class="ad" d="M945 130 C880 130, 880 380, 850 380"/>
+            <path class="ad" d="M540 380 C578 380, 590 380, 620 380"/>
+            <text class="s" x="918" y="248">attention + delivery choice</text>
+          </svg>
+        </div>
+        <div class="steps" style="margin-top:12px;">
+          <div class="step"><div class="num">A</div><div><h3>Child publishes proactively</h3><p>The child should explicitly publish structured signals like <code>question</code>, <code>blocked</code>, or <code>complete</code>. Do not make the parent poll for status.</p></div></div>
+          <div class="step"><div class="num">B</div><div><h3>Normalize before waking</h3><p>Persist first. That way, even if the parent session is restarted, the message survives and can be replayed from the registry.</p></div></div>
+          <div class="step"><div class="num">C</div><div><h3>Wake only when necessary</h3><p>Milestones usually update UI only. Blockers and questions usually wake the coordinator. User-facing questions go to user attention first.</p></div></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>7. Downward path: orchestrator → child</h2>
+        <div class="svg-wrap">
+          <svg viewBox="0 0 1100 520" xmlns="http://www.w3.org/2000/svg" aria-label="Downward flow">
+            <defs>
+              <style>
+                .b{fill:#111831;stroke:#2a3767;stroke-width:2}
+                .t{fill:#e8eefc;font:700 20px Inter,system-ui,sans-serif}
+                .s{fill:#aab7d8;font:500 14px Inter,system-ui,sans-serif}
+                .ad{stroke:#7cc7ff;stroke-width:4;fill:none;marker-end:url(#m1)}
+                .ag{stroke:#8bffb0;stroke-width:4;fill:none;marker-end:url(#m2)}
+              </style>
+              <marker id="m1" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><polygon points="0,0 10,5 0,10" fill="#7cc7ff"/></marker>
+              <marker id="m2" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><polygon points="0,0 10,5 0,10" fill="#8bffb0"/></marker>
+            </defs>
+            <rect class="b" x="30" y="90" rx="18" ry="18" width="210" height="110"/>
+            <text class="t" x="58" y="130">Coordinator</text>
+            <text class="s" x="58" y="158">decides answer / redirect /</text>
+            <text class="s" x="58" y="178">priority / cancel</text>
+
+            <rect class="b" x="290" y="90" rx="18" ry="18" width="190" height="110"/>
+            <text class="t" x="315" y="130">Mailbox write</text>
+            <text class="s" x="315" y="158">persist row first with</text>
+            <text class="s" x="315" y="178">delivery policy</text>
+
+            <rect class="b" x="530" y="90" rx="18" ry="18" width="190" height="110"/>
+            <text class="t" x="555" y="130">Delivery bridge</text>
+            <text class="s" x="555" y="158">load queued child mail</text>
+            <text class="s" x="555" y="178">for this child</text>
+
+            <rect class="b" x="770" y="90" rx="18" ry="18" width="160" height="110"/>
+            <text class="t" x="798" y="130">RPC host</text>
+            <text class="s" x="798" y="158">prompt / steer /</text>
+            <text class="s" x="798" y="178">follow_up</text>
+
+            <rect class="b" x="970" y="90" rx="18" ry="18" width="100" height="110"/>
+            <text class="t" x="990" y="130">Child</text>
+            <text class="s" x="990" y="158">intake +</text>
+            <text class="s" x="990" y="178">resume</text>
+
+            <rect class="b" x="365" y="320" rx="18" ry="18" width="360" height="120"/>
+            <text class="t" x="390" y="360">Ack / delivery state update</text>
+            <text class="s" x="390" y="392">delivered_at, acked_at, child preview, unblock if needed</text>
+            <text class="s" x="390" y="414">retain immutable event log for audit</text>
+
+            <path class="ad" d="M240 145 C260 145, 268 145, 290 145"/>
+            <path class="ag" d="M480 145 C500 145, 508 145, 530 145"/>
+            <path class="ad" d="M720 145 C742 145, 750 145, 770 145"/>
+            <path class="ad" d="M930 145 C946 145, 952 145, 970 145"/>
+            <path class="ag" d="M1020 200 C1020 285, 725 285, 725 320"/>
+            <path class="ag" d="M1020 200 C1020 305, 890 305, 890 145" opacity="0"/>
+            <path class="ag" d="M1020 200 C1020 285, 560 285, 560 320"/>
+            <text class="s" x="758" y="270">delivery success / ack path</text>
+          </svg>
+        </div>
+        <ul class="list">
+          <li><strong>Persist before transport.</strong> A reply is a mailbox record even if the child is temporarily disconnected.</li>
+          <li><strong>Use action policy.</strong> Example: <code>fyi</code>, <code>resume_if_blocked</code>, <code>replan</code>, <code>interrupt_and_replan</code>, <code>stop</code>.</li>
+          <li><strong>Map action policy to RPC delivery.</strong> Urgent interrupt → <code>steer</code>. Non-urgent follow-on → <code>follow_up</code>.</li>
+          <li><strong>Ack only after real intake.</strong> Don’t mark as delivered just because the parent decided to send it.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="grid three" style="margin-top:18px;">
+      <div class="panel">
+        <h2>8. Coordinator wake-up policy</h2>
+        <pre>if child.kind in ["question", "blocked"]:
+  if coordinator.isIdle():
+    sendUserMessage(renderChildIssue(...))
+  else:
+    sendUserMessage(renderChildIssue(...), { deliverAs: "steer" })
+
+if child.kind == "question_for_user":
+  createUserAttentionItem(...)
+  showDashboardBadge(...)
+  maybe notify()
+
+if child.kind == "milestone":
+  updatePreviewOnly()
+  maybe followUp if policy says summarize
+
+if child.kind == "complete":
+  addCompletionAttention(...)
+  if coordinator.isIdle():
+    sendUserMessage(renderCompletionHandoff(...))</pre>
+      </div>
+      <div class="panel">
+        <h2>9. Child intake policy</h2>
+        <pre>switch message.delivery_mode:
+  case "immediate":
+    if child.isIdle() → RPC prompt
+    else → RPC steer
+  case "steer":
+    RPC steer
+  case "follow_up":
+    RPC follow_up
+  case "idle_only":
+    queue until idle, then RPC prompt</pre>
+      </div>
+      <div class="panel">
+        <h2>10. Human UI surfaces</h2>
+        <ul class="list">
+          <li><strong>Task board</strong>: task is primary object; child links are secondary.</li>
+          <li><strong>Attention queue</strong>: blockers, child questions, user questions, completions.</li>
+          <li><strong>Fleet footer/widget</strong>: counts of running, blocked, unread, in-review.</li>
+          <li><strong>tmux focus</strong>: jump directly into a child window if needed.</li>
+          <li><strong>Manual rescue</strong>: stop, capture, reply, reprioritize, reconcile.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="grid two" style="margin-top:18px;">
+      <div class="panel alt">
+        <h2>11. State machine</h2>
+        <pre>launching
+  ↓
+running
+  ├─ child asks question   → waiting / blocked + attention
+  ├─ child publishes block → blocked + attention
+  ├─ child publishes mile  → running (preview update only)
+  ├─ parent sends cancel   → stopped
+  ├─ child finishes        → done + completion attention
+  └─ transport disappears  → lost (until reconcile proves otherwise)
+
+waiting/blocked
+  ├─ parent answer delivered + child resumes → running
+  ├─ user answer delivered + child resumes   → running
+  └─ parent cancels                          → stopped</pre>
+        <p>State comes from normalized events, not raw tmux transcript scraping.</p>
+      </div>
+      <div class="panel">
+        <h2>12. Restart and recovery</h2>
+        <div class="steps">
+          <div class="step"><div class="num">1</div><div><h3>Load registry</h3><p>Rehydrate agents, unread messages, and unresolved attention items.</p></div></div>
+          <div class="step"><div class="num">2</div><div><h3>Reconcile tmux</h3><p>Check whether expected tmux windows still exist and whether the child process is still alive.</p></div></div>
+          <div class="step"><div class="num">3</div><div><h3>Reconnect RPC where possible</h3><p>If the child launcher supports host reattachment, restore the live control plane; otherwise keep durable mailbox state and use focus/manual tools.</p></div></div>
+          <div class="step"><div class="num">4</div><div><h3>Replay unread coordinator work</h3><p>Re-surface unresolved child questions/completions to the coordinator/user through the attention queue.</p></div></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel" style="margin-top:18px;">
+      <h2>13. Recommended implementation shape in this repo</h2>
+      <div class="grid two">
+        <div>
+          <h3>Suggested modules</h3>
+          <pre>extensions/tmux-agents/
+  rpc/
+    child-host.ts            # spawn and speak RPC with one child
+    rpc-client.ts            # JSONL framing, request ids, command helpers
+    event-normalizer.ts      # raw RPC event → registry updates
+    wakeup.ts                # coordinator wake-up bridge
+    downward-delivery.ts     # queued child message → RPC prompt/steer/follow_up
+    reconnect.ts             # restart / reconcile helpers
+  registry/
+    agents.ts
+    messages.ts
+    attention.ts
+    tasks.ts
+  ui/
+    dashboard.ts
+    task-board.ts
+    footer.ts</pre>
+        </div>
+        <div>
+          <h3>Suggested migration path</h3>
+          <pre>Phase 1: keep current registry/task/dashboard model
+Phase 2: swap child launcher from JSON mode to RPC mode
+Phase 3: add RPC child host + event normalizer
+Phase 4: add parent wake-up bridge for question/blocker/complete
+Phase 5: make downward delivery use RPC instead of passive file/session hacks
+Phase 6: harden restart reconciliation and ack semantics</pre>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel" style="margin-top:18px;">
+      <h2>14. The single most important architecture decision</h2>
+      <div class="banner">
+        <strong>Do not make the coordinator wait synchronously on child execution.</strong><br/>
+        The child must become a tracked background actor. The coordinator should react to child mailbox events through attention routing and injected messages, not sit trapped inside one long-running tool call waiting for the child to end.
+      </div>
+      <p class="footer">
+        This design matches Pi’s documented primitives: child transport via <code>RPC mode</code>, event observation via streamed events,
+        coordinator wake-up via <code>sendMessage</code>/<code>sendUserMessage</code>, queue semantics via <code>steer</code>/<code>followUp</code>,
+        and durable replay via session/registry state.
+      </p>
+    </section>
+  </div>
+</body>
+</html>

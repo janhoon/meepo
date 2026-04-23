@@ -4,6 +4,8 @@ import { SERVICE_STATES } from "./service-types.js";
 import { TASK_STATES, TASK_WAITING_ON_VALUES } from "./task-types.js";
 import {
 	AGENT_STATES,
+	AGENT_TRANSPORT_KINDS,
+	AGENT_TRANSPORT_STATES,
 	ATTENTION_ITEM_AUDIENCES,
 	ATTENTION_ITEM_KINDS,
 	ATTENTION_ITEM_STATES,
@@ -20,6 +22,8 @@ interface Migration {
 }
 
 const quotedStates = AGENT_STATES.map((value) => `'${value}'`).join(", ");
+const quotedTransportKinds = AGENT_TRANSPORT_KINDS.map((value) => `'${value}'`).join(", ");
+const quotedTransportStates = AGENT_TRANSPORT_STATES.map((value) => `'${value}'`).join(", ");
 const quotedServiceStates = SERVICE_STATES.map((value) => `'${value}'`).join(", ");
 const quotedTargetKinds = MESSAGE_TARGET_KINDS.map((value) => `'${value}'`).join(", ");
 const quotedMessageKinds = MESSAGE_KINDS.map((value) => `'${value}'`).join(", ");
@@ -268,6 +272,23 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_task_agent_links_active_pair
 
 ALTER TABLE agents ADD COLUMN task_id TEXT NULL REFERENCES tasks(id) ON DELETE SET NULL;
 CREATE INDEX IF NOT EXISTS idx_agents_task_updated ON agents(task_id, updated_at DESC);
+`,
+	},
+	{
+		version: 5,
+		name: "agent-rpc-bridge-transport",
+		sql: `
+ALTER TABLE agents ADD COLUMN transport_kind TEXT NOT NULL DEFAULT 'direct' CHECK (transport_kind IN (${quotedTransportKinds}));
+ALTER TABLE agents ADD COLUMN transport_state TEXT NOT NULL DEFAULT 'legacy' CHECK (transport_state IN (${quotedTransportStates}));
+ALTER TABLE agents ADD COLUMN bridge_socket_path TEXT NULL;
+ALTER TABLE agents ADD COLUMN bridge_status_file TEXT NULL;
+ALTER TABLE agents ADD COLUMN bridge_log_file TEXT NULL;
+ALTER TABLE agents ADD COLUMN bridge_events_file TEXT NULL;
+ALTER TABLE agents ADD COLUMN bridge_pid INTEGER NULL;
+ALTER TABLE agents ADD COLUMN bridge_connected_at INTEGER NULL;
+ALTER TABLE agents ADD COLUMN bridge_updated_at INTEGER NULL;
+ALTER TABLE agents ADD COLUMN bridge_last_error TEXT NULL;
+CREATE INDEX IF NOT EXISTS idx_agents_transport_state_updated ON agents(transport_state, updated_at DESC);
 `,
 	},
 ];

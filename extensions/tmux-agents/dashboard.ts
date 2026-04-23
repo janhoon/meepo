@@ -101,6 +101,25 @@ function sortAgents(agents: AgentSummary[], sort: DashboardSort): AgentSummary[]
 	});
 }
 
+function transportStateColor(state: AgentSummary["transportState"]): "warning" | "accent" | "muted" | null {
+	switch (state) {
+		case "live":
+			return "accent";
+		case "launching":
+		case "listening":
+			return "muted";
+		case "fallback":
+		case "disconnected":
+		case "error":
+		case "lost":
+		case "stopped":
+			return "warning";
+		case "legacy":
+		default:
+			return null;
+	}
+}
+
 function stateIcon(state: AgentSummary["state"]): string {
 	switch (state) {
 		case "launching":
@@ -253,9 +272,13 @@ class AgentsDashboardComponent {
 		lines.push(`unread: ${agent.unreadCount}`);
 		lines.push(`latest: ${agent.latestUnreadMessage ? `${agent.latestUnreadMessage.kind} · ${short(payloadSummary(agent.latestUnreadMessage), 42)}` : "-"}`);
 		lines.push(`task: ${short(agent.task, 54)}`);
+		const transportColor = transportStateColor(agent.transportState);
+		const transportText = `${agent.transportKind} / ${agent.transportState}`;
+		lines.push(`transport: ${transportColor ? this.theme.fg(transportColor, transportText) : transportText}`);
 		lines.push(`preview: ${short(agent.lastAssistantPreview, 54)}`);
 		lines.push(`summary: ${short(agent.finalSummary, 54)}`);
 		lines.push(`error: ${short(agent.lastError, 54)}`);
+		lines.push(`bridge: ${short(agent.bridgeSocketPath ?? agent.bridgeStatusFile, 54)}`);
 		lines.push(`tmux: ${agent.tmuxSessionName ?? agent.tmuxSessionId ?? "-"} / ${agent.tmuxWindowId ?? "-"}`);
 		lines.push(`pane: ${agent.tmuxPaneId ?? "-"}`);
 		lines.push(`runDir: ${short(agent.runDir, 54)}`);
@@ -282,7 +305,7 @@ class AgentsDashboardComponent {
 		);
 		lines.push(
 			truncateToWidth(
-				this.theme.fg("dim", "auto-refresh 5s · ↑↓ move · enter details · o open · x stop · r reply · c capture · n spawn · y sync · f scope · t sort · a/b/u filters · esc close"),
+				this.theme.fg("dim", "auto-refresh 5s · ↑↓ move · enter details · o open · x stop · r reply · c capture · n spawn · y reconcile · f scope · t sort · a/b/u filters · esc close"),
 				width,
 			),
 		);

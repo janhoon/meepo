@@ -1,17 +1,26 @@
 import { appendFileSync, chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { ensureTmuxAgentsRuntimePaths } from "./paths.js";
+import { ensureTmuxAgentsRuntimePaths, getSubagentRunPaths, type SubagentRunPaths } from "./paths.js";
 import { createAgent, createAgentEvent, createArtifact, updateAgent } from "./registry.js";
 import { getTask } from "./task-registry.js";
 import type { TaskRecord } from "./task-types.js";
-import type { CreateAgentInput, SessionChildLinkEntryData, SpawnSubagentInput, SpawnSubagentResult, SubagentProfile } from "./types.js";
+import type {
+	CreateAgentInput,
+	RpcBridgeConfig,
+	SessionChildLinkEntryData,
+	SpawnSubagentInput,
+	SpawnSubagentResult,
+	SubagentProfile,
+} from "./types.js";
 import { getTmuxAgentsDb } from "./db.js";
 import { getProjectKey } from "./project.js";
 
 const DETACHED_SESSION_NAME = "pi-subagents";
 const TMUX_OUTPUT_FORMAT = "#{session_id}\t#{session_name}\t#{window_id}\t#{pane_id}";
+const RPC_BRIDGE_ENTRY_SCRIPT = fileURLToPath(new URL("./rpc-bridge.mjs", import.meta.url));
 
 interface TmuxTarget {
 	sessionId: string;
@@ -172,68 +181,92 @@ function buildRuntimeAppendixContent(options: CreateRunArtifactsOptions, session
 		.join("\n");
 }
 
-function buildLaunchScriptContent(
-	options: CreateRunArtifactsOptions,
-	paths: { sessionFile: string; taskFile: string; runtimeAppendixFile: string },
-): string {
-	const args = [
-		shellQuote(resolvePiCommand()),
+// The child reporting tool must always be permitted through the pi CLI --tools
+// allowlist; otherwise pi filters the extension-registered tool out of the
+// session registry and the child has no way to publish updates upward.
+const CHILD_REPORTING_TOOL_NAME = "subagent_publish";
+
+function buildPiAllowedToolsArg(userTools: readonly string[]): string {
+	const merged = new Set<string>(userTools);
+	merged.add(CHILD_REPORTING_TOOL_NAME);
+	return Array.from(merged).join(",");
+}
+
+function buildBridgeConfig(options: CreateRunArtifactsOptions, paths: SubagentRunPaths): RpcBridgeConfig {
+	const piToolsArg = buildPiAllowedToolsArg(options.tools);
+	const piArgs = [
+		"--mode",
+		"rpc",
 		"--session",
-		shellQuote(paths.sessionFile),
+		paths.sessionFile,
 		"--tools",
-		shellQuote(options.tools.join(",")),
+		piToolsArg,
 		"--append-system-prompt",
-		shellQuote(options.profile.filePath),
+		options.profile.filePath,
 		"--append-system-prompt",
-		shellQuote(paths.runtimeAppendixFile),
+		paths.runtimeAppendixFile,
 	];
 	if (options.model) {
-		args.push("--model", shellQuote(options.model));
+		piArgs.push("--model", options.model);
 	}
-	args.push(shellQuote(`@${paths.taskFile}`));
+	return {
+		agentId: options.agentId,
+		title: options.title,
+		spawnCwd: options.spawnCwd,
+		runDir: paths.runDir,
+		sessionFile: paths.sessionFile,
+		taskFile: paths.taskFile,
+		profileFile: options.profile.filePath,
+		runtimeAppendixFile: paths.runtimeAppendixFile,
+		allowedTools: [...options.tools],
+		model: options.model,
+		piCommand: resolvePiCommand(),
+		piArgs,
+		bridgeSocketPath: paths.bridgeSocketPath,
+		bridgeStatusFile: paths.bridgeStatusFile,
+		bridgeEventsFile: paths.bridgeEventsFile,
+		bridgeLogFile: paths.bridgeLogFile,
+		bridgePidFile: paths.bridgePidFile,
+		latestStatusFile: paths.latestStatusFile,
+		debugLogFile: paths.debugLogFile,
+		childEnv: {
+			PI_TMUX_AGENTS_CHILD: "1",
+			PI_TMUX_AGENTS_CHILD_ID: options.agentId,
+			PI_TMUX_AGENTS_RUN_DIR: paths.runDir,
+			PI_TMUX_AGENTS_PROFILE: options.profile.name,
+			PI_TMUX_AGENTS_ALLOWED_TOOLS: options.tools.join(","),
+			PI_TMUX_AGENTS_TASK_ID: options.taskId ?? "",
+			PI_TMUX_AGENTS_PARENT_AGENT_ID: options.parentAgentId ?? "",
+			PI_TMUX_AGENTS_SPAWN_SESSION_ID: options.spawnSessionId ?? "",
+			PI_TMUX_AGENTS_SPAWN_SESSION_FILE: options.spawnSessionFile ?? "",
+			PI_TMUX_AGENTS_TRANSPORT_KIND: "rpc_bridge",
+			PI_TMUX_AGENTS_BRIDGE_STATUS_FILE: paths.bridgeStatusFile,
+		},
+		createdAt: Date.now(),
+	};
+}
+
+function buildLaunchScriptContent(options: CreateRunArtifactsOptions, paths: SubagentRunPaths): string {
 	return [
 		"#!/usr/bin/env bash",
 		"set -euo pipefail",
 		`cd ${shellQuote(options.spawnCwd)}`,
-		`export PI_TMUX_AGENTS_CHILD=1`,
-		`export PI_TMUX_AGENTS_CHILD_ID=${shellQuote(options.agentId)}`,
-		`export PI_TMUX_AGENTS_RUN_DIR=${shellQuote(dirname(paths.sessionFile))}`,
-		`export PI_TMUX_AGENTS_PROFILE=${shellQuote(options.profile.name)}`,
-		`export PI_TMUX_AGENTS_ALLOWED_TOOLS=${shellQuote(options.tools.join(","))}`,
-		`export PI_TMUX_AGENTS_TASK_ID=${shellQuote(options.taskId ?? "")}`,
-		`export PI_TMUX_AGENTS_PARENT_AGENT_ID=${shellQuote(options.parentAgentId ?? "")}`,
-		`export PI_TMUX_AGENTS_SPAWN_SESSION_ID=${shellQuote(options.spawnSessionId ?? "")}`,
-		`export PI_TMUX_AGENTS_SPAWN_SESSION_FILE=${shellQuote(options.spawnSessionFile ?? "")}`,
-		`exec ${args.join(" ")}`,
+		`exec ${shellQuote(process.execPath)} ${shellQuote(RPC_BRIDGE_ENTRY_SCRIPT)} --config ${shellQuote(paths.bridgeConfigFile)}`,
 	].join("\n");
 }
 
-function writeRunArtifacts(options: CreateRunArtifactsOptions): {
-	runDir: string;
-	taskFile: string;
-	runtimeAppendixFile: string;
-	launchScript: string;
-	sessionFile: string;
-	latestStatusFile: string;
-	eventsFile: string;
-	debugLogFile: string;
-} {
+function writeRunArtifacts(options: CreateRunArtifactsOptions): SubagentRunPaths {
 	const { runsDir } = ensureTmuxAgentsRuntimePaths();
 	const runDir = join(runsDir, options.agentId);
 	mkdirSync(runDir, { recursive: true });
-	const taskFile = join(runDir, "task.md");
-	const runtimeAppendixFile = join(runDir, "runtime-appendix.md");
-	const launchScript = join(runDir, "launch.sh");
-	const sessionFile = join(runDir, "session.jsonl");
-	const latestStatusFile = join(runDir, "latest-status.json");
-	const eventsFile = join(runDir, "events.jsonl");
-	const debugLogFile = join(runDir, "debug.log");
-	writeFileSync(taskFile, buildTaskFileContent(options));
-	writeFileSync(runtimeAppendixFile, buildRuntimeAppendixContent(options, sessionFile, runDir));
-	writeFileSync(launchScript, buildLaunchScriptContent(options, { sessionFile, taskFile, runtimeAppendixFile }));
-	chmodSync(launchScript, 0o755);
+	const paths = getSubagentRunPaths(runDir);
+	writeFileSync(paths.taskFile, buildTaskFileContent(options));
+	writeFileSync(paths.runtimeAppendixFile, buildRuntimeAppendixContent(options, paths.sessionFile, runDir));
+	writeFileSync(paths.bridgeConfigFile, `${JSON.stringify(buildBridgeConfig(options, paths), null, 2)}\n`);
+	writeFileSync(paths.launchScript, buildLaunchScriptContent(options, paths));
+	chmodSync(paths.launchScript, 0o755);
 	writeFileSync(
-		latestStatusFile,
+		paths.latestStatusFile,
 		`${JSON.stringify(
 			{
 				agentId: options.agentId,
@@ -243,14 +276,46 @@ function writeRunArtifacts(options: CreateRunArtifactsOptions): {
 				task: options.task,
 				taskId: options.taskId,
 				updatedAt: Date.now(),
+				source: "spawn",
+				transportKind: "rpc_bridge",
+				transportState: "launching",
+				downwardDeliveryMode: "rpc_bridge",
+				lastToolName: null,
+				lastAssistantPreview: null,
+				lastError: null,
+				finalSummary: null,
 			},
 			null,
 			2,
 		)}\n`,
 	);
-	writeFileSync(eventsFile, "");
-	writeFileSync(debugLogFile, "");
-	return { runDir, taskFile, runtimeAppendixFile, launchScript, sessionFile, latestStatusFile, eventsFile, debugLogFile };
+	writeFileSync(
+		paths.bridgeStatusFile,
+		`${JSON.stringify(
+			{
+				agentId: options.agentId,
+				transportKind: "rpc_bridge",
+				transportState: "launching",
+				updatedAt: Date.now(),
+				bridgePid: null,
+				childPid: null,
+				socketPath: paths.bridgeSocketPath,
+				connectedAt: null,
+				lastError: null,
+				lastEventType: null,
+				isStreaming: false,
+				pendingRequests: 0,
+			},
+			null,
+			2,
+		)}\n`,
+	);
+	writeFileSync(paths.eventsFile, "");
+	writeFileSync(paths.debugLogFile, "");
+	writeFileSync(paths.bridgeEventsFile, "");
+	writeFileSync(paths.bridgeLogFile, "");
+	writeFileSync(paths.bridgePidFile, "");
+	return paths;
 }
 
 function appendRunEvent(runDir: string, eventType: string, summary: string, payload: unknown): void {
@@ -320,8 +385,15 @@ export function spawnSubagent(input: SpawnSubagentInput): SpawnSubagentResult {
 		title: input.title,
 		task: input.task,
 		state: "launching",
+		transportKind: "rpc_bridge",
+		transportState: "launching",
 		model: input.model,
 		tools,
+		bridgeSocketPath: runArtifacts.bridgeSocketPath,
+		bridgeStatusFile: runArtifacts.bridgeStatusFile,
+		bridgeLogFile: runArtifacts.bridgeLogFile,
+		bridgeEventsFile: runArtifacts.bridgeEventsFile,
+		bridgeUpdatedAt: now,
 		runDir: runArtifacts.runDir,
 		sessionFile: runArtifacts.sessionFile,
 		createdAt: now,
@@ -349,6 +421,12 @@ export function spawnSubagent(input: SpawnSubagentInput): SpawnSubagentResult {
 		{ kind: "latest_status", path: runArtifacts.latestStatusFile },
 		{ kind: "events", path: runArtifacts.eventsFile },
 		{ kind: "debug_log", path: runArtifacts.debugLogFile },
+		{ kind: "bridge_config", path: runArtifacts.bridgeConfigFile },
+		{ kind: "bridge_status", path: runArtifacts.bridgeStatusFile },
+		{ kind: "bridge_events", path: runArtifacts.bridgeEventsFile },
+		{ kind: "bridge_log", path: runArtifacts.bridgeLogFile },
+		{ kind: "bridge_pid", path: runArtifacts.bridgePidFile },
+		{ kind: "bridge_socket", path: runArtifacts.bridgeSocketPath },
 	]) {
 		createArtifact(db, {
 			id: randomUUID(),
@@ -368,7 +446,15 @@ export function spawnSubagent(input: SpawnSubagentInput): SpawnSubagentResult {
 		tmuxTarget = spawnTmuxWindow(runArtifacts.launchScript, input.title, agentId);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
-		updateAgent(db, agentId, { state: "error", lastError: message, updatedAt: Date.now() });
+		updateAgent(db, agentId, {
+			state: "error",
+			transportKind: "rpc_bridge",
+			transportState: "error",
+			bridgeLastError: message,
+			bridgeUpdatedAt: Date.now(),
+			lastError: message,
+			updatedAt: Date.now(),
+		});
 		createAgentEvent(db, {
 			id: randomUUID(),
 			agentId,
@@ -384,6 +470,9 @@ export function spawnSubagent(input: SpawnSubagentInput): SpawnSubagentResult {
 		tmuxSessionName: tmuxTarget.sessionName,
 		tmuxWindowId: tmuxTarget.windowId,
 		tmuxPaneId: tmuxTarget.paneId,
+		transportKind: "rpc_bridge",
+		transportState: "launching",
+		bridgeUpdatedAt: Date.now(),
 		updatedAt: Date.now(),
 	});
 	createAgentEvent(db, {
@@ -401,6 +490,10 @@ export function spawnSubagent(input: SpawnSubagentInput): SpawnSubagentResult {
 		task: input.task,
 		runDir: runArtifacts.runDir,
 		sessionFile: runArtifacts.sessionFile,
+		transportKind: "rpc_bridge",
+		transportState: "launching",
+		bridgeSocketPath: runArtifacts.bridgeSocketPath,
+		bridgeStatusFile: runArtifacts.bridgeStatusFile,
 		tmuxSessionId: tmuxTarget.sessionId,
 		tmuxSessionName: tmuxTarget.sessionName,
 		tmuxWindowId: tmuxTarget.windowId,
@@ -416,6 +509,11 @@ export function spawnSubagent(input: SpawnSubagentInput): SpawnSubagentResult {
 		runDir: runArtifacts.runDir,
 		sessionFile: runArtifacts.sessionFile,
 		taskId: input.taskId,
+		transportKind: "rpc_bridge",
+		transportState: "launching",
+		bridgeSocketPath: runArtifacts.bridgeSocketPath,
+		bridgeStatusFile: runArtifacts.bridgeStatusFile,
+		bridgeLogFile: runArtifacts.bridgeLogFile,
 		tmuxSessionId: tmuxTarget.sessionId,
 		tmuxSessionName: tmuxTarget.sessionName,
 		tmuxWindowId: tmuxTarget.windowId,

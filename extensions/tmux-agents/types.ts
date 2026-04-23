@@ -12,6 +12,21 @@ export const AGENT_STATES = [
 	"lost",
 ] as const;
 
+export const AGENT_TRANSPORT_KINDS = ["direct", "rpc_bridge"] as const;
+export const AGENT_TRANSPORT_STATES = [
+	"legacy",
+	"launching",
+	"listening",
+	"live",
+	"fallback",
+	"disconnected",
+	"stopped",
+	"error",
+	"lost",
+] as const;
+export const RUNTIME_STATUS_SOURCES = ["spawn", "rpc_bridge", "child_runtime"] as const;
+export const CHILD_DOWNWARD_DELIVERY_MODES = ["rpc_bridge", "poll_fallback"] as const;
+
 export const MESSAGE_TARGET_KINDS = ["primary", "user", "child"] as const;
 export const MESSAGE_KINDS = [
 	"started",
@@ -42,6 +57,10 @@ export const ATTENTION_ITEM_STATES = [
 ] as const;
 
 export type AgentState = (typeof AGENT_STATES)[number];
+export type AgentTransportKind = (typeof AGENT_TRANSPORT_KINDS)[number];
+export type AgentTransportState = (typeof AGENT_TRANSPORT_STATES)[number];
+export type RuntimeStatusSource = (typeof RUNTIME_STATUS_SOURCES)[number];
+export type ChildDownwardDeliveryMode = (typeof CHILD_DOWNWARD_DELIVERY_MODES)[number];
 export type MessageTargetKind = (typeof MESSAGE_TARGET_KINDS)[number];
 export type MessageKind = (typeof MESSAGE_KINDS)[number];
 export type DeliveryMode = (typeof DELIVERY_MODES)[number];
@@ -58,6 +77,10 @@ export interface SessionChildLinkEntryData {
 	task: string;
 	runDir: string;
 	sessionFile: string;
+	transportKind?: AgentTransportKind;
+	transportState?: AgentTransportState;
+	bridgeSocketPath?: string | null;
+	bridgeStatusFile?: string | null;
 	tmuxSessionId?: string | null;
 	tmuxSessionName?: string | null;
 	tmuxWindowId?: string | null;
@@ -98,6 +121,11 @@ export interface SpawnSubagentResult {
 	runDir: string;
 	sessionFile: string;
 	taskId: string | null;
+	transportKind: AgentTransportKind;
+	transportState: AgentTransportState;
+	bridgeSocketPath: string | null;
+	bridgeStatusFile: string | null;
+	bridgeLogFile: string | null;
 	tmuxSessionId: string;
 	tmuxSessionName: string;
 	tmuxWindowId: string;
@@ -114,6 +142,8 @@ export interface ChildRuntimeEnvironment {
 	parentAgentId: string | null;
 	spawnSessionId: string | null;
 	spawnSessionFile: string | null;
+	transportKind: AgentTransportKind;
+	bridgeStatusFile: string | null;
 }
 
 export interface RuntimeStatusSnapshot {
@@ -126,6 +156,10 @@ export interface RuntimeStatusSnapshot {
 	lastError: string | null;
 	finalSummary: string | null;
 	finishedAt?: number | null;
+	source?: RuntimeStatusSource;
+	transportKind?: AgentTransportKind | null;
+	transportState?: AgentTransportState | null;
+	downwardDeliveryMode?: ChildDownwardDeliveryMode | null;
 }
 
 export interface SubagentPublishPayload {
@@ -182,8 +216,18 @@ export interface AgentSummary {
 	title: string;
 	task: string;
 	state: AgentState;
+	transportKind: AgentTransportKind;
+	transportState: AgentTransportState;
 	model: string | null;
 	tools: unknown;
+	bridgeSocketPath: string | null;
+	bridgeStatusFile: string | null;
+	bridgeLogFile: string | null;
+	bridgeEventsFile: string | null;
+	bridgePid: number | null;
+	bridgeConnectedAt: number | null;
+	bridgeUpdatedAt: number | null;
+	bridgeLastError: string | null;
 	tmuxSessionId: string | null;
 	tmuxSessionName: string | null;
 	tmuxWindowId: string | null;
@@ -234,8 +278,18 @@ export interface CreateAgentInput {
 	title: string;
 	task: string;
 	state: AgentState;
+	transportKind?: AgentTransportKind;
+	transportState?: AgentTransportState;
 	model?: string | null;
 	tools?: unknown;
+	bridgeSocketPath?: string | null;
+	bridgeStatusFile?: string | null;
+	bridgeLogFile?: string | null;
+	bridgeEventsFile?: string | null;
+	bridgePid?: number | null;
+	bridgeConnectedAt?: number | null;
+	bridgeUpdatedAt?: number | null;
+	bridgeLastError?: string | null;
 	tmuxSessionId?: string | null;
 	tmuxSessionName?: string | null;
 	tmuxWindowId?: string | null;
@@ -262,8 +316,18 @@ export interface UpdateAgentInput {
 	title?: string;
 	task?: string;
 	state?: AgentState;
+	transportKind?: AgentTransportKind;
+	transportState?: AgentTransportState;
 	model?: string | null;
 	tools?: unknown;
+	bridgeSocketPath?: string | null;
+	bridgeStatusFile?: string | null;
+	bridgeLogFile?: string | null;
+	bridgeEventsFile?: string | null;
+	bridgePid?: number | null;
+	bridgeConnectedAt?: number | null;
+	bridgeUpdatedAt?: number | null;
+	bridgeLastError?: string | null;
 	tmuxSessionId?: string | null;
 	tmuxSessionName?: string | null;
 	tmuxWindowId?: string | null;
@@ -384,4 +448,58 @@ export interface FleetSummary {
 	attentionOpen: number;
 	attentionWaitingOnUser: number;
 	attentionCompletions: number;
+}
+
+export interface RpcBridgeConfig {
+	agentId: string;
+	title: string;
+	spawnCwd: string;
+	runDir: string;
+	sessionFile: string;
+	taskFile: string;
+	profileFile: string;
+	runtimeAppendixFile: string;
+	allowedTools: string[];
+	model: string | null;
+	piCommand: string;
+	piArgs: string[];
+	bridgeSocketPath: string;
+	bridgeStatusFile: string;
+	bridgeEventsFile: string;
+	bridgeLogFile: string;
+	bridgePidFile: string;
+	latestStatusFile: string;
+	debugLogFile: string;
+	childEnv: Record<string, string>;
+	createdAt: number;
+}
+
+export interface RpcBridgeStatusSnapshot {
+	agentId: string;
+	transportKind: "rpc_bridge";
+	transportState: AgentTransportState;
+	updatedAt: number;
+	bridgePid: number | null;
+	childPid: number | null;
+	socketPath: string | null;
+	connectedAt?: number | null;
+	lastError?: string | null;
+	lastEventType?: string | null;
+	isStreaming?: boolean;
+	pendingRequests?: number;
+}
+
+export interface RpcBridgeCommandRequest {
+	id: string;
+	command: "ping" | "prompt" | "steer" | "follow_up" | "abort" | "get_state";
+	message?: string;
+	images?: unknown[];
+	streamingBehavior?: "steer" | "followUp";
+}
+
+export interface RpcBridgeCommandResponse {
+	id: string;
+	success: boolean;
+	data?: unknown;
+	error?: string;
 }

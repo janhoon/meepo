@@ -1,6 +1,6 @@
 # tmux-agents extension
 
-Current implementation status: **task-first board + task registry + agent/runtime control foundation**, plus tracked tmux service launches for long-running commands.
+Current implementation status: **task-first board + task registry + agent/runtime control foundation**, plus tracked tmux service launches for long-running commands and an in-progress RPC bridge control plane for child agents.
 
 Implemented so far:
 - global SQLite bootstrap at `~/.pi/agent/subagents.db`
@@ -77,6 +77,12 @@ Implemented so far:
   - `latest-status.json`
   - `events.jsonl`
   - `debug.log`
+  - `bridge-config.json`
+  - `bridge-status.json`
+  - `bridge-events.jsonl`
+  - `bridge.log`
+  - `bridge.pid`
+  - `bridge.sock` path reservation
 - generated service artifacts:
   - `command.txt`
   - `launch.sh`
@@ -84,6 +90,11 @@ Implemented so far:
   - `latest-status.json`
   - `output.log`
 - tmux window spawning with stored tmux ids
+- tmux-side RPC bridge launch path for new subagent spawns:
+  - tmux runs a bridge entrypoint instead of invoking `pi` directly
+  - the bridge launches `pi --mode rpc`
+  - the bridge exposes a local Unix socket control endpoint for prompt/steer/follow_up/abort/get_state
+  - the bridge mirrors readable activity into the tmux pane while persisting machine-readable status/events
 - parent-session linkage entries appended into the current pi session
 - child-mode runtime support:
   - auto `started` event
@@ -94,6 +105,9 @@ Implemented so far:
   - action-policy-aware downward messages (`fyi`, `resume_if_blocked`, `replan`, `interrupt_and_replan`, `stop`)
   - delivered/acked transitions for downward child messages
   - live registry + `latest-status.json` preview updates while the child runs
+  - live RPC bridge delivery for queued child messages when the bridge is healthy
+  - fallback transport-state classification when the bridge is unavailable
+  - coordinator wake-up routing from unresolved attention items
 - interactive dashboard behavior:
   - list view with scope/filter/sort controls
   - detail pane with parent/child relationships
@@ -115,9 +129,25 @@ Implemented so far:
 Not implemented yet:
 - richer task decomposition / subtask UX
 - richer attention-queue UI and coordinator routing polish
+- stronger bridge reconnect/recovery automation across more edge cases
 - richer child reply/ack UI polish
-- stronger reconciliation polish around edge cases
 - more capture/transcript options, but keep capture debug-only relative to the message/inbox control plane
 - stronger rg-only guard enforcement inside the extension runtime
+
+Quick operator notes for the RPC path:
+- `subagent_get`, `subagent_list`, dashboard details, and reconcile output now expose transport state for bridge-backed children.
+- Transport state can be any of `legacy`, `launching`, `listening`, `live`, `fallback`, `disconnected`, `stopped`, `error`, or `lost`. `legacy` marks older records from before the RPC migration; everything else is reported by the bridge or by reconcile.
+- `subagent_message` now attempts live bridge delivery first and leaves queued mailbox rows in place when it must fall back.
+- Graceful `subagent_stop` prefers a bridge-delivered cancel before falling back to tmux `Ctrl+C`.
+- `subagent_reconcile` inspects both tmux state and bridge health to refresh transport metadata.
+
+Manual validation / troubleshooting checklist:
+- Spawn a new child and confirm its run dir contains `bridge-config.json`, `bridge-status.json`, `bridge-events.jsonl`, `bridge.log`, and `bridge.pid`.
+- Use `subagent_get` or `/agents` to confirm the new child reports `transportKind=rpc_bridge`.
+- Watch the healthy launch progression: a freshly spawned child should move from `launching` (bridge entrypoint starting) to `listening` (socket accepting connections) to `live` (child runtime attached and exchanging RPC traffic). If it stalls at `launching` or `listening` for more than a few seconds, inspect `bridge.log` and `bridge-status.json`.
+- Send `subagent_message` to a live child and verify the message is either reported as delivered via the bridge or left queued with `transportState=fallback`.
+- Publish a child `question` or `blocked` update and verify the coordinator gets a wake-up message while the item also remains visible in attention surfaces.
+- Run `subagent_reconcile` after killing the bridge or closing the tmux target and confirm the transport state changes to something explicit like `fallback`, `disconnected`, `stopped`, or `lost`.
+- If transport is not `live`, inspect `bridge-status.json`, `bridge.log`, and the tmux pane before falling back to `subagent_capture`.
 
 Use `/reload` in pi after changing files under `~/.pi/agent/extensions/tmux-agents/`.

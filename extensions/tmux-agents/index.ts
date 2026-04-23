@@ -10,6 +10,7 @@ import { openAgentsBoard, type AgentsBoardData, type AgentsBoardState, type Boar
 import { registerChildRuntime, getChildRuntimeEnvironment } from "./child-runtime.js";
 import { openAgentsDashboard, type AgentsDashboardData, type AgentsDashboardState } from "./dashboard.js";
 import { closeTmuxAgentsDb, getTmuxAgentsDb } from "./db.js";
+import { getRpcBridgeSocketPath, pingRpcBridge, readRpcBridgeStatus, sendRpcBridgeCommand } from "./rpc-client.js";
 import { SESSION_CHILD_LINK_ENTRY_TYPE } from "./paths.js";
 import { getSubagentProfile, listSubagentProfiles, normalizeBuiltinTools } from "./profiles.js";
 import { getProjectKey } from "./project.js";
@@ -21,6 +22,8 @@ import {
 	listAgents,
 	listAttentionItems,
 	listInboxMessages,
+	listMessagesForRecipient,
+	markAgentMessages,
 	updateAgent,
 	updateAttentionItemsForAgent,
 } from "./registry.js";
@@ -78,7 +81,13 @@ import type {
 } from "./task-types.js";
 
 const childRuntimeEnvironment = getChildRuntimeEnvironment();
+const ATTENTION_WAKE_POLL_MS = 2000;
 let lastFocusedActiveAgentId: string | undefined;
+let attentionWakePoll: ReturnType<typeof setInterval> | undefined;
+const liveBridgeDeliveryInFlight = new Set<string>();
+const scheduledBridgeDeliveryRetries = new Map<string, ReturnType<typeof setTimeout>>();
+const sentCoordinatorAttentionIds = new Set<string>();
+const notifiedUserAttentionIds = new Set<string>();
 
 const LIST_SCOPE = StringEnum(["all", "current_project", "current_session", "descendants"] as const, {
 	description: "Which slice of the global registry to inspect.",
@@ -430,6 +439,9 @@ function messageKindLabel(message: AgentMessageRecord | null): string {
 function formatAgentLine(agent: AgentSummary): string {
 	const parts = [`${stateIcon(agent.state)} ${agent.id}`, `${agent.profile}`, truncateText(agent.title, 40)];
 	if (agent.taskId) parts.push(`task=${agent.taskId}`);
+	if (agent.transportKind === "rpc_bridge") {
+		parts.push(`transport=${agent.transportState}`);
+	}
 	if (agent.unreadCount > 0) {
 		parts.push(`${agent.unreadCount} unread`);
 	}
@@ -452,8 +464,18 @@ function formatAgentDetails(agent: AgentSummary): string {
 		`spawnSessionId: ${agent.spawnSessionId ?? "-"}`,
 		`spawnSessionFile: ${agent.spawnSessionFile ?? "-"}`,
 		`model: ${agent.model ?? "-"}`,
+		`transportKind: ${agent.transportKind}`,
+		`transportState: ${agent.transportState}`,
 		`runDir: ${agent.runDir}`,
 		`sessionFile: ${agent.sessionFile}`,
+		`bridgeSocketPath: ${agent.bridgeSocketPath ?? "-"}`,
+		`bridgeStatusFile: ${agent.bridgeStatusFile ?? "-"}`,
+		`bridgeLogFile: ${agent.bridgeLogFile ?? "-"}`,
+		`bridgeEventsFile: ${agent.bridgeEventsFile ?? "-"}`,
+		`bridgePid: ${agent.bridgePid ?? "-"}`,
+		`bridgeConnectedAt: ${agent.bridgeConnectedAt ? new Date(agent.bridgeConnectedAt).toISOString() : "-"}`,
+		`bridgeUpdatedAt: ${agent.bridgeUpdatedAt ? new Date(agent.bridgeUpdatedAt).toISOString() : "-"}`,
+		`bridgeLastError: ${agent.bridgeLastError ?? "-"}`,
 		`tmuxSessionId: ${agent.tmuxSessionId ?? "-"}`,
 		`tmuxSessionName: ${agent.tmuxSessionName ?? "-"}`,
 		`tmuxWindowId: ${agent.tmuxWindowId ?? "-"}`,
@@ -702,6 +724,72 @@ function attentionItemIcon(item: AttentionItemRecord): string {
 			return "✓";
 		default:
 			return "•";
+	}
+}
+
+function formatAttentionWakeup(item: AttentionItemRecord, agent: AgentSummary | undefined): string {
+	const payload = (item.payload && typeof item.payload === "object" ? item.payload : {}) as {
+		details?: string;
+		files?: string[];
+		answerNeeded?: string;
+		recommendedNextAction?: string;
+	};
+	const lines = [
+		`Child ${agent?.id ?? item.agentId} (${agent?.profile ?? "agent"}) reported a ${attentionItemLabel(item)}.`,
+		`Summary: ${item.summary}`,
+		agent?.title ? `Title: ${agent.title}` : null,
+		payload.answerNeeded ? `Answer needed: ${payload.answerNeeded}` : null,
+		payload.recommendedNextAction ? `Recommended next action: ${payload.recommendedNextAction}` : null,
+		payload.details ? `Details: ${payload.details}` : null,
+		Array.isArray(payload.files) && payload.files.length > 0 ? `Files: ${payload.files.join(", ")}` : null,
+	].filter((line): line is string => Boolean(line));
+	if (item.kind === "complete") {
+		lines.push("Review the handoff, then decide whether to move the linked task or delegate follow-on work.");
+		return lines.join("\n");
+	}
+	lines.push("Respond with concrete guidance, exact file paths, and only one answer or redirect at a time if clarification is needed.");
+	return lines.join("\n");
+}
+
+async function wakeCoordinatorFromAttention(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
+	if (childRuntimeEnvironment) return;
+	const db = getTmuxAgentsDb();
+	const projectKey = getProjectKey(ctx.cwd);
+	const items = listAttentionItems(db, {
+		projectKey,
+		states: ["open", "waiting_on_coordinator", "waiting_on_user"],
+		limit: 25,
+	});
+	if (items.length === 0) return;
+	const agents = new Map(listAgents(db, { projectKey, limit: 200 }).map((agent) => [agent.id, agent]));
+
+	for (const item of items) {
+		const agent = agents.get(item.agentId);
+		if (item.audience === "user") {
+			if (notifiedUserAttentionIds.has(item.id)) continue;
+			try {
+				ctx.ui.notify(`${attentionItemIcon(item)} ${agent?.title ?? item.agentId} · ${item.summary}`, item.kind === "question_for_user" ? "warning" : "info");
+				notifiedUserAttentionIds.add(item.id);
+			} catch (error) {
+				notifiedUserAttentionIds.delete(item.id);
+				throw error;
+			}
+			continue;
+		}
+		if (sentCoordinatorAttentionIds.has(item.id)) continue;
+		sentCoordinatorAttentionIds.add(item.id);
+		const content = formatAttentionWakeup(item, agent);
+		try {
+			if (ctx.isIdle()) {
+				await pi.sendUserMessage(content);
+			} else {
+				await pi.sendUserMessage(content, { deliverAs: item.kind === "complete" ? "followUp" : "steer" });
+			}
+		} catch (error) {
+			sentCoordinatorAttentionIds.delete(item.id);
+			throw error;
+		}
+		break;
 	}
 }
 
@@ -965,6 +1053,10 @@ function formatSpawnSuccess(result: SpawnSubagentResult): string {
 		`cwd: ${result.spawnCwd}`,
 		`runDir: ${result.runDir}`,
 		`sessionFile: ${result.sessionFile}`,
+		`transport: ${result.transportKind} ${result.transportState}`,
+		`bridgeSocketPath: ${result.bridgeSocketPath ?? "-"}`,
+		`bridgeStatusFile: ${result.bridgeStatusFile ?? "-"}`,
+		`bridgeLogFile: ${result.bridgeLogFile ?? "-"}`,
 		`tmuxSession: ${result.tmuxSessionName} ${result.tmuxSessionId}`,
 		`tmuxWindow: ${result.tmuxWindowId}`,
 		`tmuxPane: ${result.tmuxPaneId}`,
@@ -1012,19 +1104,205 @@ function defaultDownwardActionPolicy(kind: "answer" | "note" | "redirect" | "can
 	}
 }
 
+function expectedDownwardHandlingLines(actionPolicy: DownwardMessageActionPolicy): string[] {
+	switch (actionPolicy) {
+		case "resume_if_blocked":
+			return [
+				"If this resolves your current blocker or waiting state, resume work now.",
+				"Publish a concise note once you resume so the coordinator can track progress without capture.",
+				"If you are still blocked after this message, publish one concrete blocker or question immediately.",
+			];
+		case "replan":
+			return [
+				"Revise your plan before the next substantive tool call if this changes your priorities.",
+				"Publish a concise note if the plan or file focus changes.",
+			];
+		case "interrupt_and_replan":
+			return [
+				"Stop the current approach and replan before more substantive work.",
+				"Publish a concise note after adopting this redirect, with exact file paths when relevant.",
+			];
+		case "stop":
+			return [
+				"Stop current work gracefully.",
+				"Publish a completion-style handoff or cancellation summary before exiting if possible.",
+			];
+		case "fyi":
+		default:
+			return [
+				"Treat this as additional context. Continue unless it materially changes your plan.",
+				"Publish a concise note only if this changes your course of action.",
+			];
+	}
+}
+
+function formatDownwardMessageForChild(message: AgentMessageRecord): string {
+	const payload = (message.payload && typeof message.payload === "object" ? message.payload : {}) as DownwardMessagePayload;
+	const actionPolicy = payload.actionPolicy ?? defaultDownwardActionPolicy(message.kind as "answer" | "note" | "redirect" | "cancel" | "priority");
+	const lines = [`[Coordinator ${message.kind} · action ${actionPolicy}]`];
+	if (payload.summary) lines.push(payload.summary);
+	if (payload.details) lines.push("", payload.details);
+	if (Array.isArray(payload.files) && payload.files.length > 0) {
+		lines.push("", `Files: ${payload.files.join(", ")}`);
+	}
+	if (payload.inReplyToMessageId) {
+		lines.push("", `Replying to message: ${payload.inReplyToMessageId}`);
+	}
+	lines.push("", "Expected handling:");
+	for (const line of expectedDownwardHandlingLines(actionPolicy)) {
+		lines.push(`- ${line}`);
+	}
+	return lines.join("\n");
+}
+
+function scheduleBridgeDeliveryRetry(agentId: string, delayMs = 250): void {
+	if (scheduledBridgeDeliveryRetries.has(agentId)) return;
+	const timer = setTimeout(() => {
+		scheduledBridgeDeliveryRetries.delete(agentId);
+		void deliverQueuedMessagesViaBridge(agentId).catch(() => {});
+	}, Math.max(1, delayMs));
+	scheduledBridgeDeliveryRetries.set(agentId, timer);
+}
+
+async function deliverQueuedMessagesViaBridge(agentId: string): Promise<{ delivered: number; deferred: number; transportState: string }> {
+	if (liveBridgeDeliveryInFlight.has(agentId)) {
+		scheduleBridgeDeliveryRetry(agentId, 300);
+		const queued = listMessagesForRecipient(getTmuxAgentsDb(), agentId, { targetKind: "child", limit: 50 });
+		return { delivered: 0, deferred: queued.length, transportState: "busy" };
+	}
+	liveBridgeDeliveryInFlight.add(agentId);
+	let lastFailureWasTransport = false;
+	let stateProbeFailed = false;
+	let stateProbeError: string | null = null;
+	try {
+		const db = getTmuxAgentsDb();
+		let agent = getAgent(db, agentId);
+		if (!agent) return { delivered: 0, deferred: 0, transportState: "missing" };
+		if (agent.transportKind !== "rpc_bridge") {
+			return { delivered: 0, deferred: 0, transportState: agent.transportState };
+		}
+		const queued = listMessagesForRecipient(db, agent.id, { targetKind: "child", limit: 50 });
+		if (queued.length === 0) {
+			return { delivered: 0, deferred: 0, transportState: agent.transportState };
+		}
+		const socketPath = getRpcBridgeSocketPath(agent);
+		if (!socketPath) {
+			updateAgent(db, agent.id, {
+				transportKind: "rpc_bridge",
+				transportState: "fallback",
+				bridgeUpdatedAt: Date.now(),
+				bridgeLastError: "RPC bridge socket is unavailable.",
+				updatedAt: Date.now(),
+			});
+			createAgentEvent(db, {
+				id: randomUUID(),
+				agentId: agent.id,
+				eventType: "downward_live_deferred",
+				summary: "RPC bridge socket is unavailable.",
+				payload: { queued: queued.length },
+			});
+			return { delivered: 0, deferred: queued.length, transportState: "fallback" };
+		}
+
+		let isStreaming = false;
+		try {
+			const stateResponse = await sendRpcBridgeCommand(socketPath, { command: "get_state" }, 2500);
+			if (stateResponse.success && stateResponse.data && typeof stateResponse.data === "object") {
+				isStreaming = Boolean((stateResponse.data as { isStreaming?: boolean }).isStreaming);
+			}
+		} catch (error) {
+			stateProbeFailed = true;
+			stateProbeError = error instanceof Error ? error.message : String(error);
+			isStreaming = true;
+		}
+
+		let delivered = 0;
+		for (const message of queued) {
+			const bridgeCommand = !isStreaming
+				? { command: "prompt" as const, message: formatDownwardMessageForChild(message) }
+				: message.deliveryMode === "follow_up" || message.deliveryMode === "idle_only"
+					? { command: "follow_up" as const, message: formatDownwardMessageForChild(message) }
+					: { command: "steer" as const, message: formatDownwardMessageForChild(message) };
+			let response;
+			try {
+				response = await sendRpcBridgeCommand(socketPath, bridgeCommand, 5000);
+			} catch (error) {
+				lastFailureWasTransport = true;
+				throw error;
+			}
+			if (!response.success) {
+				lastFailureWasTransport = false;
+				throw new Error(response.error ?? `RPC bridge rejected ${message.kind}.`);
+			}
+			markAgentMessages(db, [message.id], "delivered");
+			markAgentMessages(db, [message.id], "acked");
+			createAgentEvent(db, {
+				id: randomUUID(),
+				agentId: agent.id,
+				eventType: "downward_live_delivered",
+				summary: (message.payload as DownwardMessagePayload | null)?.summary ?? `${message.kind} delivered via RPC bridge`,
+				payload: { messageId: message.id, bridgeCommand: bridgeCommand.command, deliveryMode: message.deliveryMode },
+			});
+			delivered += 1;
+			isStreaming = true;
+		}
+
+		updateAgent(db, agent.id, {
+			transportKind: "rpc_bridge",
+			transportState: "live",
+			bridgeSocketPath: socketPath,
+			bridgeConnectedAt: Date.now(),
+			bridgeUpdatedAt: Date.now(),
+			bridgeLastError: stateProbeFailed ? stateProbeError : null,
+			updatedAt: Date.now(),
+		});
+		return { delivered, deferred: Math.max(0, queued.length - delivered), transportState: "live" };
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		const db = getTmuxAgentsDb();
+		const agent = getAgent(db, agentId);
+		if (agent && agent.transportKind === "rpc_bridge") {
+			updateAgent(db, agent.id, {
+				transportKind: "rpc_bridge",
+				transportState: lastFailureWasTransport ? "fallback" : agent.transportState,
+				bridgeUpdatedAt: Date.now(),
+				bridgeLastError: message,
+				updatedAt: Date.now(),
+			});
+			createAgentEvent(db, {
+				id: randomUUID(),
+				agentId: agent.id,
+				eventType: lastFailureWasTransport ? "downward_live_failed" : "downward_live_deferred",
+				summary: message,
+				payload: { error: message, transportFailure: lastFailureWasTransport },
+			});
+			if (!lastFailureWasTransport) {
+				scheduleBridgeDeliveryRetry(agentId, 500);
+			}
+		}
+		const queued = listMessagesForRecipient(db, agentId, { targetKind: "child", limit: 50 });
+		return { delivered: 0, deferred: queued.length, transportState: lastFailureWasTransport ? "fallback" : "live" };
+	} finally {
+		liveBridgeDeliveryInFlight.delete(agentId);
+		const queued = listMessagesForRecipient(getTmuxAgentsDb(), agentId, { targetKind: "child", limit: 1 });
+		if (queued.length > 0) scheduleBridgeDeliveryRetry(agentId, 300);
+	}
+}
+
 function queueDownwardMessage(
 	agent: AgentSummary,
 	kind: "answer" | "note" | "redirect" | "cancel" | "priority",
 	payload: DownwardMessagePayload,
 	deliveryMode: DeliveryMode,
-): void {
+): string {
 	const db = getTmuxAgentsDb();
+	const messageId = randomUUID();
 	const fullPayload: DownwardMessagePayload = {
 		...payload,
 		actionPolicy: payload.actionPolicy ?? defaultDownwardActionPolicy(kind),
 	};
 	createAgentMessage(db, {
-		id: randomUUID(),
+		id: messageId,
 		threadId: agent.id,
 		senderAgentId: null,
 		recipientAgentId: agent.id,
@@ -1039,7 +1317,7 @@ function queueDownwardMessage(
 		agentId: agent.id,
 		eventType: `downward_${kind}`,
 		summary: fullPayload.summary,
-		payload: { deliveryMode, ...fullPayload },
+		payload: { messageId, deliveryMode, ...fullPayload },
 	});
 	if (kind === "cancel") {
 		updateAttentionItemsForAgent(
@@ -1071,6 +1349,7 @@ function queueDownwardMessage(
 		);
 	}
 	updateAgent(db, agent.id, { updatedAt: Date.now() });
+	return messageId;
 }
 
 function formatStopResult(
@@ -1088,10 +1367,10 @@ function formatStopResult(
 		.join("\n");
 }
 
-function stopAgentById(id: string, force: boolean, reason?: string): {
+async function stopAgentById(id: string, force: boolean, reason?: string): Promise<{
 	agent: AgentSummary;
 	result: { stopped: boolean; graceful: boolean; command: string; reason?: string };
-} {
+}> {
 	const agent = getAgent(getTmuxAgentsDb(), id);
 	if (!agent) {
 		throw new Error(`Unknown agent id \"${id}\".`);
@@ -1146,7 +1425,7 @@ function stopAgentById(id: string, force: boolean, reason?: string): {
 		throw new Error(`Agent ${agent.id} no longer has a live tmux target. Use force stop or reconcile.`);
 	}
 	if (!force) {
-		queueDownwardMessage(
+		const cancelMessageId = queueDownwardMessage(
 			agent,
 			"cancel",
 			{
@@ -1155,6 +1434,31 @@ function stopAgentById(id: string, force: boolean, reason?: string): {
 			},
 			"immediate",
 		);
+		const liveDelivery = await deliverQueuedMessagesViaBridge(agent.id);
+		const cancelStillQueued = listMessagesForRecipient(getTmuxAgentsDb(), agent.id, { targetKind: "child", limit: 50 }).some(
+			(message) => message.id === cancelMessageId,
+		);
+		if (liveDelivery.delivered > 0 || cancelStillQueued || liveDelivery.deferred > 0 || liveDelivery.transportState === "busy") {
+			createAgentEvent(getTmuxAgentsDb(), {
+				id: randomUUID(),
+				agentId: agent.id,
+				eventType: "graceful_stop_requested",
+				summary: reason?.trim() || "Stop requested via RPC bridge.",
+				payload: { liveDelivery, cancelMessageId, cancelStillQueued },
+			});
+			return {
+				agent: getAgent(getTmuxAgentsDb(), agent.id) ?? agent,
+				result: {
+					stopped: false,
+					graceful: true,
+					command: liveDelivery.delivered > 0 ? "rpc cancel" : "queued cancel",
+					reason:
+						liveDelivery.delivered > 0
+							? "Cancel delivered via RPC bridge. Waiting for the child to stop gracefully."
+							: "Cancel is queued for graceful child delivery. Waiting for the child to stop before falling back to tmux kill.",
+				},
+			};
+		}
 	}
 	const result = stopTmuxTarget(target, force);
 	if (force) {
@@ -1187,11 +1491,11 @@ function stopAgentById(id: string, force: boolean, reason?: string): {
 	return { agent: getAgent(getTmuxAgentsDb(), agent.id) ?? agent, result };
 }
 
-function reconcileAgents(ctx: ExtensionContext, params: { scope?: "all" | "current_project" | "current_session" | "descendants"; activeOnly?: boolean; limit?: number }): {
+async function reconcileAgents(ctx: ExtensionContext, params: { scope?: "all" | "current_project" | "current_session" | "descendants"; activeOnly?: boolean; limit?: number }): Promise<{
 	scope: string;
 	reconciled: number;
-	changed: Array<{ id: string; state: string; reason: string }>;
-} {
+	changed: Array<{ id: string; state: string; transportState: string; reason: string }>;
+}> {
 	const scope = params.scope ?? "current_project";
 	const filters = resolveAgentFilters(ctx, scope, {
 		activeOnly: params.activeOnly ?? true,
@@ -1200,9 +1504,25 @@ function reconcileAgents(ctx: ExtensionContext, params: { scope?: "all" | "curre
 	const db = getTmuxAgentsDb();
 	const agents = listAgents(db, filters);
 	const inventory = getTmuxInventory();
-	const changed: Array<{ id: string; state: string; reason: string }> = [];
+	const changed: Array<{ id: string; state: string; transportState: string; reason: string }> = [];
+	const bridgeHealth = new Map(
+		await Promise.all(
+			agents
+				.filter((agent) => agent.transportKind === "rpc_bridge")
+				.map(async (agent) => [
+					agent.id,
+					{
+						status: readRpcBridgeStatus(agent.bridgeStatusFile),
+						ping: await pingRpcBridge(agent, 1200),
+					},
+				] as const),
+		),
+	);
 	for (const agent of agents) {
 		const latestStatus = readLatestStatus(agent);
+		const bridge = bridgeHealth.get(agent.id);
+		const bridgeStatus = bridge?.status ?? null;
+		const bridgeReachable = Boolean(bridge?.ping?.success);
 		const targetExists = tmuxTargetExists(
 			{
 				sessionId: agent.tmuxSessionId,
@@ -1214,11 +1534,67 @@ function reconcileAgents(ctx: ExtensionContext, params: { scope?: "all" | "curre
 		);
 		let patch: UpdateAgentInput = {};
 		let reason = "";
+		if (bridgeStatus && bridgeStatus.updatedAt > (agent.bridgeUpdatedAt ?? 0)) {
+			patch = {
+				...patch,
+				transportKind: "rpc_bridge",
+				transportState: bridgeStatus.transportState,
+				bridgeSocketPath: bridgeStatus.socketPath ?? agent.bridgeSocketPath,
+				bridgePid: bridgeStatus.bridgePid,
+				bridgeConnectedAt: bridgeStatus.connectedAt ?? agent.bridgeConnectedAt,
+				bridgeUpdatedAt: bridgeStatus.updatedAt,
+				bridgeLastError: bridgeStatus.lastError ?? null,
+			};
+			reason = reason || "bridge-status.json was newer than the registry";
+		}
+		if (bridgeReachable) {
+			patch = {
+				...patch,
+				transportKind: "rpc_bridge",
+				transportState: "live",
+				bridgeSocketPath: getRpcBridgeSocketPath(agent),
+				bridgeConnectedAt: bridgeStatus?.connectedAt ?? agent.bridgeConnectedAt ?? Date.now(),
+				bridgeUpdatedAt: Date.now(),
+				bridgeLastError: null,
+				updatedAt: Date.now(),
+			};
+			reason = reason || "RPC bridge responded to health check";
+		} else if (agent.transportKind === "rpc_bridge") {
+			const inferredTransportState = !targetExists
+				? "lost"
+				: bridgeStatus?.transportState === "error"
+					? "error"
+					: bridgeStatus?.transportState === "stopped"
+						? "stopped"
+						: bridgeStatus?.transportState === "listening" || bridgeStatus?.transportState === "launching"
+							? "disconnected"
+							: "fallback";
+			patch = {
+				...patch,
+				transportKind: "rpc_bridge",
+				transportState: inferredTransportState,
+				bridgeUpdatedAt: Date.now(),
+				bridgeLastError:
+					bridgeStatus?.lastError ??
+					agent.bridgeLastError ??
+					(targetExists ? "RPC bridge health check failed." : "tmux target missing during reconcile"),
+			};
+			reason = reason || (targetExists ? `RPC bridge not reachable; using ${inferredTransportState} transport state` : "tmux target missing during reconcile");
+		}
 		if (latestStatus && latestStatus.updatedAt > agent.updatedAt) {
+			const preferLiveBridgeTransport = patch.transportKind === "rpc_bridge" && patch.transportState === "live";
 			patch = {
 				...patch,
 				state: latestStatus.state,
-				updatedAt: latestStatus.updatedAt,
+				transportKind: preferLiveBridgeTransport ? patch.transportKind : latestStatus.transportKind ?? patch.transportKind,
+				transportState: preferLiveBridgeTransport ? patch.transportState : latestStatus.transportState ?? patch.transportState,
+				bridgeUpdatedAt:
+					preferLiveBridgeTransport
+						? patch.bridgeUpdatedAt
+						: latestStatus.transportKind === "rpc_bridge" && latestStatus.transportState
+							? latestStatus.updatedAt
+							: patch.bridgeUpdatedAt,
+				updatedAt: Math.max(latestStatus.updatedAt, patch.updatedAt ?? 0),
 				finishedAt: latestStatus.finishedAt ?? agent.finishedAt,
 				lastToolName: latestStatus.lastToolName,
 				lastAssistantPreview: latestStatus.lastAssistantPreview,
@@ -1232,6 +1608,7 @@ function reconcileAgents(ctx: ExtensionContext, params: { scope?: "all" | "curre
 				patch = {
 					...patch,
 					state: latestStatus.state,
+					transportState: agent.transportKind === "rpc_bridge" ? (latestStatus.state === "error" ? "error" : "stopped") : patch.transportState,
 					updatedAt: Date.now(),
 					finishedAt: latestStatus.finishedAt ?? Date.now(),
 				};
@@ -1240,8 +1617,14 @@ function reconcileAgents(ctx: ExtensionContext, params: { scope?: "all" | "curre
 				patch = {
 					...patch,
 					state: "lost",
+					transportState: agent.transportKind === "rpc_bridge" ? "lost" : patch.transportState,
+					bridgeUpdatedAt: agent.transportKind === "rpc_bridge" ? Date.now() : patch.bridgeUpdatedAt,
 					updatedAt: Date.now(),
 					lastError: agent.lastError ?? "tmux target missing during reconcile",
+					bridgeLastError:
+						agent.transportKind === "rpc_bridge"
+							? (bridgeStatus?.lastError ?? agent.bridgeLastError ?? "tmux target missing during reconcile")
+							: patch.bridgeLastError,
 				};
 				reason = reason || "tmux target missing during reconcile";
 			}
@@ -1253,29 +1636,39 @@ function reconcileAgents(ctx: ExtensionContext, params: { scope?: "all" | "curre
 			};
 			reason = reason || "tmux target exists and the child appears to be running";
 		}
-		if (Object.keys(patch).length > 0 && patch.state !== undefined) {
+		if (Object.keys(patch).length > 0) {
 			updateAgent(db, agent.id, patch);
 			createAgentEvent(db, {
 				id: randomUUID(),
 				agentId: agent.id,
 				eventType: "reconciled",
 				summary: reason,
-				payload: { state: patch.state, targetExists },
+				payload: {
+					state: patch.state ?? agent.state,
+					transportState: patch.transportState ?? agent.transportState,
+					targetExists,
+					bridgeReachable,
+				},
 			});
-			changed.push({ id: agent.id, state: patch.state, reason });
+			changed.push({
+				id: agent.id,
+				state: patch.state ?? agent.state,
+				transportState: patch.transportState ?? agent.transportState,
+				reason,
+			});
 		}
 	}
 	return { scope, reconciled: agents.length, changed };
 }
 
-function formatReconcileResult(result: { scope: string; reconciled: number; changed: Array<{ id: string; state: string; reason: string }> }): string {
+function formatReconcileResult(result: { scope: string; reconciled: number; changed: Array<{ id: string; state: string; transportState: string; reason: string }> }): string {
 	if (result.changed.length === 0) {
 		return `Reconciled ${result.reconciled} agents in scope ${result.scope}. No changes.`;
 	}
 	return [
 		`Reconciled ${result.reconciled} agents in scope ${result.scope}.`,
 		"",
-		...result.changed.map((item) => `${item.id} → ${item.state} · ${item.reason}`),
+		...result.changed.map((item) => `${item.id} → ${item.state} · transport=${item.transportState} · ${item.reason}`),
 	].join("\n");
 }
 
@@ -2094,7 +2487,11 @@ async function runReplyFlow(ctx: ExtensionContext, agentId: string): Promise<voi
 		summary: summary.trim(),
 		details: details?.trim() || undefined,
 	}, "immediate");
-	ctx.ui.notify(`Queued ${kind} for ${agent.id}.`, "info");
+	const liveDelivery = await deliverQueuedMessagesViaBridge(agent.id);
+	ctx.ui.notify(
+		liveDelivery.delivered > 0 ? `Queued ${kind} for ${agent.id} and delivered via RPC bridge.` : `Queued ${kind} for ${agent.id}.`,
+		"info",
+	);
 }
 
 async function runStopFlow(ctx: ExtensionContext, agentId: string): Promise<void> {
@@ -2102,7 +2499,7 @@ async function runStopFlow(ctx: ExtensionContext, agentId: string): Promise<void
 	if (!choice || choice === "Cancel") return;
 	const force = choice === "Force stop";
 	const reason = await ctx.ui.input("Reason (optional):", "");
-	const { agent, result } = stopAgentById(agentId, force, reason?.trim() || undefined);
+	const { agent, result } = await stopAgentById(agentId, force, reason?.trim() || undefined);
 	ctx.ui.notify(formatStopResult(agent, result, force), force ? "warning" : "info");
 }
 
@@ -2254,7 +2651,7 @@ async function runAgentsDashboard(pi: ExtensionAPI, ctx: ExtensionContext, initi
 					await runSpawnWizard(pi, ctx);
 					break;
 				case "sync": {
-					const result = reconcileAgents(ctx, { scope: state.scope, activeOnly: false, limit: 200 });
+					const result = await reconcileAgents(ctx, { scope: state.scope, activeOnly: false, limit: 200 });
 					ctx.ui.notify(formatReconcileResult(result), "info");
 					break;
 				}
@@ -2322,7 +2719,7 @@ async function runAgentsBoard(pi: ExtensionAPI, ctx: ExtensionContext, initialSt
 					break;
 				case "sync": {
 					const taskResult = reconcileTasks(getTmuxAgentsDb(), resolveTaskFilters(ctx, state.scope, { includeDone: true, limit: 200 }));
-					const agentResult = reconcileAgents(ctx, { scope: state.scope, activeOnly: false, limit: 200 });
+					const agentResult = await reconcileAgents(ctx, { scope: state.scope, activeOnly: false, limit: 200 });
 					ctx.ui.notify(`Tasks: ${taskResult.backfilled} backfilled, ${taskResult.deactivatedLinks} links deactivated.\n${formatReconcileResult(agentResult)}`, "info");
 					break;
 				}
@@ -2454,7 +2851,7 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 		],
 		parameters: SubagentStopParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const { agent, result } = stopAgentById(params.id, params.force ?? false, params.reason);
+			const { agent, result } = await stopAgentById(params.id, params.force ?? false, params.reason);
 			updateFleetUi(ctx);
 			return {
 				content: [{ type: "text", text: formatStopResult(agent, result, params.force ?? false) }],
@@ -2506,15 +2903,25 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 				},
 				params.deliveryMode ?? "immediate",
 			);
+			const liveDelivery = await deliverQueuedMessagesViaBridge(agent.id);
 			updateFleetUi(ctx);
 			return {
-				content: [{ type: "text", text: `Queued ${kind} message for ${agent.id} (${actionPolicy}).` }],
+				content: [
+					{
+						type: "text",
+						text:
+							liveDelivery.delivered > 0
+								? `Queued ${kind} message for ${agent.id} (${actionPolicy}) and delivered ${liveDelivery.delivered} via RPC bridge.`
+								: `Queued ${kind} message for ${agent.id} (${actionPolicy}).`,
+					},
+				],
 				details: {
 					agentId: agent.id,
 					kind,
 					actionPolicy,
 					inReplyToMessageId: params.inReplyToMessageId ?? null,
 					deliveryMode: params.deliveryMode ?? "immediate",
+					liveDelivery,
 				},
 			};
 		},
@@ -2550,7 +2957,7 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 		],
 		parameters: SubagentReconcileParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const result = reconcileAgents(ctx, params);
+			const result = await reconcileAgents(ctx, params);
 			updateFleetUi(ctx);
 			return {
 				content: [{ type: "text", text: formatReconcileResult(result) }],
@@ -3379,7 +3786,11 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 					throw new Error(`Cannot message agent ${agent.id} because its tmux target is missing. Reconcile first.`);
 				}
 				queueDownwardMessage(agent, kind, { summary }, "immediate");
-				ctx.ui.notify(`Queued ${kind} for ${id}.`, "info");
+				const liveDelivery = await deliverQueuedMessagesViaBridge(agent.id);
+				ctx.ui.notify(
+					liveDelivery.delivered > 0 ? `Queued ${kind} for ${id} and delivered via RPC bridge.` : `Queued ${kind} for ${id}.`,
+					"info",
+				);
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 			}
@@ -3418,7 +3829,7 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 				return;
 			}
 			try {
-				const { agent, result } = stopAgentById(id, force);
+				const { agent, result } = await stopAgentById(id, force);
 				ctx.ui.notify(formatStopResult(agent, result, force), force ? "warning" : "info");
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
@@ -3431,7 +3842,7 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 		description: "Refresh tmux subagent status from the global registry",
 		handler: async (_args, ctx) => {
 			try {
-				const result = reconcileAgents(ctx, { scope: "current_project", activeOnly: false, limit: 200 });
+				const result = await reconcileAgents(ctx, { scope: "current_project", activeOnly: false, limit: 200 });
 				updateFleetUi(ctx);
 				ctx.ui.notify(formatReconcileResult(result), "info");
 			} catch (error) {
@@ -3629,14 +4040,33 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 	pi.on("session_start", async (_event, ctx) => {
 		const db = getTmuxAgentsDb();
 		reconcileTasks(db, { projectKey: getProjectKey(ctx.cwd), limit: 500 });
+		await reconcileAgents(ctx, { scope: "current_project", activeOnly: false, limit: 200 }).catch(() => {});
+		const activeAgents = listAgents(db, { projectKey: getProjectKey(ctx.cwd), activeOnly: true, limit: 200 });
+		for (const agent of activeAgents) {
+			if (agent.transportKind === "rpc_bridge") {
+				void deliverQueuedMessagesViaBridge(agent.id);
+			}
+		}
+		if (!childRuntimeEnvironment) {
+			if (attentionWakePoll) clearInterval(attentionWakePoll);
+			attentionWakePoll = setInterval(() => {
+				void wakeCoordinatorFromAttention(pi, ctx).catch(() => {});
+			}, ATTENTION_WAKE_POLL_MS);
+			await wakeCoordinatorFromAttention(pi, ctx).catch(() => {});
+		}
 		updateFleetUi(ctx);
 	});
 
 	pi.on("agent_end", async (_event, ctx) => {
+		if (!childRuntimeEnvironment) {
+			await wakeCoordinatorFromAttention(pi, ctx).catch(() => {});
+		}
 		updateFleetUi(ctx);
 	});
 
 	pi.on("session_shutdown", async () => {
+		if (attentionWakePoll) clearInterval(attentionWakePoll);
+		attentionWakePoll = undefined;
 		closeTmuxAgentsDb();
 	});
 }

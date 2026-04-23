@@ -33,13 +33,17 @@ Capture work as tracked tasks first, then spawn focused child agents in isolated
 
 Children report upward proactively instead of making the primary agent poll them for status all day. Questions, blockers, milestones, and completions can all flow back through the registry.
 
+### RPC bridge-backed child control plane
+
+New child launches are moving to a tmux-side RPC bridge. That bridge runs visibly in the child tmux pane, launches `pi --mode rpc`, persists bridge status/events into the run directory, and gives the coordinator a live control path for prompt/steer/follow-up style child messaging.
+
 ### Tracked long-running services
 
 Launch API servers, frontend dev servers, watchers, or other long-running commands in tracked tmux windows and manage them with the same focus/capture/stop/reconcile workflow.
 
 ### Orchestration scaffolding
 
-The package also includes reusable agent profiles, orchestration skills, and prompt templates for splitting work across scout/planner/worker/reviewer style flows.
+The package also includes reusable agent profiles, orchestration skills, and prompt templates for splitting work across both legacy scout/planner/worker/reviewer flows and newer org-style role flows backed by upstream G Stack methodology.
 
 ## Included in the box
 
@@ -57,11 +61,8 @@ The package also includes reusable agent profiles, orchestration skills, and pro
   - `implement-and-review`
   - `scout-and-plan`
 - `agents/`
-  - `worker`
-  - `scout`
-  - `planner`
-  - `reviewer`
-  - `coordinator-helper`
+  - org-style roles: `coo`, `ceo`, `cto`, `engineer`, `principal-engineer`, `qa-lead`, `design-lead`, `cso`
+  - legacy helpers: `worker`, `scout`, `planner`, `reviewer`, `coordinator-helper`
 
 ## Install with Pi
 
@@ -163,6 +164,9 @@ In other words: split the work, keep the replicas coordinated, and avoid the cla
 ## Notes
 
 - Child agents report upward proactively through the registry instead of relying on status polling.
+- Bridge-backed children expose transport state in operator-facing surfaces. The full vocabulary is `legacy`, `launching`, `listening`, `live`, `fallback`, `disconnected`, `stopped`, `error`, and `lost`. A healthy launch progresses `launching → listening → live`.
+- The coordinator can now attempt live downward child delivery through the RPC bridge before falling back to the child-side mailbox poll path.
+- First-wave browser-facing role work prefers G Stack Browser-backed roles such as `qa-lead` and `design-lead`; Pi browser tools remain fallback-only during migration and troubleshooting.
 - The task board is task-first. Agents are linked executors, not the board cards themselves.
 - Search policy is ripgrep-first. `find` is intentionally excluded from the normal workflow.
 - Agent profiles live in `agents/` because the extension resolves them relative to its package layout.
@@ -172,6 +176,10 @@ In other words: split the work, keep the replicas coordinated, and avoid the cla
 
 - `docs/TMUX_SUBAGENTS_IMPLEMENTATION.md`
 - `docs/TMUX_SUBAGENTS_PROGRESS.md`
+- `docs/GSTACK_INTEGRATION.md`
+- `docs/GSTACK_UPSTREAM_STATUS.md`
+- `docs/REVIEW_PACKS.md`
+- `docs/GSTACK_ROLLOUT.md`
 
 ## Final pitch
 

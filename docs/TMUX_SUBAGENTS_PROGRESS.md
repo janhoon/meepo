@@ -8,9 +8,9 @@ This tracker follows `TMUX_SUBAGENTS_IMPLEMENTATION.md`.
 
 **Project:** In progress
 
-**Current state:** Milestone A and most of Milestone B are now landed. The system has a global registry, tmux-backed spawn flow, run-directory generation, parent session linkage, initial child runtime reporting hooks, inspection tools, and lightweight UI surfaces. Downward messaging, focus/stop controls, reconciliation, and the full dashboard/skills layer are still pending.
+**Current state:** The original tmux-backed registry/task-board foundation is landed, and the RPC bridge migration is now actively in progress. New child runs now emit bridge artifacts, launch a tmux-side bridge entrypoint, persist transport metadata in the registry, attempt live downward delivery via the bridge, and surface transport-aware reconcile state. Coordinator wake-up routing from unresolved attention is also partially landed.
 
-**Last updated:** 2026-04-15
+**Last updated:** 2026-04-21
 
 ---
 
@@ -47,6 +47,8 @@ This tracker follows `TMUX_SUBAGENTS_IMPLEMENTATION.md`.
 - [x] Create tmux spawn helper
 - [x] Record tmux ids in registry
 - [x] Append custom parent-session linkage entry
+- [x] Emit bridge config/status/log artifacts in run dirs
+- [x] Launch new child tmux windows through a bridge entrypoint instead of invoking pi directly
 
 ### 3. Child reporting
 - [x] Report `started`
@@ -64,8 +66,9 @@ This tracker follows `TMUX_SUBAGENTS_IMPLEMENTATION.md`.
 - [x] Create unread inbox reader
 - [x] Create delivery + ack flow
 - [x] Rehydrate unread items on primary restart
-- [ ] Route user-facing child questions visibly in primary UI
-- [ ] Route primary-facing child questions to coordinator context
+- [x] Route user-facing child questions visibly in primary UI
+- [x] Route primary-facing child questions to coordinator context
+- [x] Attempt live RPC bridge delivery before fallback mailbox polling
 
 ### 5. Tools
 - [x] `subagent_spawn`
@@ -126,6 +129,8 @@ This tracker follows `TMUX_SUBAGENTS_IMPLEMENTATION.md`.
 - [x] Mark `lost` correctly
 - [x] Mark `stopped` correctly
 - [x] Show reconciliation results in UI/events
+- [x] Inspect bridge metadata during reconcile
+- [x] Surface transport-aware states across the full vocabulary: `legacy`, `launching`, `listening`, `live`, `fallback`, `disconnected`, `stopped`, `error`, `lost` (healthy launch progresses `launching → listening → live`)
 
 ### 12. Documentation polish
 - [x] Keep implementation doc in sync with reality
@@ -139,8 +144,8 @@ This tracker follows `TMUX_SUBAGENTS_IMPLEMENTATION.md`.
 
 These items are easy to regress and should be verified repeatedly.
 
-- [ ] Primary agent does not need to poll children for feedback
-- [ ] Children publish blockers/questions/completions proactively
+- [x] Primary agent does not need to poll children for feedback
+- [x] Children publish blockers/questions/completions proactively
 - [x] Unread child-originated items survive primary restart
 - [x] Search behavior uses ripgrep only
 - [x] `find` is not part of the operational workflow
@@ -197,9 +202,9 @@ These items are easy to regress and should be verified repeatedly.
 ### Milestone F — Hardening
 **Goal:** system is restart-safe and failure-tolerant
 
-- [ ] reconciliation works
-- [ ] stale agents handled
-- [ ] lost agents handled
+- [x] reconciliation works for tmux + bridge metadata refresh
+- [x] stale agents handled
+- [x] lost agents handled
 - [ ] docs updated
 
 ---
@@ -213,6 +218,15 @@ These items are easy to regress and should be verified repeatedly.
 ---
 
 ## Notes / implementation log
+
+### 2026-04-21
+- Added RPC bridge migration foundation:
+  - `rpc-client.ts`
+  - `rpc-bridge.mjs`
+- Extended `types.ts`, `db.ts`, `registry.ts`, and `paths.ts` for bridge transport metadata and run-dir artifacts.
+- Updated `spawn.ts` so new child tmux windows launch a bridge entrypoint and write bridge config/status/log artifacts.
+- Added live downward bridge delivery and coordinator wake-up polling in `index.ts`.
+- Added transport-aware reconcile logic and transport visibility in agent/dashboard details.
 
 ### 2026-04-15
 - Added spawn/runtime modules under `extensions/tmux-agents/`:
