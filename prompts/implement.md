@@ -23,8 +23,8 @@ Rules:
 - Do not use `find`; use `grep` and `bash` with `rg --files`.
 - Prefer exact file paths and concrete deliverables.
 - Use graceful stop first if you need to interrupt a child.
-- Never use `sleep` or shell polling loops to wait for subagent progress, attention, inbox messages, or review output.
-- `subagent_attention`, `subagent_inbox`, `subagent_get`, and `task_attention` are snapshot reads, not long-poll tools.
+- Never use `sleep`, `watch`, `tail -f`, or shell polling loops to wait for subagent progress, attention, inbox messages, or review output.
+- `subagent_attention`, `subagent_inbox`, `subagent_get`, `subagent_capture`, and `task_attention` are snapshot reads, not long-poll tools.
 - If a child is in flight and no attention item is open, either continue with another ready task or end the turn with a brief pending-status summary.
 - “Keep going” means keep taking productive actions across ready tasks; it does not mean keeping the current turn open while waiting for asynchronous child progress.
 - Do not self-accept non-trivial implementation work. Your own checks are triage only; acceptance belongs to the review pack.

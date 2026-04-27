@@ -11,6 +11,12 @@ import { registerChildRuntime, getChildRuntimeEnvironment } from "./child-runtim
 import { openAgentsDashboard, type AgentsDashboardData, type AgentsDashboardState } from "./dashboard.js";
 import { closeTmuxAgentsDb, getTmuxAgentsDb } from "./db.js";
 import { getRpcBridgeSocketPath, pingRpcBridge, readRpcBridgeStatus, sendRpcBridgeCommand } from "./rpc-client.js";
+import {
+	appendNoWaitPolicyToSystemPrompt,
+	classifyNoWaitBashCommand,
+	formatNoWaitPolicyViolation,
+	getBashCommandFromToolInput,
+} from "./no-wait-policy.js";
 import { SESSION_CHILD_LINK_ENTRY_TYPE } from "./paths.js";
 import { getAllowedBuiltinToolNames, getSubagentProfile, listSubagentProfiles, normalizeBuiltinTools } from "./profiles.js";
 import { getProjectKey } from "./project.js";
@@ -3089,6 +3095,18 @@ async function runServiceSpawnWizard(ctx: ExtensionContext): Promise<void> {
 export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 	if (childRuntimeEnvironment) {
 		registerChildRuntime(pi, childRuntimeEnvironment);
+	} else {
+		pi.on("before_agent_start", async (event) => ({
+			systemPrompt: appendNoWaitPolicyToSystemPrompt(event.systemPrompt),
+		}));
+		pi.on("tool_call", (event) => {
+			if (event.toolName !== "bash") return;
+			const command = getBashCommandFromToolInput(event.input);
+			if (!command) return;
+			const violation = classifyNoWaitBashCommand(command);
+			if (!violation) return;
+			return { block: true, reason: formatNoWaitPolicyViolation(violation) };
+		});
 	}
 
 	let dashboardState: AgentsDashboardState = {
@@ -3430,6 +3448,7 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 		promptSnippet: "Read unread child-originated questions, blockers, milestones, and completion handoffs from the subagent inbox.",
 		promptGuidelines: [
 			"Use subagent_inbox to read proactive child updates that were already published. Do not use it to poll children for status generation.",
+			"Treat this as a one-shot snapshot: if nothing actionable is returned, continue other ready work or end the turn instead of waiting.",
 		],
 		parameters: SubagentInboxParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -3488,6 +3507,7 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 		promptGuidelines: [
 			"Use subagent_attention before spawning more work or giving a confident status answer when child questions, blockers, or completions may be pending.",
 			"Prefer this over raw inbox reads when you need the unresolved queue rather than low-level mailbox rows.",
+			"Treat this as a one-shot snapshot, not a long-poll or monitor loop.",
 		],
 		parameters: SubagentAttentionParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {

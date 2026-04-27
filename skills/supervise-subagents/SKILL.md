@@ -30,7 +30,8 @@ Always triage in this order:
 - After completion has been synthesized, use `subagent_cleanup` so old terminal child tmux windows do not pile up.
 - Use `subagent_reconcile` or `task_reconcile` if tmux state, task links, or registry state look stale.
 - Use `subagent_focus` to jump to a child tmux window when live inspection is useful.
-- Never use `bash` with `sleep`, `watch`, `while`, or retry loops to wait for subagent progress, attention, or review output.
+- Never use `bash` with `sleep`, `watch`, `tail -f`, `while`, or retry loops to wait for subagent progress, attention, or review output.
+- Treat inbox, attention, get, and capture tools as one-pass snapshots, not monitors.
 - After one supervision pass, either act on open items, continue with other ready tasks, or end the turn.
 - Do not use `find`; use `grep` and `bash` with `rg --files` for discovery.
 

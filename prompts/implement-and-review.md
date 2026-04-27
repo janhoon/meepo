@@ -25,8 +25,8 @@ Rules:
 - Do not use `find`; use `grep` and `bash` with `rg --files`.
 - Preserve file paths, risks, and validation gaps in every handoff.
 - Keep feedback targeted and minimal.
-- Never use `sleep` or shell polling loops to wait for worker or reviewer output.
-- `subagent_attention`, `subagent_inbox`, `subagent_get`, and `task_attention` are snapshot reads, not long-poll tools.
+- Never use `sleep`, `watch`, `tail -f`, or shell polling loops to wait for worker or reviewer output.
+- `subagent_attention`, `subagent_inbox`, `subagent_get`, `subagent_capture`, and `task_attention` are snapshot reads, not long-poll tools.
 - After messaging an engineer or reviewer, continue with other ready work or end the turn; do not block the turn waiting for asynchronous follow-up.
 - “Keep going” means keep taking productive actions across ready tasks; it does not mean keeping the current turn open while waiting for child progress.
 - Do not perform final acceptance QA yourself for non-trivial implementation work.

@@ -40,7 +40,8 @@ Use this skill when work should be split across specialized child agents or isol
 6. If planning creates follow-on tasks, inspect them with `task_list` / `task_get` and then spawn the next agent against the selected task id.
 7. For non-trivial implementation acceptance, spawn the required review-pack siblings on the same task id and synthesize their findings through inbox/attention surfaces.
 8. Rely on proactive child reporting through inbox/task updates instead of status polling.
-9. Use `subagent_inbox`, `subagent_get`, and `task_get` to supervise without polling for status generation.
+9. Use `subagent_inbox`, `subagent_get`, and `task_get` as one-pass snapshots; if no output is available, switch to other ready work or end the turn instead of waiting.
+10. Never use `sleep`, `watch`, `tail -f`, or shell polling loops to wait for children.
 
 ## Task-writing pattern
 

@@ -9,6 +9,12 @@ import { Type } from "@sinclair/typebox";
 import { randomUUID } from "node:crypto";
 import { getTmuxAgentsDb } from "./db.js";
 import { getRpcBridgeSocketPath, readRpcBridgeStatus, sendRpcBridgeCommand } from "./rpc-client.js";
+import {
+	appendNoWaitPolicyToSystemPrompt,
+	classifyNoWaitBashCommand,
+	formatNoWaitPolicyViolation,
+	getBashCommandFromToolInput,
+} from "./no-wait-policy.js";
 import { TASK_STATES, TASK_WAITING_ON_VALUES } from "./task-types.js";
 import { applyChildPublishToLinkedTask } from "./task-registry.js";
 import {
@@ -869,6 +875,7 @@ export function registerChildRuntime(pi: ExtensionAPI, environment: ChildRuntime
 		promptGuidelines: [
 			"Use subagent_publish proactively for milestones, blockers, concrete questions, and final completion handoffs.",
 			"After acting on a coordinator answer, redirect, cancel, or priority message, publish a concise note or completion update so the coordinator does not need pane capture.",
+			"Do not use sleep/watch/polling loops to wait for another agent; publish or return pending status and yield instead.",
 			"For blockers, include what you tried, the exact answer needed, and waitingOn/taskStatus when relevant.",
 			"For completion, include files changed/involved, blockers remaining, a recommended next action, and taskStatus when the linked task should move.",
 		],
@@ -944,6 +951,28 @@ export function registerChildRuntime(pi: ExtensionAPI, environment: ChildRuntime
 				},
 			};
 		},
+	});
+
+	pi.on("before_agent_start", async (event) => ({
+		systemPrompt: appendNoWaitPolicyToSystemPrompt(event.systemPrompt),
+	}));
+
+	pi.on("tool_call", (event) => {
+		if (event.toolName !== "bash") return;
+		const command = getBashCommandFromToolInput(event.input);
+		if (!command) return;
+		const violation = classifyNoWaitBashCommand(command);
+		if (!violation) return;
+		const reason = formatNoWaitPolicyViolation(violation);
+		createAgentEvent(getTmuxAgentsDb(), {
+			id: randomUUID(),
+			agentId: environment.childId,
+			eventType: "policy_blocked_wait_command",
+			summary: violation.reason,
+			payload: { kind: violation.kind, command },
+		});
+		appendRunEvent(environment, "policy_blocked_wait_command", violation.reason, { kind: violation.kind, command });
+		return { block: true, reason };
 	});
 
 	pi.on("session_start", async (_event, ctx) => {

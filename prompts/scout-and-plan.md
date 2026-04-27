@@ -20,6 +20,6 @@ Rules:
 - Prefer proactive child reporting over polling for status generation.
 - Do not use `find`; use `grep` and `bash` with `rg --files`.
 - Keep delegated tasks narrow and file-specific.
-- Never use `sleep` or shell polling loops to wait for scout or planner output.
-- `subagent_attention`, `subagent_inbox`, and `subagent_get` are snapshot reads, not long-poll tools.
+- Never use `sleep`, `watch`, `tail -f`, or shell polling loops to wait for scout or planner output.
+- `subagent_attention`, `subagent_inbox`, `subagent_get`, and `subagent_capture` are snapshot reads, not long-poll tools.
 - If the scout or planner has no published output yet, continue with other ready work or end the turn with a brief pending-status summary instead of waiting.

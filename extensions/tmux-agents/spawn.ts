@@ -139,6 +139,8 @@ function buildTaskFileContent(options: CreateRunArtifactsOptions): string {
 		"- Use `subagent_publish` for milestones, blockers, questions, and completion handoffs.",
 		"- Include a task-state recommendation in substantive completion or blocker updates when relevant.",
 		"- Ask one concrete question at a time when clarification is required.",
+		"- Never use `sleep`, `watch`, `tail -f`, or shell polling loops to wait for other agents, inbox rows, attention, or review output.",
+		"- Treat inbox/attention/capture reads as snapshots: after one pass, act, switch to other ready work, publish/return pending status, or end the turn.",
 		"- Do not use `find`; use `grep` and `bash` with `rg --files` instead.",
 	]
 		.filter((line): line is string => Boolean(line))
@@ -162,6 +164,7 @@ function buildRuntimeAppendixContent(options: CreateRunArtifactsOptions, session
 		"- The runtime marks you started automatically when work begins.",
 		"- Use `subagent_publish` whenever you hit a milestone, blocker, question, or completion handoff.",
 		"- Your updates are attached to a tracked task when a task id is present.",
+		"- Do not wait silently for another agent. If no update is available, publish or return a concise pending-status summary and yield.",
 		"- Include concise summaries and exact file paths when relevant.",
 		"- For blockers, include what you tried and the exact answer you need.",
 		"- For user-facing clarification, publish `question_for_user`.",

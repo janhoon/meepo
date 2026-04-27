@@ -32,6 +32,7 @@ Rules:
 - Browser-facing work should go to G Stack Browser-backed roles, not Pi browser tools, unless fallback is explicitly required.
 - Keep task ids, agent ids, model names, and file paths exact.
 - Use `subagent_attention`, `subagent_inbox`, `task_attention`, and `task_get` to supervise; do not poll with `sleep`.
+- Treat attention/inbox/capture reads as one-pass snapshots. If nothing actionable is available, do other ready board work or end the turn with a pending-status summary instead of "waiting longer".
 - Prefer concise, durable task updates over raw transcript summaries.
 - Never use `find`.
 

@@ -13,7 +13,8 @@ Use this skill when a child agent has already surfaced a question, blocker, or c
 - Read what children already published with `subagent_inbox`, `subagent_get`, and `task_get`.
 - Send downward communication with `subagent_message`.
 - Prefer structured messages plus child follow-up publishes over `subagent_capture` for normal orchestration.
-- Never use `bash` with `sleep`, `watch`, `while`, or retry loops to wait for a child reply.
+- Never use `bash` with `sleep`, `watch`, `tail -f`, `while`, or retry loops to wait for a child reply.
+- Treat inbox/get/attention/capture calls as one-pass snapshots; if the reply is not there yet, send/record the pending state and yield instead of monitoring.
 - Keep answers concrete, minimal, and path-specific.
 - Ask children for only the next action needed.
 - Update the linked task state when the answer changes the real work state.
