@@ -926,6 +926,7 @@ export function createAgentAttentionItemV2(db: DatabaseSync, input: CreateAgentA
 export function listAgentAttentionItemsV2(db: DatabaseSync, filters: ListAgentAttentionItemsV2Filters = {}): AgentAttentionV2Record[] {
 	if (filters.ownerAgentIds && filters.ownerAgentIds.length === 0) return [];
 	if (filters.subjectAgentIds && filters.subjectAgentIds.length === 0) return [];
+	if (filters.taskIds && filters.taskIds.length === 0) return [];
 	const where: string[] = [];
 	const params: unknown[] = [];
 	if (filters.projectKey) {
@@ -955,6 +956,10 @@ export function listAgentAttentionItemsV2(db: DatabaseSync, filters: ListAgentAt
 	if (filters.subjectAgentIds && filters.subjectAgentIds.length > 0) {
 		where.push(`subject_agent_id IN (${makePlaceholders(filters.subjectAgentIds.length)})`);
 		params.push(...filters.subjectAgentIds);
+	}
+	if (filters.taskIds && filters.taskIds.length > 0) {
+		where.push(`task_id IN (${makePlaceholders(filters.taskIds.length)})`);
+		params.push(...filters.taskIds);
 	}
 	if (filters.states && filters.states.length > 0) {
 		where.push(`state IN (${makePlaceholders(filters.states.length)})`);
@@ -1070,12 +1075,17 @@ export function listAgents(db: DatabaseSync, filters: ListAgentsFilters = {}): A
 		if (ids.length === 0) return [];
 	}
 	if (ids && ids.length === 0) return [];
+	if (filters.taskIds && filters.taskIds.length === 0) return [];
 
 	const where: string[] = [];
 	const params: unknown[] = [];
 	if (ids && ids.length > 0) {
 		where.push(`a.id IN (${makePlaceholders(ids.length)})`);
 		params.push(...ids);
+	}
+	if (filters.taskIds && filters.taskIds.length > 0) {
+		where.push(`a.task_id IN (${makePlaceholders(filters.taskIds.length)})`);
+		params.push(...filters.taskIds);
 	}
 	if (filters.projectKey) {
 		where.push("a.project_key = ?");
@@ -1525,6 +1535,7 @@ export interface ListAgentAttentionItemsV2Filters {
 	ownerAgentId?: string | null;
 	ownerAgentIds?: string[];
 	subjectAgentIds?: string[];
+	taskIds?: string[];
 	states?: AgentAttentionV2Record["state"][];
 	kinds?: AgentAttentionV2Record["kind"][];
 	limit?: number;

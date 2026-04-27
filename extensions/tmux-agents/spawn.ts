@@ -16,7 +16,7 @@ import {
 	updateAgent,
 	upsertAgentOrg,
 } from "./registry.js";
-import { getTask } from "./task-registry.js";
+import { assertTaskLeaseAvailable, getTask, linkTaskAgent, unlinkTaskAgent } from "./task-registry.js";
 import type { TaskRecord } from "./task-types.js";
 import type {
 	CreateAgentInput,
@@ -458,6 +458,14 @@ export function spawnSubagent(input: SpawnSubagentInput): SpawnSubagentResult {
 	if (input.taskId && !createRunOptions.taskRecord) {
 		throw new Error(`Unknown task id \"${input.taskId}\".`);
 	}
+	if (input.taskId) {
+		assertTaskLeaseAvailable(db, {
+			taskId: input.taskId,
+			profile: input.profile.name,
+			requesterAgentId: agentId,
+			allowDuplicateOwner: input.allowDuplicateOwner,
+		});
+	}
 	const runArtifacts = writeRunArtifacts(createRunOptions);
 	const agentRecord: CreateAgentInput = {
 		id: agentId,
@@ -470,7 +478,7 @@ export function spawnSubagent(input: SpawnSubagentInput): SpawnSubagentResult {
 		spawnSessionFile: input.spawnSessionFile,
 		spawnCwd,
 		projectKey,
-		taskId: input.taskId,
+		taskId: null,
 		profile: input.profile.name,
 		title: input.title,
 		task: input.task,
@@ -490,6 +498,40 @@ export function spawnSubagent(input: SpawnSubagentInput): SpawnSubagentResult {
 		updatedAt: now,
 	};
 	createAgent(db, agentRecord);
+	let taskLeaseClaimed = false;
+	try {
+		if (input.taskId) {
+			linkTaskAgent(db, {
+				taskId: input.taskId,
+				agentId,
+				role: input.profile.name,
+				isActive: true,
+				summary: input.title,
+				allowDuplicateOwner: input.allowDuplicateOwner,
+				linkedAt: now,
+			});
+			taskLeaseClaimed = true;
+		}
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		updateAgent(db, agentId, {
+			state: "error",
+			transportKind: "rpc_bridge",
+			transportState: "error",
+			bridgeLastError: message,
+			bridgeUpdatedAt: Date.now(),
+			lastError: message,
+			updatedAt: Date.now(),
+		});
+		createAgentEvent(db, {
+			id: randomUUID(),
+			agentId,
+			eventType: "spawn_rejected",
+			summary: message,
+			payload: { error: message, taskId: input.taskId, profile: input.profile.name },
+		});
+		throw error;
+	}
 	if (input.parentAgentId) {
 		createAgentHierarchyEdge(db, {
 			orgId,
@@ -567,6 +609,10 @@ export function spawnSubagent(input: SpawnSubagentInput): SpawnSubagentResult {
 		tmuxTarget = spawnTmuxWindow(runArtifacts.launchScript, input.title, agentId);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
+		if (taskLeaseClaimed && input.taskId) {
+			unlinkTaskAgent(db, input.taskId, agentId, "spawn_failed");
+			taskLeaseClaimed = false;
+		}
 		updateAgent(db, agentId, {
 			state: "error",
 			transportKind: "rpc_bridge",

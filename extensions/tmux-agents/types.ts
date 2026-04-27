@@ -76,6 +76,15 @@ export const AGENT_MESSAGE_ROUTE_KINDS = ["direct_parent", "direct_child", "root
 export const AGENT_MESSAGE_ROUTE_DECISIONS = ["allowed", "denied"] as const;
 export const AGENT_ATTENTION_V2_KINDS = [...ATTENTION_ITEM_KINDS, "approval", "change_request"] as const;
 export const AGENT_ATTENTION_V2_STATES = ["open", "acknowledged", "waiting_on_owner", "resolved", "cancelled", "superseded"] as const;
+export const TASK_INTERACTION_KINDS = [
+	"user_question",
+	"coordinator_question",
+	"approval_request",
+	"change_request",
+	"blocker",
+	"completion",
+] as const;
+export const TASK_INTERACTION_SOURCES = ["legacy_attention", "hierarchy_attention"] as const;
 
 export type AgentState = (typeof AGENT_STATES)[number];
 export type AgentTransportKind = (typeof AGENT_TRANSPORT_KINDS)[number];
@@ -110,6 +119,8 @@ export type AgentMessageRouteKind = (typeof AGENT_MESSAGE_ROUTE_KINDS)[number];
 export type AgentMessageRouteDecision = (typeof AGENT_MESSAGE_ROUTE_DECISIONS)[number];
 export type AgentAttentionV2Kind = (typeof AGENT_ATTENTION_V2_KINDS)[number];
 export type AgentAttentionV2State = (typeof AGENT_ATTENTION_V2_STATES)[number];
+export type TaskInteractionKind = (typeof TASK_INTERACTION_KINDS)[number];
+export type TaskInteractionSource = (typeof TASK_INTERACTION_SOURCES)[number];
 
 export interface SessionChildLinkEntryData {
 	childId: string;
@@ -152,6 +163,7 @@ export interface SpawnSubagentInput {
 	parentAgentId: string | null;
 	spawnedByAgentId?: string | null;
 	createdByKind?: AgentSystemActorKind;
+	allowDuplicateOwner?: boolean;
 	spawnSessionId: string | null;
 	spawnSessionFile: string | null;
 }
@@ -232,6 +244,20 @@ export interface DownwardMessagePayload {
 	inReplyToMessageId?: string;
 	v2MessageId?: string;
 	v2RecipientRowId?: string;
+	coalescedMessageIds?: string[];
+	coalescedV2MessageIds?: string[];
+	coalescedV2RecipientRowIds?: string[];
+	coalescedWakeMessages?: Array<{
+		id: string;
+		kind: MessageKind;
+		summary: string;
+		details?: string;
+		files?: string[];
+		inReplyToMessageId?: string;
+		v2MessageId?: string;
+		v2RecipientRowId?: string;
+		createdAt: number;
+	}>;
 	senderAgentId?: string | null;
 	senderKind?: AgentMessageActorKind;
 	routeKind?: AgentMessageRouteKind;
@@ -338,6 +364,32 @@ export interface AgentAttentionV2Record {
 	resolvedAt: number | null;
 	resolutionKind: string | null;
 	resolutionSummary: string | null;
+}
+
+export interface TaskInteractionRecord {
+	id: string;
+	source: TaskInteractionSource;
+	sourceId: string;
+	taskId: string;
+	agentId: string | null;
+	actorLabel: string;
+	ownerKind: AgentRecipientKind;
+	ownerAgentId: string | null;
+	kind: TaskInteractionKind;
+	state: string;
+	priority: number;
+	summary: string;
+	details: string | null;
+	answerNeeded: string | null;
+	recommendedNextAction: string | null;
+	files: string[];
+	messageId: string | null;
+	recipientRowId: string | null;
+	nextAction: string;
+	actions: string[];
+	payload: unknown;
+	createdAt: number;
+	updatedAt: number;
 }
 
 export type AgentActorContext =
@@ -687,6 +739,7 @@ export interface UpdateAttentionItemInput {
 
 export interface ListAgentsFilters {
 	ids?: string[];
+	taskIds?: string[];
 	projectKey?: string;
 	spawnSessionId?: string;
 	spawnSessionFile?: string;

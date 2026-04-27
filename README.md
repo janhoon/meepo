@@ -168,6 +168,7 @@ In other words: split the work, keep the replicas coordinated, and avoid the cla
 - The coordinator can now attempt live downward child delivery through the RPC bridge before falling back to the child-side mailbox poll path.
 - First-wave browser-facing role work prefers G Stack Browser-backed roles such as `qa-lead` and `design-lead`; Pi browser tools remain fallback-only during migration and troubleshooting.
 - The task board is task-first. Agents are linked executors, not the board cards themselves.
+- Task health/liveness is derived separately from the Kanban lane: `task.status` controls columns and workflow state, while health flags such as `owner_active`, `stale`, `blocked_external`, `approval_required`, `empty_or_no_progress`, and `needs_review` explain operational liveness and next action.
 - Search policy is ripgrep-first. `find` is intentionally excluded from the normal workflow.
 - Agent profiles live in `agents/` because the extension resolves them relative to its package layout.
 - The real superpower here is not just spawning more agents. It is keeping the task graph legible.
