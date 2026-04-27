@@ -27,6 +27,8 @@ Use this skill when work should be split across specialized child agents or isol
 - Browser-facing work should prefer `qa-lead` or `design-lead` with G Stack Browser as the default browser path. Pi browser tools are fallback-only during migration.
 - Keep each child task focused and concrete.
 - Include exact file paths and expected deliverables in the delegated task.
+- Dispatch is dependency-aware: spawn agents for dependency-free ready tickets, do not spawn agents for tickets with unresolved prerequisites, and after a prerequisite reaches `done`, inspect/spawn newly unblocked tickets immediately.
+- Use `task_ready` to inspect the ready queue and `task_dispatch_ready` to launch one agent per dependency-free ticket using each ticket's `recommendedProfile`.
 - Do not ask children to use `find`.
 - Use `grep` and `bash` with `rg --files` as the canonical discovery workflow.
 
@@ -37,11 +39,13 @@ Use this skill when work should be split across specialized child agents or isol
 3. Use `subagent_list` to inspect already tracked children.
 4. If no suitable child exists, use `subagent_spawn` with a clear title, task, profile, and `taskId`.
 5. Tell the child exactly what outcome you want, not just the topic area.
-6. If planning creates follow-on tasks, inspect them with `task_list` / `task_get` and then spawn the next agent against the selected task id.
-7. For non-trivial implementation acceptance, spawn the required review-pack siblings on the same task id and synthesize their findings through inbox/attention surfaces.
-8. Rely on proactive child reporting through inbox/task updates instead of status polling.
-9. Use `subagent_inbox`, `subagent_get`, and `task_get` as one-pass snapshots; if no output is available, switch to other ready work or end the turn instead of waiting.
-10. Never use `sleep`, `watch`, `tail -f`, or shell polling loops to wait for children.
+6. If planning creates follow-on tasks, inspect them with `task_list` / `task_get`, identify the dependency-free ready set with `task_ready`, and use `task_dispatch_ready` to spawn one appropriate agent for each ready ticket subject to WIP limits.
+7. Leave tickets with unresolved dependencies unspawned and marked/recorded as blocked-by-ticket; do not create idle agents that can only wait.
+8. After any dependency task completes, use `task_move`'s newly-ready dependents or run `task_dispatch_ready` to spawn newly unblocked work immediately.
+9. For non-trivial implementation acceptance, spawn the required review-pack siblings on the same task id and synthesize their findings through inbox/attention surfaces.
+10. Rely on proactive child reporting through inbox/task updates instead of status polling.
+11. Use `subagent_inbox`, `subagent_get`, and `task_get` as one-pass snapshots; if no output is available, switch to other ready work or end the turn instead of waiting.
+12. Never use `sleep`, `watch`, `tail -f`, or shell polling loops to wait for children.
 
 ## Task-writing pattern
 

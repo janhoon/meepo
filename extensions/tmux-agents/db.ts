@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { ensureTmuxAgentsRuntimePaths } from "./paths.js";
 import { SERVICE_STATES } from "./service-types.js";
-import { TASK_STATES, TASK_WAITING_ON_VALUES } from "./task-types.js";
+import { TASK_LINK_STATES, TASK_LINK_TYPES, TASK_STATES, TASK_WAITING_ON_VALUES } from "./task-types.js";
 import {
 	AGENT_ACCESS_GRANT_KINDS,
 	AGENT_ACCESS_GRANT_STATES,
@@ -76,6 +76,8 @@ const quotedAttentionV2States = AGENT_ATTENTION_V2_STATES.map((value) => `'${val
 const quotedDownwardActionPolicies = DOWNWARD_ACTION_POLICIES.map((value) => `'${value}'`).join(", ");
 const quotedTaskStates = TASK_STATES.map((value) => `'${value}'`).join(", ");
 const quotedTaskWaitingOn = TASK_WAITING_ON_VALUES.map((value) => `'${value}'`).join(", ");
+const quotedTaskLinkTypes = TASK_LINK_TYPES.map((value) => `'${value}'`).join(", ");
+const quotedTaskLinkStates = TASK_LINK_STATES.map((value) => `'${value}'`).join(", ");
 
 const MIGRATIONS: Migration[] = [
 	{
@@ -1003,6 +1005,39 @@ SELECT
 	unixepoch('now') * 1000
 FROM hierarchy_paths
 GROUP BY org_id, ancestor_agent_id, descendant_agent_id;
+`,
+	},
+	{
+		version: 7,
+		name: "task-dependency-links",
+		sql: `
+ALTER TABLE tasks ADD COLUMN recommended_profile TEXT NULL;
+CREATE INDEX IF NOT EXISTS idx_tasks_recommended_profile_status
+	ON tasks(recommended_profile, status, priority ASC, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS task_links (
+	id TEXT PRIMARY KEY,
+	source_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+	target_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+	link_type TEXT NOT NULL CHECK (link_type IN (${quotedTaskLinkTypes})),
+	state TEXT NOT NULL CHECK (state IN (${quotedTaskLinkStates})) DEFAULT 'active',
+	summary TEXT NULL,
+	metadata_json TEXT NULL,
+	created_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL,
+	resolved_at INTEGER NULL,
+	CHECK (source_task_id <> target_task_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_links_source_state_type
+	ON task_links(source_task_id, state, link_type, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_task_links_target_state_type
+	ON task_links(target_task_id, state, link_type, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_task_links_type_state_updated
+	ON task_links(link_type, state, updated_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_task_links_active_unique
+	ON task_links(source_task_id, target_task_id, link_type)
+	WHERE state = 'active';
 `,
 	},
 ];

@@ -45,8 +45,9 @@ Always triage in this order:
 6. Send `subagent_message` replies with explicit action policies where appropriate.
 7. When multiple reviewers are attached to the same task, synthesize agreed findings, unique findings, and remaining gates before deciding on follow-up.
 8. Move tasks between `blocked`, `in_progress`, `in_review`, and `done` as the real work state changes.
-9. If other ready tasks exist, continue with them instead of waiting on one child.
-10. If nothing else is actionable, end the turn with a brief pending-status summary instead of using `sleep`.
-11. Use `subagent_capture` only if published reporting is stale, missing, or obviously inconsistent.
-12. Clean up terminal agents whose work has been synthesized with `subagent_cleanup`.
-13. Summarize the task board and active fleet for the user in priority order.
+9. When a task reaches `done`, check for dependent tickets; if all of a ticket's prerequisites are resolved, spawn the next appropriate agent immediately.
+10. If other dependency-free ready tasks exist, continue with them instead of waiting on one child.
+11. If nothing else is actionable, end the turn with a brief pending-status summary instead of using `sleep`.
+12. Use `subagent_capture` only if published reporting is stale, missing, or obviously inconsistent.
+13. Clean up terminal agents whose work has been synthesized with `subagent_cleanup`.
+14. Summarize the task board and active fleet for the user in priority order.

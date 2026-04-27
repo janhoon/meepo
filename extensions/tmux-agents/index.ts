@@ -47,16 +47,23 @@ import {
 } from "./registry.js";
 import type { ListAgentAttentionItemsV2Filters } from "./registry.js";
 import {
+	cancelTaskLink,
 	createTask,
 	createTaskEvent,
+	createTaskLink,
 	getTask,
 	getTaskSummary,
 	linkTaskAgent,
 	listTaskAgentLinks,
 	listTaskAttention,
 	listTaskEvents,
+	listTaskLinks,
+	listTaskReadiness,
 	listTasks,
+	listUnresolvedTaskDependencies,
 	reconcileTasks,
+	refreshTaskDependencyBlockState,
+	resolveDependenciesForCompletedTask,
 	unlinkTaskAgent,
 	updateTask,
 } from "./task-registry.js";
@@ -97,6 +104,10 @@ import type {
 	ListTasksFilters,
 	TaskAgentLinkRecord,
 	TaskAttentionRecord,
+	TaskLinkState,
+	TaskLinkType,
+	TaskLinkWithTasksRecord,
+	TaskReadinessRecord,
 	TaskRecord,
 	TaskState,
 	TaskSummaryCounts,
@@ -238,6 +249,15 @@ const TASK_SORT = StringEnum(["priority", "updated", "created", "title", "status
 	default: "priority",
 });
 
+const TASK_LINK_TYPE = StringEnum(["depends_on", "relates_to", "duplicates", "spawned_from"] as const, {
+	description: "Task relationship type. For depends_on, sourceTaskId is blocked by targetTaskId.",
+	default: "depends_on",
+});
+
+const TASK_LINK_STATE = StringEnum(["active", "resolved", "cancelled"] as const, {
+	description: "Task relationship state.",
+});
+
 const TaskCreateParams = Type.Object({
 	title: Type.String({ description: "Short task title." }),
 	summary: Type.Optional(Type.String({ description: "Short task summary." })),
@@ -246,6 +266,7 @@ const TaskCreateParams = Type.Object({
 	parentTaskId: Type.Optional(Type.String({ description: "Optional parent task id." })),
 	priority: Type.Optional(Type.Integer({ description: "Priority from 0 (highest) to 9 (lowest).", minimum: 0, maximum: 9 })),
 	priorityLabel: Type.Optional(Type.String({ description: "Optional human-readable priority label." })),
+	recommendedProfile: Type.Optional(Type.String({ description: "Recommended subagent profile to dispatch when this task is dependency-ready." })),
 	acceptanceCriteria: Type.Optional(Type.Array(Type.String(), { maxItems: 100 })),
 	planSteps: Type.Optional(Type.Array(Type.String(), { maxItems: 100 })),
 	validationSteps: Type.Optional(Type.Array(Type.String(), { maxItems: 100 })),
@@ -260,6 +281,7 @@ const TaskListParams = Type.Object({
 	scope: Type.Optional(LIST_SCOPE),
 	statuses: Type.Optional(Type.Array(TASK_STATE, { maxItems: 10 })),
 	waitingOn: Type.Optional(Type.Array(TASK_WAITING_ON, { maxItems: 10 })),
+	recommendedProfile: Type.Optional(Type.String({ description: "Only show tasks with this recommended subagent profile." })),
 	includeDone: Type.Optional(Type.Boolean({ description: "Include done tasks when statuses are not provided.", default: false })),
 	limit: Type.Optional(Type.Integer({ description: "Maximum number of tasks to return.", minimum: 1, maximum: 500, default: 100 })),
 	sort: Type.Optional(TASK_SORT),
@@ -281,6 +303,7 @@ const TaskUpdateParams = Type.Object({
 	parentTaskId: Type.Optional(Type.String({ description: "Optional parent task id." })),
 	priority: Type.Optional(Type.Integer({ minimum: 0, maximum: 9 })),
 	priorityLabel: Type.Optional(Type.String()),
+	recommendedProfile: Type.Optional(Type.String({ description: "Recommended subagent profile for dependency-ready dispatch." })),
 	acceptanceCriteria: Type.Optional(Type.Array(Type.String(), { maxItems: 100 })),
 	planSteps: Type.Optional(Type.Array(Type.String(), { maxItems: 100 })),
 	validationSteps: Type.Optional(Type.Array(Type.String(), { maxItems: 100 })),
@@ -301,6 +324,9 @@ const TaskMoveParams = Type.Object({
 	reviewSummary: Type.Optional(Type.String()),
 	finalSummary: Type.Optional(Type.String()),
 	force: Type.Optional(Type.Boolean({ description: "Allow moving a done task back into active work.", default: false })),
+	autoDispatchReadyDependents: Type.Optional(Type.Boolean({ description: "When moving to done, automatically dispatch newly unblocked dependent tasks with recommendedProfile/fallbackProfile.", default: true })),
+	fallbackProfile: Type.Optional(Type.String({ description: "Profile to use for newly ready dependent tasks missing recommendedProfile." })),
+	maxDispatch: Type.Optional(Type.Integer({ description: "Maximum newly ready dependent tasks to dispatch.", minimum: 1, maximum: 20, default: 5 })),
 });
 
 const TaskNoteParams = Type.Object({
@@ -321,6 +347,49 @@ const TaskUnlinkAgentParams = Type.Object({
 	taskId: Type.String({ description: "Task id." }),
 	agentId: Type.String({ description: "Agent id." }),
 	reason: Type.Optional(Type.String({ description: "Why the agent is being unlinked." })),
+});
+
+const TaskLinkParams = Type.Object({
+	sourceTaskId: Type.String({ description: "Source task id. For depends_on, this is the blocked/dependent task." }),
+	targetTaskId: Type.String({ description: "Target task id. For depends_on, this is the prerequisite task." }),
+	linkType: Type.Optional(TASK_LINK_TYPE),
+	summary: Type.Optional(Type.String({ description: "Optional relationship summary." })),
+	blockSource: Type.Optional(Type.Boolean({ description: "For depends_on links, automatically mark the source blocked while prerequisites are unresolved.", default: true })),
+});
+
+const TaskUnlinkParams = Type.Object({
+	id: Type.Optional(Type.String({ description: "Task link id to cancel." })),
+	sourceTaskId: Type.Optional(Type.String({ description: "Source task id if cancelling by pair." })),
+	targetTaskId: Type.Optional(Type.String({ description: "Target task id if cancelling by pair." })),
+	linkType: Type.Optional(TASK_LINK_TYPE),
+	reason: Type.Optional(Type.String({ description: "Why the task relationship is being cancelled." })),
+});
+
+const TaskLinksParams = Type.Object({
+	scope: Type.Optional(LIST_SCOPE),
+	taskId: Type.Optional(Type.String({ description: "Show links where this task is source or target." })),
+	sourceTaskId: Type.Optional(Type.String({ description: "Show links from this source task." })),
+	targetTaskId: Type.Optional(Type.String({ description: "Show links to this target task." })),
+	linkTypes: Type.Optional(Type.Array(TASK_LINK_TYPE, { maxItems: 10 })),
+	states: Type.Optional(Type.Array(TASK_LINK_STATE, { maxItems: 10 })),
+	includeResolved: Type.Optional(Type.Boolean({ description: "Include resolved/cancelled links when states are not provided.", default: false })),
+	limit: Type.Optional(Type.Integer({ description: "Maximum number of task links to return.", minimum: 1, maximum: 500, default: 100 })),
+});
+
+const TaskReadyParams = Type.Object({
+	scope: Type.Optional(LIST_SCOPE),
+	ids: Type.Optional(Type.Array(Type.String(), { minItems: 1, maxItems: 200 })),
+	recommendedProfile: Type.Optional(Type.String({ description: "Only include ready tasks with this recommended profile." })),
+	includeBlocked: Type.Optional(Type.Boolean({ description: "Include non-ready tasks with dependency/readiness reasons.", default: false })),
+	limit: Type.Optional(Type.Integer({ description: "Maximum number of tasks to inspect.", minimum: 1, maximum: 500, default: 100 })),
+});
+
+const TaskDispatchReadyParams = Type.Object({
+	scope: Type.Optional(LIST_SCOPE),
+	ids: Type.Optional(Type.Array(Type.String(), { minItems: 1, maxItems: 100 })),
+	fallbackProfile: Type.Optional(Type.String({ description: "Profile to use for ready tasks missing recommendedProfile." })),
+	maxDispatch: Type.Optional(Type.Integer({ description: "Maximum number of ready tasks to dispatch.", minimum: 1, maximum: 20, default: 5 })),
+	dryRun: Type.Optional(Type.Boolean({ description: "Preview dispatchable ready tasks without spawning agents.", default: false })),
 });
 
 const TaskAttentionParams = Type.Object({
@@ -531,10 +600,12 @@ function formatAgentDetails(agent: AgentSummary): string {
 	return lines.join("\n");
 }
 
-function formatTaskLine(task: TaskRecord, linkedAgents: AgentSummary[] = []): string {
+function formatTaskLine(task: TaskRecord, linkedAgents: AgentSummary[] = [], readiness?: TaskReadinessRecord): string {
 	const flags = [
 		`status=${task.status}`,
 		task.waitingOn ? `waiting=${task.waitingOn}` : null,
+		task.recommendedProfile ? `profile=${task.recommendedProfile}` : null,
+		readiness && readiness.unresolvedDependencies.length > 0 ? `deps=${readiness.unresolvedDependencies.length}` : null,
 		`p${task.priority}`,
 		linkedAgents.length > 0 ? `${linkedAgents.length} agent${linkedAgents.length === 1 ? "" : "s"}` : null,
 	]
@@ -543,7 +614,56 @@ function formatTaskLine(task: TaskRecord, linkedAgents: AgentSummary[] = []): st
 	return `${task.id} · ${truncateText(task.title, 48)} · ${flags}`;
 }
 
-function formatTaskDetails(task: TaskRecord, linkedAgents: AgentSummary[] = [], events: ReturnType<typeof listTaskEvents> = []): string {
+function formatTaskLinkLine(link: TaskLinkWithTasksRecord, perspective: "dependency" | "dependent" | "any" = "any"): string {
+	const direction =
+		perspective === "dependency"
+			? `depends on ${link.targetTaskId}`
+			: perspective === "dependent"
+				? `blocks ${link.sourceTaskId}`
+				: `${link.sourceTaskId} -> ${link.targetTaskId}`;
+	const unresolved = link.unresolved ? "unresolved" : link.state === "resolved" || link.targetStatus === "done" ? "resolved" : link.state;
+	const title = perspective === "dependent" ? link.sourceTitle : link.targetTitle;
+	return `- ${link.id} · ${link.linkType} · ${direction} · ${unresolved} · ${truncateText(title, 60)}${link.summary ? ` — ${truncateText(link.summary, 80)}` : ""}`;
+}
+
+function formatTaskReadinessLine(item: TaskReadinessRecord): string {
+	const profile = item.task.recommendedProfile ? ` · profile=${item.task.recommendedProfile}` : "";
+	const deps = item.unresolvedDependencies.length > 0 ? ` · blockedBy=${item.unresolvedDependencies.map((link) => link.targetTaskId).join(",")}` : "";
+	return `- ${item.task.id} · ${truncateText(item.task.title, 60)} · ${item.reason}${profile}${deps}`;
+}
+
+function buildTaskLinksText(links: TaskLinkWithTasksRecord[]): string {
+	if (links.length === 0) return "No task links matched.";
+	return links.map((link) => formatTaskLinkLine(link)).join("\n");
+}
+
+function buildTaskReadyText(items: TaskReadinessRecord[], includeBlocked: boolean): string {
+	const visible = includeBlocked ? items : items.filter((item) => item.ready);
+	if (visible.length === 0) return includeBlocked ? "No matching tasks found." : "No dependency-ready tasks found.";
+	return visible.map(formatTaskReadinessLine).join("\n");
+}
+
+function buildTaskDispatchText(result: ReturnType<typeof dispatchReadyTasks>, dryRun: boolean): string {
+	const lines = [dryRun ? "# Ready dispatch preview" : "# Ready dispatch result"];
+	if (result.preview.length > 0) {
+		lines.push("", "Dispatchable:", ...result.preview.map((item) => `- ${item.taskId} · ${truncateText(item.title, 60)} · profile=${item.profile}`));
+	}
+	if (result.dispatched.length > 0) {
+		lines.push("", "Dispatched:", ...result.dispatched.map((item) => `- ${item.taskId} · ${item.agentId} · profile=${item.profile}`));
+	}
+	if (result.skipped.length > 0) {
+		lines.push("", "Skipped:", ...result.skipped.map((item) => `- ${item.taskId} · ${item.reason}`));
+	}
+	if (result.preview.length === 0 && result.skipped.length === 0) lines.push("", "No dependency-ready tasks found.");
+	return lines.join("\n");
+}
+
+function formatTaskDetails(
+	task: TaskRecord,
+	linkedAgents: AgentSummary[] = [],
+	events: ReturnType<typeof listTaskEvents> = [],
+	links: { dependencies?: TaskLinkWithTasksRecord[]; dependents?: TaskLinkWithTasksRecord[] } = {},
+): string {
 	const lines = [
 		`id: ${task.id}`,
 		`status: ${task.status}`,
@@ -551,6 +671,7 @@ function formatTaskDetails(task: TaskRecord, linkedAgents: AgentSummary[] = [], 
 		`summary: ${task.summary ?? "-"}`,
 		`description: ${task.description ?? "-"}`,
 		`priority: ${task.priority}${task.priorityLabel ? ` (${task.priorityLabel})` : ""}`,
+		`recommendedProfile: ${task.recommendedProfile ?? "-"}`,
 		`waitingOn: ${task.waitingOn ?? "-"}`,
 		`blockedReason: ${task.blockedReason ?? "-"}`,
 		`projectKey: ${task.projectKey}`,
@@ -577,6 +698,12 @@ function formatTaskDetails(task: TaskRecord, linkedAgents: AgentSummary[] = [], 
 		"",
 		"labels:",
 		...(task.labels.length > 0 ? task.labels.map((item) => `- ${item}`) : ["- none"]),
+		"",
+		"dependencies:",
+		...((links.dependencies ?? []).length > 0 ? (links.dependencies ?? []).map((link) => formatTaskLinkLine(link, "dependency")) : ["- none"]),
+		"",
+		"blocks:",
+		...((links.dependents ?? []).length > 0 ? (links.dependents ?? []).map((link) => formatTaskLinkLine(link, "dependent")) : ["- none"]),
 		"",
 		`reviewSummary: ${task.reviewSummary ?? "-"}`,
 		`finalSummary: ${task.finalSummary ?? "-"}`,
@@ -615,6 +742,7 @@ function summarizeTaskFilters(scope: string, filters: ListTasksFilters): string 
 	const parts = [scope];
 	if (filters.statuses && filters.statuses.length > 0) parts.push(`statuses=${filters.statuses.join(",")}`);
 	if (filters.waitingOn && filters.waitingOn.length > 0) parts.push(`waitingOn=${filters.waitingOn.join(",")}`);
+	if (filters.recommendedProfile) parts.push(`recommendedProfile=${filters.recommendedProfile}`);
 	if (filters.includeDone) parts.push("include-done");
 	if (filters.linkedAgentId) parts.push(`linkedAgent=${filters.linkedAgentId}`);
 	return parts.join(", ");
@@ -715,11 +843,12 @@ function resolveAgentFilters(
 function resolveTaskFilters(
 	ctx: ExtensionContext,
 	scope: "all" | "current_project" | "current_session" | "descendants",
-	params: { statuses?: TaskState[]; waitingOn?: TaskWaitingOn[]; includeDone?: boolean; limit?: number; linkedAgentId?: string },
+	params: { statuses?: TaskState[]; waitingOn?: TaskWaitingOn[]; recommendedProfile?: string; includeDone?: boolean; limit?: number; linkedAgentId?: string },
 ): ListTasksFilters {
 	const filters: ListTasksFilters = {
 		statuses: params.statuses,
 		waitingOn: params.waitingOn,
+		recommendedProfile: params.recommendedProfile,
 		includeDone: params.includeDone,
 		limit: params.limit,
 		linkedAgentId: params.linkedAgentId,
@@ -1061,7 +1190,14 @@ function suppressDuplicateLegacyAttentionItems(legacyItems: AttentionItemRecord[
 }
 
 function formatTaskAttentionLine(item: TaskAttentionRecord): string {
-	const bits = [item.status, item.waitingOn ? `waiting=${item.waitingOn}` : null, `${item.activeAgentCount} active-agent`, `${item.openAttentionCount} attention`]
+	const bits = [
+		item.status,
+		item.waitingOn ? `waiting=${item.waitingOn}` : null,
+		item.unresolvedDependencyCount > 0 ? `deps=${item.unresolvedDependencyCount}` : null,
+		item.readyUnblocked ? "dependency-ready" : null,
+		`${item.activeAgentCount} active-agent`,
+		`${item.openAttentionCount} attention`,
+	]
 		.filter((value): value is string => Boolean(value))
 		.join(" · ");
 	return `${item.taskId} · ${truncateText(item.title, 42)} · ${bits}`;
@@ -2299,6 +2435,7 @@ function createTaskFromParams(ctx: ExtensionContext, params: {
 	parentTaskId?: string;
 	priority?: number;
 	priorityLabel?: string;
+	recommendedProfile?: string;
 	acceptanceCriteria?: string[];
 	planSteps?: string[];
 	validationSteps?: string[];
@@ -2326,6 +2463,7 @@ function createTaskFromParams(ctx: ExtensionContext, params: {
 		status: params.status ?? "todo",
 		priority: params.priority ?? 3,
 		priorityLabel: params.priorityLabel?.trim() || null,
+		recommendedProfile: params.recommendedProfile?.trim() || null,
 		waitingOn: params.waitingOn,
 		blockedReason: params.blockedReason?.trim() || null,
 		acceptanceCriteria: params.acceptanceCriteria,
@@ -2349,6 +2487,7 @@ function createTaskFromParams(ctx: ExtensionContext, params: {
 			summary: input.summary,
 			status: input.status,
 			priority: input.priority,
+			recommendedProfile: input.recommendedProfile ?? null,
 		},
 		createdAt: now,
 	});
@@ -2368,6 +2507,10 @@ function ensureTaskForSpawn(ctx: ExtensionContext, params: {
 	if (existingTaskId) {
 		const task = getTask(db, existingTaskId);
 		if (!task) throw new Error(`Unknown task id \"${existingTaskId}\".`);
+		const unresolved = listUnresolvedTaskDependencies(db, [existingTaskId]).get(existingTaskId) ?? [];
+		if (unresolved.length > 0) {
+			throw new Error(`Task ${existingTaskId} has unresolved dependencies: ${unresolved.map((link) => link.targetTaskId).join(", ")}. Do not spawn an agent for this ticket until dependencies resolve.`);
+		}
 		const now = Date.now();
 		updateTask(db, existingTaskId, {
 			status: "in_progress",
@@ -2474,6 +2617,76 @@ function spawnChildFromParams(pi: ExtensionAPI, ctx: ExtensionContext, params: {
 	pi.appendEntry(SESSION_CHILD_LINK_ENTRY_TYPE, result.sessionLinkData);
 	updateFleetUi(ctx);
 	return result;
+}
+
+function buildDispatchTaskPrompt(task: TaskRecord): string {
+	return [
+		`Task ${task.id}: ${task.title}`,
+		task.summary ? `Summary: ${task.summary}` : null,
+		task.description ? `Description: ${task.description}` : null,
+		task.acceptanceCriteria.length > 0 ? "" : null,
+		task.acceptanceCriteria.length > 0 ? "Acceptance criteria:" : null,
+		...task.acceptanceCriteria.map((item) => `- ${item}`),
+		task.validationSteps.length > 0 ? "" : null,
+		task.validationSteps.length > 0 ? "Validation:" : null,
+		...task.validationSteps.map((item) => `- ${item}`),
+		task.files.length > 0 ? "" : null,
+		task.files.length > 0 ? "Relevant files:" : null,
+		...task.files.map((item) => `- ${item}`),
+		"",
+		"This ticket is dependency-ready. Work only this task. If blocked, publish one concrete question/blocker and recommend the task state. On completion, include files changed, validation run, and whether it should move to in_review/done.",
+	]
+		.filter((line): line is string => line !== null)
+		.join("\n");
+}
+
+function getReadyTasksForDispatch(ctx: ExtensionContext, params: { scope?: "all" | "current_project" | "current_session" | "descendants"; ids?: string[]; recommendedProfile?: string; limit?: number }): TaskReadinessRecord[] {
+	const scope = params.scope ?? "current_project";
+	const filters = resolveTaskFilters(ctx, scope, {
+		statuses: ["todo"],
+		recommendedProfile: params.recommendedProfile,
+		includeDone: false,
+		limit: params.limit ?? 100,
+	});
+	if (params.ids && params.ids.length > 0) filters.ids = params.ids;
+	return listTaskReadiness(getTmuxAgentsDb(), filters).filter((item) => item.ready);
+}
+
+function dispatchReadyTasks(pi: ExtensionAPI, ctx: ExtensionContext, items: TaskReadinessRecord[], options: { fallbackProfile?: string; maxDispatch?: number; dryRun?: boolean } = {}): {
+	dispatched: Array<{ taskId: string; profile: string; agentId: string; title: string }>;
+	skipped: Array<{ taskId: string; reason: string }>;
+	preview: Array<{ taskId: string; profile: string; title: string }>;
+} {
+	const maxDispatch = Math.max(1, Math.min(options.maxDispatch ?? 5, 20));
+	const dispatched: Array<{ taskId: string; profile: string; agentId: string; title: string }> = [];
+	const skipped: Array<{ taskId: string; reason: string }> = [];
+	const preview: Array<{ taskId: string; profile: string; title: string }> = [];
+	for (const item of items) {
+		if (preview.length >= maxDispatch) break;
+		const profileName = item.task.recommendedProfile ?? options.fallbackProfile?.trim() ?? null;
+		if (!profileName) {
+			skipped.push({ taskId: item.task.id, reason: "missing recommendedProfile and no fallbackProfile provided" });
+			continue;
+		}
+		try {
+			requireProfile(profileName);
+		} catch (error) {
+			skipped.push({ taskId: item.task.id, reason: error instanceof Error ? error.message : String(error) });
+			continue;
+		}
+		preview.push({ taskId: item.task.id, profile: profileName, title: item.task.title });
+		if (options.dryRun) continue;
+		const result = spawnChildFromParams(pi, ctx, {
+			title: item.task.title,
+			task: buildDispatchTaskPrompt(item.task),
+			profile: profileName,
+			taskId: item.task.id,
+			cwd: item.task.spawnCwd,
+			priority: item.task.priorityLabel ?? `p${item.task.priority}`,
+		});
+		dispatched.push({ taskId: item.task.id, profile: profileName, agentId: result.agentId, title: item.task.title });
+	}
+	return { dispatched, skipped, preview };
 }
 
 async function chooseProfile(ctx: ExtensionContext): Promise<SubagentProfile | null> {
@@ -2760,6 +2973,16 @@ function appendStandupCleanupSection(lines: string[], candidates: CleanupCandida
 	if (candidates.length > limit) lines.push(`- +${candidates.length - limit} more`);
 }
 
+function appendStandupReadinessSection(lines: string[], title: string, items: TaskReadinessRecord[], limit = 6): void {
+	lines.push("", `## ${title}`);
+	if (items.length === 0) {
+		lines.push("- none");
+		return;
+	}
+	for (const item of items.slice(0, limit)) lines.push(formatTaskReadinessLine(item));
+	if (items.length > limit) lines.push(`- +${items.length - limit} more`);
+}
+
 function buildStandupText(ctx: ExtensionContext, scope: "all" | "current_project" | "current_session" | "descendants" = "current_project"): string {
 	const board = buildBoardData(ctx);
 	const scopeData = board.scopes[scope];
@@ -2771,6 +2994,9 @@ function buildStandupText(ctx: ExtensionContext, scope: "all" | "current_project
 	const activeWip = lanes.in_progress;
 	const ready = lanes.todo;
 	const cleanupCandidates = listCleanupCandidates(ctx, { scope, limit: 200 });
+	const readiness = listTaskReadiness(getTmuxAgentsDb(), { ids: allTickets.map((ticket) => ticket.taskId), includeDone: false, limit: Math.max(allTickets.length, 1) });
+	const dependencyBlocked = readiness.filter((item) => item.unresolvedDependencies.length > 0);
+	const dependencyReady = readiness.filter((item) => item.ready && item.resolvedDependencies.length > 0);
 	const staleCutoffMs = 24 * 60 * 60 * 1000;
 	const stale = allTickets.filter((ticket) => ticket.laneId !== "done" && Date.now() - ticket.updatedAt > staleCutoffMs);
 	const openAttention = allTickets.reduce((count, ticket) => count + ticket.openAttentionCount, 0);
@@ -2780,16 +3006,18 @@ function buildStandupText(ctx: ExtensionContext, scope: "all" | "current_project
 		`# Standup · ${scope}`,
 		`Generated: ${new Date().toISOString()}`,
 		`Board: ${counts}`,
-		`Signals: ${blockedUser.length} user-wait · ${blockedCoordinator.length} coordinator/blocker · ${review.length} review · ${openAttention} attention · ${activeAgents} active agents · ${stale.length} stale>24h · ${cleanupCandidates.length} cleanup`,
+		`Signals: ${blockedUser.length} user-wait · ${blockedCoordinator.length} coordinator/blocker · ${dependencyBlocked.length} dependency-blocked · ${dependencyReady.length} dependency-ready · ${review.length} review · ${openAttention} attention · ${activeAgents} active agents · ${stale.length} stale>24h · ${cleanupCandidates.length} cleanup`,
 	];
 	appendStandupSection(lines, "Needs user", blockedUser, scopeData, 5);
+	appendStandupReadinessSection(lines, "Dependency blocked", dependencyBlocked, 6);
+	appendStandupReadinessSection(lines, "Newly dependency-ready", dependencyReady, 6);
 	appendStandupSection(lines, "Needs coordinator / unblock", blockedCoordinator, scopeData, 6);
 	appendStandupSection(lines, "Ready for review / acceptance", review, scopeData, 6);
 	appendStandupSection(lines, "Active WIP", activeWip, scopeData, 8);
 	appendStandupSection(lines, "Stale >24h", stale, scopeData, 6);
 	appendStandupCleanupSection(lines, cleanupCandidates, 6);
 	appendStandupSection(lines, "Ready to start", ready, scopeData, 6);
-	lines.push("", "## Recommended operating order", "1. Answer `Needs user` items or keep them blocked with a clear waiting target.", "2. Unblock coordinator-owned tasks before spawning more WIP.", "3. Synthesize review items and move them to `done` or back to `in_progress`.", "4. Let active owners continue unless their published status is stale.", "5. Spawn from `Ready to start` only after blockers/review/WIP are under control.", "6. Cleanup terminal agents after completion has been synthesized.");
+	lines.push("", "## Recommended operating order", "1. Answer `Needs user` items or keep them blocked with a clear waiting target.", "2. Resolve dependency-blocked chains before spawning dependents.", "3. Dispatch newly dependency-ready tickets with `task_dispatch_ready`.", "4. Unblock coordinator-owned tasks before spawning more WIP.", "5. Synthesize review items and move them to `done` or back to `in_progress`.", "6. Let active owners continue unless their published status is stale.", "7. Spawn from `Ready to start` only after blockers/review/WIP are under control.", "8. Cleanup terminal agents after completion has been synthesized.");
 	return lines.join("\n");
 }
 
@@ -2866,6 +3094,12 @@ function moveTaskById(taskId: string, params: { status: TaskState; reason?: stri
 		},
 		createdAt: now,
 	});
+	if (params.status === "done") {
+		resolveDependenciesForCompletedTask(db, taskId, now);
+	}
+	if (params.status !== "done") {
+		refreshTaskDependencyBlockState(db, taskId, now);
+	}
 	return getTask(db, taskId)!;
 }
 
@@ -3607,6 +3841,8 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 		promptSnippet: "Create a task ticket before delegation so the board tracks work instead of agent instances.",
 		promptGuidelines: [
 			"Create or select a task before spawning subagents for new work.",
+			"Set recommendedProfile on executable tickets so dependency-ready dispatch can launch the right agent.",
+			"Use task_link for ticket dependencies instead of free-text blocked reasons.",
 			"Use blocked + waitingOn instead of creating separate waiting swim lanes.",
 		],
 		parameters: TaskCreateParams,
@@ -3643,6 +3879,7 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 			const filters = resolveTaskFilters(ctx, scope, {
 				statuses: params.statuses as TaskState[] | undefined,
 				waitingOn: params.waitingOn as TaskWaitingOn[] | undefined,
+				recommendedProfile: params.recommendedProfile,
 				includeDone: params.includeDone,
 				limit: params.limit,
 				linkedAgentId: params.linkedAgentId,
@@ -3660,8 +3897,9 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 				existing.push(agent);
 				agentsByTask.set(link.taskId, existing);
 			}
+			const readinessByTask = new Map(listTaskReadiness(getTmuxAgentsDb(), { ids: tasks.map((task) => task.id), includeDone: true, limit: Math.max(tasks.length, 1) }).map((item) => [item.task.id, item]));
 			const header = `scope=${summarizeTaskFilters(scope, filters)} · ${tasks.length} task${tasks.length === 1 ? "" : "s"}`;
-			const body = tasks.length === 0 ? "No tasks matched." : tasks.map((task) => formatTaskLine(task, agentsByTask.get(task.id) ?? [])).join("\n");
+			const body = tasks.length === 0 ? "No tasks matched." : tasks.map((task) => formatTaskLine(task, agentsByTask.get(task.id) ?? [], readinessByTask.get(task.id))).join("\n");
 			updateFleetUi(ctx);
 			return {
 				content: [{ type: "text", text: `${header}\n\n${body}` }],
@@ -3674,7 +3912,7 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 		name: "task_get",
 		label: "Task Get",
 		description: "Inspect one or more tracked tasks in detail.",
-		promptSnippet: "Get full task details including acceptance criteria, plan steps, linked agents, and recent events.",
+		promptSnippet: "Get full task details including acceptance criteria, plan steps, dependency links, linked agents, and recent events.",
 		promptGuidelines: [
 			"Use task_get after task_list when you need full task context or recent event history.",
 		],
@@ -3706,11 +3944,21 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 					eventsByTask.set(task.id, listTaskEvents(getTmuxAgentsDb(), { taskIds: [task.id], limit: params.eventLimit ?? 20 }));
 				}
 			}
-			const text = tasks.length === 0 ? "No matching tasks found." : tasks.map((task) => formatTaskDetails(task, agentsByTask.get(task.id) ?? [], eventsByTask.get(task.id) ?? [])).join("\n\n---\n\n");
+			const dependencyLinks = listTaskLinks(getTmuxAgentsDb(), { taskIds: tasks.map((task) => task.id), includeResolved: true, limit: 1000 });
+			const text = tasks.length === 0
+				? "No matching tasks found."
+				: tasks
+					.map((task) =>
+						formatTaskDetails(task, agentsByTask.get(task.id) ?? [], eventsByTask.get(task.id) ?? [], {
+							dependencies: dependencyLinks.filter((link) => link.sourceTaskId === task.id),
+							dependents: dependencyLinks.filter((link) => link.targetTaskId === task.id),
+						}),
+					)
+					.join("\n\n---\n\n");
 			updateFleetUi(ctx);
 			return {
 				content: [{ type: "text", text }],
-				details: { tasks },
+				details: { tasks, taskLinks: dependencyLinks },
 			};
 		},
 	});
@@ -3734,6 +3982,7 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 				parentTaskId: params.parentTaskId,
 				priority: params.priority,
 				priorityLabel: params.priorityLabel,
+				recommendedProfile: params.recommendedProfile,
 				acceptanceCriteria: params.acceptanceCriteria,
 				planSteps: params.planSteps,
 				validationSteps: params.validationSteps,
@@ -3769,6 +4018,7 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 		promptSnippet: "Move a task to todo, blocked, in_progress, in_review, or done with optional blockers or review summaries.",
 		promptGuidelines: [
 			"Use task_move for persistent board state transitions.",
+			"When moving a prerequisite to done, newly unblocked dependency-ready tickets can auto-dispatch if recommendedProfile is set.",
 			"Use blocked + waitingOn instead of introducing extra swim lanes.",
 		],
 		parameters: TaskMoveParams,
@@ -3782,10 +4032,21 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 				finalSummary: params.finalSummary,
 				force: params.force,
 			});
+			const dependentSourceIds = params.status === "done"
+				? [...new Set(listTaskLinks(getTmuxAgentsDb(), { targetTaskIds: [moved.id], linkTypes: ["depends_on"], includeResolved: true, limit: 500 }).map((link) => link.sourceTaskId))]
+				: [];
+			const readyDependents = dependentSourceIds.length > 0
+				? listTaskReadiness(getTmuxAgentsDb(), { ids: dependentSourceIds, includeDone: false, limit: dependentSourceIds.length }).filter((item) => item.ready)
+				: [];
+			const dispatchResult = params.status === "done" && (params.autoDispatchReadyDependents ?? true) && readyDependents.length > 0
+				? dispatchReadyTasks(pi, ctx, readyDependents, { fallbackProfile: params.fallbackProfile, maxDispatch: params.maxDispatch, dryRun: false })
+				: null;
+			const dependencyText = readyDependents.length > 0 ? `\n\nnewlyReadyDependents:\n${readyDependents.map(formatTaskReadinessLine).join("\n")}` : "";
+			const dispatchText = dispatchResult ? `\n\n${buildTaskDispatchText(dispatchResult, false)}` : "";
 			updateFleetUi(ctx);
 			return {
-				content: [{ type: "text", text: formatTaskDetails(moved, getTaskLinkedAgents(moved.id), listTaskEvents(getTmuxAgentsDb(), { taskIds: [moved.id], limit: 10 })) }],
-				details: { task: moved },
+				content: [{ type: "text", text: `${formatTaskDetails(moved, getTaskLinkedAgents(moved.id), listTaskEvents(getTmuxAgentsDb(), { taskIds: [moved.id], limit: 10 }))}${dependencyText}${dispatchText}` }],
+				details: { task: moved, readyDependents, dispatchResult },
 			};
 		},
 	});
@@ -3822,6 +4083,12 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 		promptSnippet: "Attach an agent to a task so the board reflects task ownership and execution.",
 		parameters: TaskLinkAgentParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			if (params.active ?? true) {
+				const unresolved = listUnresolvedTaskDependencies(getTmuxAgentsDb(), [params.taskId]).get(params.taskId) ?? [];
+				if (unresolved.length > 0) {
+					throw new Error(`Task ${params.taskId} has unresolved dependencies: ${unresolved.map((item) => item.targetTaskId).join(", ")}. Do not link an active agent until dependencies resolve.`);
+				}
+			}
 			const link = linkTaskAgent(getTmuxAgentsDb(), {
 				taskId: params.taskId,
 				agentId: params.agentId,
@@ -3851,6 +4118,142 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 			return {
 				content: [{ type: "text", text: changes > 0 ? `Unlinked ${params.agentId} from ${params.taskId}.` : `No active link found for ${params.agentId} on ${params.taskId}.` }],
 				details: { taskId: params.taskId, agentId: params.agentId, changes },
+			};
+		},
+	});
+
+
+	pi.registerTool({
+		name: "task_link",
+		label: "Task Link",
+		description: "Create a first-class relationship between two task tickets, especially source depends_on target dependencies.",
+		promptSnippet: "Record ticket dependencies such as task A depends_on task B before dispatching agents.",
+		promptGuidelines: [
+			"Use task_link when planning reveals that one ticket depends on another ticket.",
+			"For depends_on, sourceTaskId is the dependent/blocked ticket and targetTaskId is the prerequisite ticket.",
+			"Do not spawn an agent for a task with unresolved depends_on links.",
+		],
+		parameters: TaskLinkParams,
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const link = createTaskLink(getTmuxAgentsDb(), {
+				sourceTaskId: params.sourceTaskId,
+				targetTaskId: params.targetTaskId,
+				linkType: (params.linkType as TaskLinkType | undefined) ?? "depends_on",
+				summary: params.summary,
+				blockSource: params.blockSource,
+			});
+			updateFleetUi(ctx);
+			return {
+				content: [{ type: "text", text: formatTaskLinkLine(link) }],
+				details: { link },
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "task_unlink",
+		label: "Task Unlink",
+		description: "Cancel a first-class task relationship or dependency link.",
+		promptSnippet: "Cancel a task dependency/relationship link when it no longer applies.",
+		parameters: TaskUnlinkParams,
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const links = cancelTaskLink(getTmuxAgentsDb(), {
+				id: params.id,
+				sourceTaskId: params.sourceTaskId,
+				targetTaskId: params.targetTaskId,
+				linkType: params.linkType as TaskLinkType | undefined,
+				reason: params.reason,
+			});
+			updateFleetUi(ctx);
+			return {
+				content: [{ type: "text", text: links.length === 0 ? "No matching active task link found." : links.map((link) => formatTaskLinkLine(link)).join("\n") }],
+				details: { links },
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "task_links",
+		label: "Task Links",
+		description: "List first-class task dependency and relationship links.",
+		promptSnippet: "Inspect task dependencies and dependents/blocking relationships.",
+		promptGuidelines: [
+			"Use task_links to decide which tickets are blocked by unresolved dependencies and which tickets become ready after a prerequisite completes.",
+		],
+		parameters: TaskLinksParams,
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const scope = params.scope ?? "current_project";
+			const filters = resolveTaskFilters(ctx, scope, { includeDone: true, limit: params.limit });
+			const links = listTaskLinks(getTmuxAgentsDb(), {
+				taskIds: params.taskId ? [params.taskId] : filters.ids,
+				sourceTaskIds: params.sourceTaskId ? [params.sourceTaskId] : undefined,
+				targetTaskIds: params.targetTaskId ? [params.targetTaskId] : undefined,
+				projectKey: params.taskId || params.sourceTaskId || params.targetTaskId ? undefined : filters.projectKey,
+				spawnSessionId: filters.spawnSessionId,
+				spawnSessionFile: filters.spawnSessionFile,
+				linkTypes: params.linkTypes as TaskLinkType[] | undefined,
+				states: params.states as TaskLinkState[] | undefined,
+				includeResolved: params.includeResolved,
+				limit: params.limit,
+			});
+			updateFleetUi(ctx);
+			return {
+				content: [{ type: "text", text: buildTaskLinksText(links) }],
+				details: { scope, links },
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "task_ready",
+		label: "Task Ready",
+		description: "List tasks that are dependency-ready for agent dispatch, with reasons for blocked tasks when requested.",
+		promptSnippet: "Find dependency-free ready tickets before spawning agents.",
+		promptGuidelines: [
+			"Use task_ready after planning and after moving dependencies to done.",
+			"Spawn agents for ready tickets; do not spawn agents for tasks with unresolved dependencies.",
+		],
+		parameters: TaskReadyParams,
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const scope = params.scope ?? "current_project";
+			const filters = resolveTaskFilters(ctx, scope, {
+				statuses: params.includeBlocked ? undefined : ["todo"],
+				recommendedProfile: params.recommendedProfile,
+				includeDone: false,
+				limit: params.limit,
+			});
+			if (params.ids && params.ids.length > 0) filters.ids = params.ids;
+			const items = listTaskReadiness(getTmuxAgentsDb(), filters);
+			updateFleetUi(ctx);
+			return {
+				content: [{ type: "text", text: buildTaskReadyText(items, params.includeBlocked ?? false) }],
+				details: { scope, items },
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "task_dispatch_ready",
+		label: "Task Dispatch Ready",
+		description: "Spawn agents for dependency-ready tasks using each task's recommendedProfile or a fallback profile.",
+		promptSnippet: "Launch one agent for each dependency-free ready ticket, subject to limits.",
+		promptGuidelines: [
+			"Use task_dispatch_ready after planning decomposes work or after a prerequisite task reaches done.",
+			"Tasks without recommendedProfile are skipped unless fallbackProfile is provided.",
+			"This is dependency-aware and will not spawn agents for tickets with unresolved depends_on links.",
+		],
+		parameters: TaskDispatchReadyParams,
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const ready = getReadyTasksForDispatch(ctx, { scope: params.scope, ids: params.ids, limit: params.ids?.length ?? 100 });
+			const result = dispatchReadyTasks(pi, ctx, ready, {
+				fallbackProfile: params.fallbackProfile,
+				maxDispatch: params.maxDispatch,
+				dryRun: params.dryRun ?? false,
+			});
+			updateFleetUi(ctx);
+			return {
+				content: [{ type: "text", text: buildTaskDispatchText(result, params.dryRun ?? false) }],
+				details: { ready, result },
 			};
 		},
 	});

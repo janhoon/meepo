@@ -1,8 +1,12 @@
 export const TASK_STATES = ["todo", "blocked", "in_progress", "in_review", "done"] as const;
 export const TASK_WAITING_ON_VALUES = ["user", "coordinator", "service", "external"] as const;
+export const TASK_LINK_TYPES = ["depends_on", "relates_to", "duplicates", "spawned_from"] as const;
+export const TASK_LINK_STATES = ["active", "resolved", "cancelled"] as const;
 
 export type TaskState = (typeof TASK_STATES)[number];
 export type TaskWaitingOn = (typeof TASK_WAITING_ON_VALUES)[number];
+export type TaskLinkType = (typeof TASK_LINK_TYPES)[number];
+export type TaskLinkState = (typeof TASK_LINK_STATES)[number];
 
 export interface TaskRecord {
 	id: string;
@@ -17,6 +21,7 @@ export interface TaskRecord {
 	status: TaskState;
 	priority: number;
 	priorityLabel: string | null;
+	recommendedProfile: string | null;
 	waitingOn: TaskWaitingOn | null;
 	blockedReason: string | null;
 	acceptanceCriteria: string[];
@@ -46,6 +51,7 @@ export interface CreateTaskInput {
 	status: TaskState;
 	priority?: number;
 	priorityLabel?: string | null;
+	recommendedProfile?: string | null;
 	waitingOn?: TaskWaitingOn | null;
 	blockedReason?: string | null;
 	acceptanceCriteria?: string[];
@@ -74,6 +80,7 @@ export interface UpdateTaskInput {
 	status?: TaskState;
 	priority?: number;
 	priorityLabel?: string | null;
+	recommendedProfile?: string | null;
 	waitingOn?: TaskWaitingOn | null;
 	blockedReason?: string | null;
 	acceptanceCriteria?: string[];
@@ -109,6 +116,65 @@ export interface TaskEventRecord {
 	createdAt: number;
 }
 
+export interface TaskLinkRecord {
+	id: string;
+	sourceTaskId: string;
+	targetTaskId: string;
+	linkType: TaskLinkType;
+	state: TaskLinkState;
+	summary: string | null;
+	metadata: unknown;
+	createdAt: number;
+	updatedAt: number;
+	resolvedAt: number | null;
+}
+
+export interface TaskLinkWithTasksRecord extends TaskLinkRecord {
+	sourceTitle: string;
+	sourceStatus: TaskState;
+	targetTitle: string;
+	targetStatus: TaskState;
+	unresolved: boolean;
+}
+
+export interface CreateTaskLinkInput {
+	id?: string;
+	sourceTaskId: string;
+	targetTaskId: string;
+	linkType?: TaskLinkType;
+	state?: TaskLinkState;
+	summary?: string | null;
+	metadata?: unknown;
+	createdAt?: number;
+	updatedAt?: number;
+	resolvedAt?: number | null;
+	blockSource?: boolean;
+}
+
+export interface ListTaskLinksFilters {
+	ids?: string[];
+	sourceTaskIds?: string[];
+	targetTaskIds?: string[];
+	taskIds?: string[];
+	projectKey?: string;
+	spawnSessionId?: string;
+	spawnSessionFile?: string;
+	linkTypes?: TaskLinkType[];
+	states?: TaskLinkState[];
+	includeResolved?: boolean;
+	limit?: number;
+}
+
+export interface TaskReadinessRecord {
+	task: TaskRecord;
+	activeAgentCount: number;
+	unresolvedDependencies: TaskLinkWithTasksRecord[];
+	resolvedDependencies: TaskLinkWithTasksRecord[];
+	dependents: TaskLinkWithTasksRecord[];
+	ready: boolean;
+	reason: string;
+}
+
 export interface LinkTaskAgentInput {
 	id?: string;
 	taskId: string;
@@ -138,6 +204,7 @@ export interface ListTasksFilters {
 	parentTaskId?: string | null;
 	statuses?: TaskState[];
 	waitingOn?: TaskWaitingOn[];
+	recommendedProfile?: string;
 	linkedAgentId?: string;
 	includeDone?: boolean;
 	limit?: number;
@@ -175,6 +242,8 @@ export interface TaskAttentionRecord {
 	updatedAt: number;
 	activeAgentCount: number;
 	openAttentionCount: number;
+	unresolvedDependencyCount: number;
+	readyUnblocked: boolean;
 }
 
 export function normalizeTaskState(value: string | null | undefined): TaskState {

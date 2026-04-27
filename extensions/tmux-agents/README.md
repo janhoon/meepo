@@ -15,6 +15,11 @@ Implemented so far:
   - `task_note`
   - `task_link_agent`
   - `task_unlink_agent`
+  - `task_link`
+  - `task_unlink`
+  - `task_links`
+  - `task_ready`
+  - `task_dispatch_ready`
   - `task_attention`
   - `task_reconcile`
   - `subagent_spawn`
@@ -119,8 +124,10 @@ Implemented so far:
   - attention-first selection and sorting so blocked/review/user-waiting work is surfaced before new dispatch
   - board hotlist showing blocked tasks, user waits, review queue, open attention, active agents, and soft WIP warnings
   - card badges for priority, waiting target, linked active agents, linked profiles, and open attention
+  - first-class task dependency links: `task_link` records `sourceTaskId depends_on targetTaskId`, blocks dispatch while prerequisites are unresolved, and resolves links when prerequisites move to `done`
+  - dependency-ready dispatch: `task_ready` lists tickets with no unresolved dependencies and `task_dispatch_ready` launches one agent per ready ticket using `recommendedProfile`
   - selected-task next-action guidance for unblock/reply/spawn/review/cleanup decisions
-  - `/standup` digest for user waits, coordinator blockers, review queue, active WIP, stale tasks, ready work, and cleanup candidates
+  - `/standup` digest for user waits, dependency-blocked/newly-ready tickets, coordinator blockers, review queue, active WIP, stale tasks, ready work, and cleanup candidates
   - linked agents remain available for focus/reply/stop/capture from the selected task
   - keyboard navigation across lanes and tasks
   - per-task inspect/focus/reply/stop/capture/spawn/move/sync actions
