@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { DynamicBorder } from "@mariozechner/pi-coding-agent";
@@ -46,24 +46,33 @@ import {
 	updateAttentionItemsForAgent,
 } from "./registry.js";
 import type { ListAgentAttentionItemsV2Filters } from "./registry.js";
+import { collectQueuedWakeCoalescingContext } from "./wake-coalescing.js";
 import {
+	assertTaskLeaseAvailable,
 	cancelTaskLink,
 	createTask,
 	createTaskEvent,
 	createTaskLink,
+	deriveTaskHealth,
+	formatTaskLeaseConflict,
 	getTask,
+	getTaskLease,
+	getTaskLeaseConflict,
 	getTaskSummary,
 	linkTaskAgent,
 	listTaskAgentLinks,
 	listTaskAttention,
 	listTaskEvents,
+	listTaskHealth,
 	listTaskLinks,
 	listTaskReadiness,
 	listTasks,
+	listTaskSubtreeWithMeta,
 	listUnresolvedTaskDependencies,
 	reconcileTasks,
 	refreshTaskDependencyBlockState,
 	resolveDependenciesForCompletedTask,
+	taskLeaseKindForProfile,
 	unlinkTaskAgent,
 	updateTask,
 } from "./task-registry.js";
@@ -96,6 +105,7 @@ import type {
 	SessionChildLinkEntryData,
 	SpawnSubagentResult,
 	SubagentProfile,
+	TaskInteractionRecord,
 	UpdateAgentInput,
 } from "./types.js";
 import type {
@@ -104,6 +114,7 @@ import type {
 	ListTasksFilters,
 	TaskAgentLinkRecord,
 	TaskAttentionRecord,
+	TaskHealthSnapshot,
 	TaskLinkState,
 	TaskLinkType,
 	TaskLinkWithTasksRecord,
@@ -144,6 +155,7 @@ const SubagentSpawnParams = Type.Object({
 	),
 	parentAgentId: Type.Optional(Type.String({ description: "Optional parent child-agent id for hierarchical delegation." })),
 	priority: Type.Optional(Type.String({ description: "Optional human-readable priority label." })),
+	allowDuplicateOwner: Type.Optional(Type.Boolean({ description: "Allow spawning an additional exclusive owner when the task already has an active exclusive owner. Reviewer profiles are allowed without this override.", default: false })),
 });
 
 const DOWNWARD_MESSAGE_KIND = StringEnum(["answer", "note", "redirect", "cancel", "priority"] as const, {
@@ -258,6 +270,11 @@ const TASK_LINK_STATE = StringEnum(["active", "resolved", "cancelled"] as const,
 	description: "Task relationship state.",
 });
 
+const TASK_SUBTREE_CONTROL_ACTION = StringEnum(["preview", "pause", "resume", "cancel"] as const, {
+	description: "Safe subtree control action. Non-preview actions require explicit confirmation.",
+	default: "preview",
+});
+
 const TaskCreateParams = Type.Object({
 	title: Type.String({ description: "Short task title." }),
 	summary: Type.Optional(Type.String({ description: "Short task summary." })),
@@ -329,11 +346,19 @@ const TaskMoveParams = Type.Object({
 	maxDispatch: Type.Optional(Type.Integer({ description: "Maximum newly ready dependent tasks to dispatch.", minimum: 1, maximum: 20, default: 5 })),
 });
 
+const TASK_INTERACTION_RESOLUTION_KIND = StringEnum(["resolved", "approved", "rejected", "changes_requested", "superseded", "cancelled"] as const, {
+	description: "How an attached task interaction should be dispositioned by this note.",
+	default: "resolved",
+});
+
 const TaskNoteParams = Type.Object({
 	id: Type.String({ description: "Task id." }),
 	summary: Type.String({ description: "Short task note summary." }),
 	details: Type.Optional(Type.String({ description: "Longer task note details." })),
 	files: Type.Optional(Type.Array(Type.String(), { maxItems: 200 })),
+	resolveInteractionId: Type.Optional(Type.String({ description: "Optional structured task interaction id to resolve with this note, e.g. legacy:<id> or v2:<id>." })),
+	resolutionKind: Type.Optional(TASK_INTERACTION_RESOLUTION_KIND),
+	resolutionSummary: Type.Optional(Type.String({ description: "Optional resolution summary for the task interaction; defaults to the note summary." })),
 });
 
 const TaskLinkAgentParams = Type.Object({
@@ -341,6 +366,7 @@ const TaskLinkAgentParams = Type.Object({
 	agentId: Type.String({ description: "Agent id." }),
 	role: Type.Optional(Type.String({ description: "Role of this agent on the task." })),
 	active: Type.Optional(Type.Boolean({ description: "Whether the link should be active.", default: true })),
+	allowDuplicateOwner: Type.Optional(Type.Boolean({ description: "Allow an additional exclusive owner when this task already has an active exclusive owner. Reviewer roles are allowed without this override.", default: false })),
 });
 
 const TaskUnlinkAgentParams = Type.Object({
@@ -400,6 +426,15 @@ const TaskAttentionParams = Type.Object({
 const TaskReconcileParams = Type.Object({
 	scope: Type.Optional(LIST_SCOPE),
 	limit: Type.Optional(Type.Integer({ description: "Maximum number of items to reconcile.", minimum: 1, maximum: 500, default: 200 })),
+});
+
+const TaskSubtreeControlParams = Type.Object({
+	id: Type.String({ description: "Root task id for the task family subtree." }),
+	action: Type.Optional(TASK_SUBTREE_CONTROL_ACTION),
+	includeRoot: Type.Optional(Type.Boolean({ description: "Include the root task itself in the selected subtree. Defaults true.", default: true })),
+	confirm: Type.Optional(Type.Boolean({ description: "Required true to apply pause/resume/cancel. False returns the preview only.", default: false })),
+	previewToken: Type.Optional(Type.String({ description: "Preview token returned by the prior dry-run preview. Required with confirm=true for pause/resume/cancel." })),
+	reason: Type.Optional(Type.String({ description: "Reason written to task events and graceful stop messages." })),
 });
 
 const SERVICE_SCOPE = StringEnum(["all", "current_project", "current_session"] as const, {
@@ -600,18 +635,29 @@ function formatAgentDetails(agent: AgentSummary): string {
 	return lines.join("\n");
 }
 
-function formatTaskLine(task: TaskRecord, linkedAgents: AgentSummary[] = [], readiness?: TaskReadinessRecord): string {
+function getTaskHealthSnapshot(task: TaskRecord): TaskHealthSnapshot {
+	return listTaskHealth(getTmuxAgentsDb(), [task]).get(task.id) ?? deriveTaskHealth({ task });
+}
+
+function formatTaskLine(task: TaskRecord, linkedAgents: AgentSummary[] = [], readiness?: TaskReadinessRecord, health: TaskHealthSnapshot = getTaskHealthSnapshot(task)): string {
+	const activeLinkedAgents = linkedAgents.filter((agent) => ["launching", "running", "idle", "waiting", "blocked"].includes(agent.state));
+	const activeExclusiveOwners = activeLinkedAgents.filter((agent) => taskLeaseKindForProfile(agent.profile) === "exclusive");
+	const activeReviewers = activeLinkedAgents.filter((agent) => taskLeaseKindForProfile(agent.profile) === "review");
 	const flags = [
 		`status=${task.status}`,
+		`health=${health.state}`,
+		`lastUseful=${formatStandupAge(health.lastUsefulUpdateAt ?? 0)}`,
 		task.waitingOn ? `waiting=${task.waitingOn}` : null,
 		task.recommendedProfile ? `profile=${task.recommendedProfile}` : null,
 		readiness && readiness.unresolvedDependencies.length > 0 ? `deps=${readiness.unresolvedDependencies.length}` : null,
+		activeExclusiveOwners.length > 0 ? `owner=${activeExclusiveOwners.map((agent) => agent.id).join(",")}` : null,
+		activeReviewers.length > 0 ? `reviewers=${activeReviewers.length}` : null,
 		`p${task.priority}`,
 		linkedAgents.length > 0 ? `${linkedAgents.length} agent${linkedAgents.length === 1 ? "" : "s"}` : null,
 	]
 		.filter((value): value is string => Boolean(value))
 		.join(" · ");
-	return `${task.id} · ${truncateText(task.title, 48)} · ${flags}`;
+	return `${task.id} · ${truncateText(task.title, 48)} · ${flags}\n  next: ${health.nextAction}`;
 }
 
 function formatTaskLinkLine(link: TaskLinkWithTasksRecord, perspective: "dependency" | "dependent" | "any" = "any"): string {
@@ -658,15 +704,443 @@ function buildTaskDispatchText(result: ReturnType<typeof dispatchReadyTasks>, dr
 	return lines.join("\n");
 }
 
+interface TaskSubtreeControlPreview {
+	action: TaskSubtreeControlAction;
+	rootTask: TaskRecord;
+	includeRoot: boolean;
+	reason: string | null;
+	previewToken: string;
+	isComplete: boolean;
+	truncationWarnings: string[];
+	tasks: TaskRecord[];
+	taskIdsToUpdate: string[];
+	links: TaskAgentLinkRecord[];
+	linkedAgents: AgentSummary[];
+	activeAgents: AgentSummary[];
+	agentIdsToStop: string[];
+	agentsByTaskId: Map<string, AgentSummary[]>;
+	blockers: TaskRecord[];
+	attentionItems: AttentionItemRecord[];
+	agentAttentionItems: AgentAttentionV2Record[];
+	cleanupCandidates: CleanupCandidate[];
+}
+
+interface TaskSubtreeControlApplyResult {
+	preview: TaskSubtreeControlPreview;
+	updatedTasks: TaskRecord[];
+	stopResults: Array<{ agentId: string; stopped: boolean; graceful: boolean; command: string; reason?: string }>;
+	stopErrors: Array<{ agentId: string; error: string }>;
+	taskEventsCreated: number;
+}
+
+function normalizeSubtreeReason(action: TaskSubtreeControlAction, reason: string | null | undefined): string {
+	const trimmed = reason?.trim();
+	if (trimmed) return trimmed;
+	switch (action) {
+		case "pause":
+			return "Subtree paused by coordinator.";
+		case "resume":
+			return "Subtree resumed by coordinator.";
+		case "cancel":
+			return "Subtree cancelled by coordinator.";
+		case "preview":
+		default:
+			return "Subtree preview requested.";
+	}
+}
+
+function isTaskPausedBySubtree(task: TaskRecord): boolean {
+	return task.status === "blocked" && Boolean(task.blockedReason?.startsWith(SUBTREE_PAUSED_PREFIX));
+}
+
+function isActiveAgent(agent: AgentSummary): boolean {
+	return ACTIVE_AGENT_STATES.includes(agent.state);
+}
+
+function taskShouldUpdateForSubtreeAction(task: TaskRecord, action: TaskSubtreeControlAction): boolean {
+	switch (action) {
+		case "pause":
+			return task.status !== "done" && task.status !== "blocked";
+		case "resume":
+			return isTaskPausedBySubtree(task);
+		case "cancel":
+			return task.status !== "done";
+		case "preview":
+		default:
+			return false;
+	}
+}
+
+function subtreeBlockedReason(prefix: string, reason: string): string {
+	return `${prefix} ${reason}`.trim();
+}
+
+function addAgentToTaskMap(map: Map<string, AgentSummary[]>, taskId: string, agent: AgentSummary): void {
+	const agents = map.get(taskId) ?? [];
+	if (!agents.some((existing) => existing.id === agent.id)) agents.push(agent);
+	map.set(taskId, agents);
+}
+
+function buildTaskSubtreePreviewToken(input: {
+	action: TaskSubtreeControlAction;
+	rootTaskId: string;
+	includeRoot: boolean;
+	reason: string | null;
+	taskIds: string[];
+	taskIdsToUpdate: string[];
+	agentIdsToStop: string[];
+	truncationWarnings: string[];
+}): string {
+	return createHash("sha256")
+		.update(JSON.stringify({
+			action: input.action,
+			rootTaskId: input.rootTaskId,
+			includeRoot: input.includeRoot,
+			reason: input.reason,
+			taskIds: [...input.taskIds].sort(),
+			taskIdsToUpdate: [...input.taskIdsToUpdate].sort(),
+			agentIdsToStop: [...input.agentIdsToStop].sort(),
+			truncationWarnings: input.truncationWarnings,
+		}))
+		.digest("hex")
+		.slice(0, 16);
+}
+
+function buildTaskSubtreeControlPreview(
+	ctx: ExtensionContext,
+	rootTaskId: string,
+	action: TaskSubtreeControlAction,
+	options: { includeRoot?: boolean; reason?: string } = {},
+): TaskSubtreeControlPreview {
+	const db = getTmuxAgentsDb();
+	const rootTask = getTask(db, rootTaskId);
+	if (!rootTask) throw new Error(`Unknown task id \"${rootTaskId}\".`);
+	const includeRoot = options.includeRoot ?? true;
+	const reason = action === "preview" ? null : normalizeSubtreeReason(action, options.reason);
+	const truncationWarnings: string[] = [];
+	const subtree = listTaskSubtreeWithMeta(db, rootTask.id, { includeRoot, includeDone: true, limit: SUBTREE_QUERY_TASK_LIMIT, maxDepth: SUBTREE_QUERY_TASK_LIMIT });
+	const tasks = subtree.tasks;
+	if (subtree.hitLimit) truncationWarnings.push(`task subtree reached safety cap ${subtree.limit}; apply is disabled until the subtree is narrowed or the cap is raised`);
+	if (subtree.hitDepthLimit) truncationWarnings.push(`task subtree reached depth safety cap ${subtree.maxDepth}; descendants may be omitted below depth ${subtree.maxReturnedDepth}, so apply is disabled until the subtree is narrowed or the depth cap is raised`);
+	const taskIds = tasks.map((task) => task.id);
+	const taskIdSet = new Set(taskIds);
+	const links = taskIds.length > 0 ? listTaskAgentLinks(db, { taskIds, limit: SUBTREE_QUERY_LINK_LIMIT }) : [];
+	if (links.length >= SUBTREE_QUERY_LINK_LIMIT) truncationWarnings.push(`task-agent links reached safety cap ${SUBTREE_QUERY_LINK_LIMIT}; apply is disabled to avoid partial linked-agent control`);
+	const activeLinkAgentIds = new Set(links.filter((link) => link.isActive).map((link) => link.agentId));
+	const linkedAgentIds = new Set(links.map((link) => link.agentId));
+	const agentsById = new Map<string, AgentSummary>();
+	if (linkedAgentIds.size > SUBTREE_QUERY_AGENT_LIMIT) truncationWarnings.push(`linked agent id set has ${linkedAgentIds.size} agents, exceeding list cap ${SUBTREE_QUERY_AGENT_LIMIT}; apply is disabled to avoid partial agent control`);
+	if (linkedAgentIds.size > 0) {
+		for (const agent of listAgents(db, { ids: [...linkedAgentIds], limit: SUBTREE_QUERY_AGENT_LIMIT })) agentsById.set(agent.id, agent);
+	}
+	if (taskIds.length > 0) {
+		const taskAgents = listAgents(db, { taskIds, limit: SUBTREE_QUERY_AGENT_LIMIT });
+		if (taskAgents.length >= SUBTREE_QUERY_AGENT_LIMIT) truncationWarnings.push(`agents attached directly by task_id reached safety cap ${SUBTREE_QUERY_AGENT_LIMIT}; apply is disabled to avoid partial agent control`);
+		for (const agent of taskAgents) agentsById.set(agent.id, agent);
+	}
+	const linkedAgents = [...agentsById.values()]
+		.filter((agent) => (agent.taskId ? taskIdSet.has(agent.taskId) : false) || links.some((link) => link.agentId === agent.id))
+		.sort((left, right) => {
+			const leftActive = isActiveAgent(left) ? 0 : 1;
+			const rightActive = isActiveAgent(right) ? 0 : 1;
+			return leftActive - rightActive || left.profile.localeCompare(right.profile) || left.id.localeCompare(right.id);
+		});
+	const agentsByTaskId = new Map<string, AgentSummary[]>();
+	for (const link of links) {
+		const agent = agentsById.get(link.agentId);
+		if (agent) addAgentToTaskMap(agentsByTaskId, link.taskId, agent);
+	}
+	for (const agent of linkedAgents) {
+		if (agent.taskId && taskIdSet.has(agent.taskId)) addAgentToTaskMap(agentsByTaskId, agent.taskId, agent);
+	}
+	const activeAgents = linkedAgents.filter((agent) => isActiveAgent(agent) && ((agent.taskId ? taskIdSet.has(agent.taskId) : false) || activeLinkAgentIds.has(agent.id)));
+	const agentIds = linkedAgents.map((agent) => agent.id);
+	const attentionItems = agentIds.length > 0 ? listAttentionItems(db, { agentIds, states: OPEN_ATTENTION_STATES, limit: SUBTREE_QUERY_ATTENTION_LIMIT }) : [];
+	if (attentionItems.length >= SUBTREE_QUERY_ATTENTION_LIMIT) truncationWarnings.push(`legacy attention reached safety cap ${SUBTREE_QUERY_ATTENTION_LIMIT}; apply is disabled until attention fanout is narrowed`);
+	const directAgentAttentionItems = taskIds.length > 0 ? listAgentAttentionItemsV2(db, { taskIds, states: OPEN_AGENT_ATTENTION_V2_STATES, limit: SUBTREE_QUERY_ATTENTION_LIMIT }) : [];
+	if (directAgentAttentionItems.length >= SUBTREE_QUERY_ATTENTION_LIMIT) truncationWarnings.push(`direct hierarchy attention reached safety cap ${SUBTREE_QUERY_ATTENTION_LIMIT}; apply is disabled until attention fanout is narrowed`);
+	const subjectAgentAttentionItems = agentIds.length > 0 ? listAgentAttentionItemsV2(db, { subjectAgentIds: agentIds, states: OPEN_AGENT_ATTENTION_V2_STATES, limit: SUBTREE_QUERY_ATTENTION_LIMIT }) : [];
+	if (subjectAgentAttentionItems.length >= SUBTREE_QUERY_ATTENTION_LIMIT) truncationWarnings.push(`subject hierarchy attention reached safety cap ${SUBTREE_QUERY_ATTENTION_LIMIT}; apply is disabled until attention fanout is narrowed`);
+	const agentAttentionItems = [...new Map([...directAgentAttentionItems, ...subjectAgentAttentionItems].map((item) => [item.id, item])).values()];
+	const cleanupCandidates = agentIds.length > 0 ? listCleanupCandidates(ctx, { ids: agentIds, limit: agentIds.length, force: false }) : [];
+	if (agentIds.length > SUBTREE_QUERY_AGENT_LIMIT) truncationWarnings.push(`cleanup candidate lookup is incomplete for ${agentIds.length} agents due agent list cap ${SUBTREE_QUERY_AGENT_LIMIT}; apply is disabled`);
+	const taskIdsToUpdate = tasks.filter((task) => taskShouldUpdateForSubtreeAction(task, action)).map((task) => task.id);
+	const agentIdsToStop = action === "pause" || action === "cancel" ? activeAgents.map((agent) => agent.id) : [];
+	const isComplete = truncationWarnings.length === 0;
+	const previewToken = buildTaskSubtreePreviewToken({ action, rootTaskId: rootTask.id, includeRoot, reason, taskIds, taskIdsToUpdate, agentIdsToStop, truncationWarnings });
+	return {
+		action,
+		rootTask,
+		includeRoot,
+		reason,
+		previewToken,
+		isComplete,
+		truncationWarnings,
+		tasks,
+		taskIdsToUpdate,
+		links,
+		linkedAgents,
+		activeAgents,
+		agentIdsToStop,
+		agentsByTaskId,
+		blockers: tasks.filter((task) => task.status === "blocked" || Boolean(task.waitingOn) || Boolean(task.blockedReason)),
+		attentionItems,
+		agentAttentionItems,
+		cleanupCandidates,
+	};
+}
+
+function taskStatusCounts(tasks: TaskRecord[]): Record<TaskState, number> {
+	return tasks.reduce<Record<TaskState, number>>(
+		(counts, task) => {
+			counts[task.status] += 1;
+			return counts;
+		},
+		{ todo: 0, blocked: 0, in_progress: 0, in_review: 0, done: 0 },
+	);
+}
+
+function formatTaskStatusCounts(tasks: TaskRecord[]): string {
+	const counts = taskStatusCounts(tasks);
+	return [`todo=${counts.todo}`, `blocked=${counts.blocked}`, `in_progress=${counts.in_progress}`, `in_review=${counts.in_review}`, `done=${counts.done}`].join(" · ");
+}
+
+function appendPreviewSection<T>(lines: string[], title: string, items: T[], formatter: (item: T) => string, empty = "- none", limit = 40): void {
+	lines.push("", `## ${title}`);
+	if (items.length === 0) {
+		lines.push(empty);
+		return;
+	}
+	for (const item of items.slice(0, limit)) lines.push(formatter(item));
+	if (items.length > limit) lines.push(`- display truncated: showing ${limit} of ${items.length}; apply still uses the full counted selection when previewComplete=true`);
+}
+
+function formatTaskSubtreePreviewTaskLine(preview: TaskSubtreeControlPreview, task: TaskRecord): string {
+	const action = preview.taskIdsToUpdate.includes(task.id) ? `will-${preview.action}` : "unchanged";
+	const agents = preview.agentsByTaskId.get(task.id) ?? [];
+	const agentText = agents.length > 0 ? ` · agents=${agents.map((agent) => `${agent.id}:${agent.state}`).join(",")}` : "";
+	const waitingText = task.waitingOn ? ` · waiting=${task.waitingOn}` : "";
+	const blockedText = task.blockedReason ? `\n  blocked: ${truncateText(task.blockedReason, 140)}` : "";
+	return `- ${task.id} · ${action} · ${task.status} · parent=${task.parentTaskId ?? "-"} · ${truncateText(task.title, 72)}${waitingText}${agentText}${blockedText}`;
+}
+
+function formatTaskSubtreePreviewAgentLine(preview: TaskSubtreeControlPreview, agent: AgentSummary): string {
+	const willStop = preview.agentIdsToStop.includes(agent.id);
+	const next = willStop ? "will request graceful stop (no force kill)" : "no stop request";
+	return `- ${agent.id} · ${agent.profile} · ${agent.state} · task=${agent.taskId ?? "-"} · transport=${agent.transportState} · ${next}`;
+}
+
+function formatTaskSubtreePreviewAttentionLine(item: AttentionItemRecord): string {
+	return `- ${item.agentId} · ${item.kind} · ${item.state} · ${truncateText(item.summary, 140)}`;
+}
+
+function formatTaskSubtreePreviewAgentAttentionLine(item: AgentAttentionV2Record): string {
+	const owner = `${item.ownerKind}:${item.ownerAgentId ?? "-"}`;
+	return `- ${item.kind} · ${item.state} · task=${item.taskId ?? "-"} · subject=${item.subjectAgentId ?? "-"} · owner=${owner} · ${truncateText(item.summary, 140)}`;
+}
+
+function formatTaskSubtreeCleanupLine(candidate: CleanupCandidate): string {
+	const attention = candidate.attentionItems.length > 0 ? candidate.attentionItems.map((item) => item.kind).join(",") : "none";
+	return `- ${candidate.cleanupAllowed ? "✓" : "-"} ${candidate.agent.id} · ${candidate.agent.state} · ${candidate.reason} · attention=${attention}`;
+}
+
+function formatTaskSubtreeControlConsequences(preview: TaskSubtreeControlPreview): string[] {
+	if (preview.action === "preview") return ["- Read-only preview; no task, agent, attention, or tmux state changes will be applied."];
+	if (preview.action === "resume") {
+		return [
+			`- ${preview.taskIdsToUpdate.length} task(s) with ${SUBTREE_PAUSED_PREFIX} will move back to todo and clear pause blockers.`,
+			"- Dependency checks still run after resume; tasks with unresolved dependencies may remain blocked.",
+			"- No agents are spawned automatically; dispatch explicitly after reviewing the resumed subtree.",
+		];
+	}
+	if (preview.action === "pause") {
+		return [
+			`- ${preview.taskIdsToUpdate.length} non-blocked open task(s) will move to blocked/waitingOn=coordinator with ${SUBTREE_PAUSED_PREFIX}.`,
+			`- ${preview.agentIdsToStop.length} active linked agent(s) will receive graceful stop requests; no force kill is used.`,
+			"- Already blocked tasks keep their existing blocker state and receive only durable subtree-control notes when linked agents are affected.",
+			"- Terminal cleanup candidates are not cleaned automatically; use subagent_cleanup after reviewing handoffs.",
+		];
+	}
+	return [
+		`- ${preview.taskIdsToUpdate.length} non-done task(s) will be parked blocked/waitingOn=coordinator with ${SUBTREE_CANCELLED_PREFIX}.`,
+		`- ${preview.agentIdsToStop.length} active linked agent(s) will receive graceful stop requests; no force kill is used.`,
+		"- Cancel does not mark work accepted/done and does not delete task records; finalize or archive manually after reviewing notes.",
+		"- Terminal cleanup candidates are not cleaned automatically; use subagent_cleanup after reviewing handoffs.",
+	];
+}
+
+function formatTaskSubtreeControlPreview(preview: TaskSubtreeControlPreview): string {
+	const lines = [
+		`# Subtree control preview · action=${preview.action}`,
+		`root: ${preview.rootTask.id} · ${truncateText(preview.rootTask.title, 90)}`,
+		`selection: ${preview.includeRoot ? "root task plus " : ""}recursive descendants via tasks.parentTaskId; linked agents come from task_agent_links plus agents.taskId for selected tasks.`,
+		`confirmation: ${preview.action === "preview" ? "not required for read-only preview" : `rerun with confirm=true and previewToken=${preview.previewToken}`}`,
+		`previewToken: ${preview.previewToken}`,
+		`previewComplete: ${preview.isComplete ? "yes" : "no — apply is disabled until warnings are resolved"}`,
+		preview.reason ? `reason: ${preview.reason}` : null,
+		`counts: ${preview.tasks.length} task(s) (${formatTaskStatusCounts(preview.tasks)}) · ${preview.linkedAgents.length} linked agent(s) · ${preview.activeAgents.length} active · ${preview.blockers.length} blocked task(s) · ${preview.attentionItems.length + preview.agentAttentionItems.length} open attention · ${preview.cleanupCandidates.length} cleanup candidate(s)`,
+		...preview.truncationWarnings.map((warning) => `warning: ${warning}`),
+	]
+		.filter((line): line is string => Boolean(line));
+	lines.push("", "## Consequences", ...formatTaskSubtreeControlConsequences(preview));
+	appendPreviewSection(lines, "Affected tasks", preview.tasks, (task) => formatTaskSubtreePreviewTaskLine(preview, task), preview.includeRoot ? "- none (root task not found)" : "- none (root excluded and no descendants)", 60);
+	appendPreviewSection(lines, "Active linked agents", preview.activeAgents, (agent) => formatTaskSubtreePreviewAgentLine(preview, agent), "- none", 40);
+	appendPreviewSection(lines, "Task blockers", preview.blockers, (task) => `- ${task.id} · waiting=${task.waitingOn ?? "-"} · ${truncateText(task.blockedReason ?? task.summary ?? task.title, 140)}`, "- none", 40);
+	appendPreviewSection(lines, "Open linked-agent attention", preview.attentionItems, formatTaskSubtreePreviewAttentionLine, "- none", 40);
+	appendPreviewSection(lines, "Open hierarchy attention", preview.agentAttentionItems, formatTaskSubtreePreviewAgentAttentionLine, "- none", 40);
+	appendPreviewSection(lines, "Terminal cleanup candidates", preview.cleanupCandidates, formatTaskSubtreeCleanupLine, "- none", 40);
+	return lines.join("\n");
+}
+
+function formatTaskSubtreeControlConfirmation(preview: TaskSubtreeControlPreview): string {
+	return [
+		`Apply subtree ${preview.action} to ${preview.rootTask.id}?`,
+		`${preview.taskIdsToUpdate.length} task(s) will be updated; ${preview.agentIdsToStop.length} active linked agent(s) will receive graceful stop requests.`,
+		`${preview.blockers.length} blocked task(s), ${preview.attentionItems.length + preview.agentAttentionItems.length} open attention item(s), and ${preview.cleanupCandidates.length} cleanup candidate(s) were shown in the preview.`,
+		`Preview token required for tool/API apply: ${preview.previewToken}.`,
+		preview.isComplete ? "Preview is complete; apply may proceed after confirmation." : "Preview is incomplete; apply is disabled until warnings are resolved.",
+		"No force stop or cleanup will run from this action.",
+	].join("\n");
+}
+
+async function applyTaskSubtreeControl(
+	ctx: ExtensionContext,
+	rootTaskId: string,
+	action: Exclude<TaskSubtreeControlAction, "preview">,
+	options: { includeRoot?: boolean; reason?: string; previewToken?: string } = {},
+): Promise<TaskSubtreeControlApplyResult> {
+	const db = getTmuxAgentsDb();
+	const preview = buildTaskSubtreeControlPreview(ctx, rootTaskId, action, options);
+	if (!preview.isComplete) {
+		throw new Error(`Refusing to apply subtree ${action}: preview is incomplete. ${preview.truncationWarnings.join(" ")}`);
+	}
+	if (!options.previewToken || options.previewToken !== preview.previewToken) {
+		throw new Error(`Refusing to apply subtree ${action}: rerun preview and pass previewToken=${preview.previewToken} with confirm=true to acknowledge the exact selection.`);
+	}
+	const now = Date.now();
+	const reason = normalizeSubtreeReason(action, options.reason);
+	const stopResults: TaskSubtreeControlApplyResult["stopResults"] = [];
+	const stopErrors: TaskSubtreeControlApplyResult["stopErrors"] = [];
+	const stopReason = `Subtree ${action} for ${preview.rootTask.id}: ${reason}`;
+	for (const agent of preview.activeAgents.filter((item) => preview.agentIdsToStop.includes(item.id))) {
+		try {
+			const stopped = await stopAgentById(agent.id, false, stopReason);
+			stopResults.push({
+				agentId: stopped.agent.id,
+				stopped: stopped.result.stopped,
+				graceful: stopped.result.graceful,
+				command: stopped.result.command,
+				reason: stopped.result.reason,
+			});
+		} catch (error) {
+			stopErrors.push({ agentId: agent.id, error: error instanceof Error ? error.message : String(error) });
+		}
+	}
+	const taskIdsToUpdate = new Set(preview.taskIdsToUpdate);
+	const updatedTasks: TaskRecord[] = [];
+	for (const task of preview.tasks) {
+		if (!taskIdsToUpdate.has(task.id)) continue;
+		if (action === "pause") {
+			updateTask(db, task.id, {
+				status: "blocked",
+				waitingOn: "coordinator",
+				blockedReason: subtreeBlockedReason(SUBTREE_PAUSED_PREFIX, reason),
+				updatedAt: now,
+			});
+			updatedTasks.push(getTask(db, task.id)!);
+			continue;
+		}
+		if (action === "resume") {
+			updateTask(db, task.id, {
+				status: "todo",
+				waitingOn: null,
+				blockedReason: null,
+				reviewRequestedAt: null,
+				finishedAt: null,
+				updatedAt: now,
+			});
+			updatedTasks.push(refreshTaskDependencyBlockState(db, task.id, now) ?? getTask(db, task.id)!);
+			continue;
+		}
+		updateTask(db, task.id, {
+			status: "blocked",
+			waitingOn: "coordinator",
+			blockedReason: subtreeBlockedReason(SUBTREE_CANCELLED_PREFIX, reason),
+			finishedAt: null,
+			updatedAt: now,
+		});
+		updatedTasks.push(getTask(db, task.id)!);
+	}
+	const updatedById = new Map(updatedTasks.map((task) => [task.id, task]));
+	const noteTaskIds = new Set(preview.taskIdsToUpdate);
+	for (const [taskId, agents] of preview.agentsByTaskId.entries()) {
+		if (agents.some((agent) => preview.agentIdsToStop.includes(agent.id))) noteTaskIds.add(taskId);
+	}
+	let taskEventsCreated = 0;
+	for (const taskId of noteTaskIds) {
+		const before = preview.tasks.find((task) => task.id === taskId) ?? preview.rootTask;
+		const after = updatedById.get(taskId) ?? getTask(db, taskId) ?? before;
+		if (!updatedById.has(taskId)) updateTask(db, taskId, { updatedAt: now });
+		const linkedStopAgentIds = (preview.agentsByTaskId.get(taskId) ?? [])
+			.filter((agent) => preview.agentIdsToStop.includes(agent.id))
+			.map((agent) => agent.id);
+		createTaskEvent(db, {
+			id: randomUUID(),
+			taskId,
+			eventType: "subtree_control",
+			summary: `Subtree ${action} applied from root ${preview.rootTask.id}`,
+			payload: {
+				action,
+				rootTaskId: preview.rootTask.id,
+				reason,
+				previousStatus: before.status,
+				newStatus: after.status,
+				previousWaitingOn: before.waitingOn,
+				newWaitingOn: after.waitingOn,
+				previousBlockedReason: before.blockedReason,
+				newBlockedReason: after.blockedReason,
+				gracefulStopRequestedAgentIds: linkedStopAgentIds,
+				stopErrors: stopErrors.filter((item) => linkedStopAgentIds.includes(item.agentId)),
+			},
+			createdAt: now,
+		});
+		taskEventsCreated += 1;
+	}
+	return { preview, updatedTasks, stopResults, stopErrors, taskEventsCreated };
+}
+
+function formatTaskSubtreeControlApplyResult(result: TaskSubtreeControlApplyResult): string {
+	const lines = [
+		`# Subtree control result · action=${result.preview.action}`,
+		`root: ${result.preview.rootTask.id}`,
+		`updatedTasks: ${result.updatedTasks.length}`,
+		`gracefulStopRequests: ${result.stopResults.length}`,
+		`stopErrors: ${result.stopErrors.length}`,
+		`taskEventsCreated: ${result.taskEventsCreated}`,
+	];
+	appendPreviewSection(lines, "Updated tasks", result.updatedTasks, (task) => `- ${task.id} · ${task.status} · waiting=${task.waitingOn ?? "-"} · ${truncateText(task.title, 80)}`, "- none", 60);
+	appendPreviewSection(lines, "Graceful stop requests", result.stopResults, (item) => `- ${item.agentId} · ${item.command} · ${item.reason ?? "queued"}`, "- none", 40);
+	appendPreviewSection(lines, "Stop errors", result.stopErrors, (item) => `- ${item.agentId} · ${item.error}`, "- none", 40);
+	return lines.join("\n");
+}
+
 function formatTaskDetails(
 	task: TaskRecord,
 	linkedAgents: AgentSummary[] = [],
 	events: ReturnType<typeof listTaskEvents> = [],
 	links: { dependencies?: TaskLinkWithTasksRecord[]; dependents?: TaskLinkWithTasksRecord[] } = {},
+	interactions: TaskInteractionRecord[] = [],
+	health: TaskHealthSnapshot = getTaskHealthSnapshot(task),
 ): string {
 	const lines = [
 		`id: ${task.id}`,
-		`status: ${task.status}`,
+		`status: ${task.status} (Kanban lane; health is derived separately)`,
+		`health: ${health.state}`,
+		`healthSignals: ${health.signals.join(", ")}`,
+		`lastUsefulUpdateAt: ${health.lastUsefulUpdateAt ? new Date(health.lastUsefulUpdateAt).toISOString() : "-"}`,
+		`lastUsefulUpdate: ${health.lastUsefulUpdateSummary}`,
+		`nextAction: ${health.nextAction}`,
+		`healthReason: ${health.reason}`,
 		`title: ${task.title}`,
 		`summary: ${task.summary ?? "-"}`,
 		`description: ${task.description ?? "-"}`,
@@ -708,8 +1182,11 @@ function formatTaskDetails(
 		`reviewSummary: ${task.reviewSummary ?? "-"}`,
 		`finalSummary: ${task.finalSummary ?? "-"}`,
 		"",
+		"interactions:",
+		...(interactions.length > 0 ? interactions.map(formatTaskInteractionCard) : ["- none"]),
+		"",
 		"linkedAgents:",
-		...(linkedAgents.length > 0 ? linkedAgents.map((agent) => `- ${agent.id} · ${agent.profile} · ${agent.state}`) : ["- none"]),
+		...(linkedAgents.length > 0 ? linkedAgents.map((agent) => `- ${agent.id} · ${agent.profile} · ${agent.state} · lease=${taskLeaseKindForProfile(agent.profile)}`) : ["- none"]),
 	];
 	if (events.length > 0) {
 		lines.push("", "recentEvents:");
@@ -1003,7 +1480,7 @@ function updateFleetUi(ctx: ExtensionContext): void {
 	if (taskItems.length > 0) {
 		ctx.ui.setWidget(
 			"tmux-agents",
-			taskItems.map((item) => `${item.status === "blocked" ? "⛔" : "◍"} ${truncateText(item.title, 32)} · ${item.status}${item.waitingOn ? ` · ${item.waitingOn}` : ""}`),
+			taskItems.map((item) => `${item.health === "stale" || item.health === "empty_or_no_progress" ? "⚠" : item.status === "blocked" ? "⛔" : "◍"} ${truncateText(item.title, 32)} · ${item.status} · health=${item.health}${item.waitingOn ? ` · ${item.waitingOn}` : ""}`),
 		);
 		return;
 	}
@@ -1026,7 +1503,17 @@ function updateFleetUi(ctx: ExtensionContext): void {
 }
 
 const OPEN_ATTENTION_STATES: AttentionItemRecord["state"][] = ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user"];
+const OPEN_AGENT_ATTENTION_V2_STATES: AgentAttentionV2Record["state"][] = ["open", "acknowledged", "waiting_on_owner"];
+const ACTIVE_AGENT_STATES: AgentSummary["state"][] = ["launching", "running", "idle", "waiting", "blocked"];
 const TERMINAL_AGENT_STATES: AgentSummary["state"][] = ["done", "error", "stopped", "lost"];
+const SUBTREE_PAUSED_PREFIX = "[subtree paused]";
+const SUBTREE_CANCELLED_PREFIX = "[subtree cancelled]";
+const SUBTREE_QUERY_TASK_LIMIT = 1000;
+const SUBTREE_QUERY_LINK_LIMIT = 1000;
+const SUBTREE_QUERY_AGENT_LIMIT = 200;
+const SUBTREE_QUERY_ATTENTION_LIMIT = 500;
+
+type TaskSubtreeControlAction = "preview" | "pause" | "resume" | "cancel";
 
 interface CleanupCandidate {
 	agent: AgentSummary;
@@ -1189,9 +1676,341 @@ function suppressDuplicateLegacyAttentionItems(legacyItems: AttentionItemRecord[
 	return legacyItems.filter((item) => !legacyAttentionDuplicatesV2(item, v2MessageIds, v2RecipientRowIds));
 }
 
+function payloadRecord(payload: unknown): Record<string, unknown> {
+	return payload && typeof payload === "object" && !Array.isArray(payload) ? (payload as Record<string, unknown>) : {};
+}
+
+function payloadString(payload: unknown, key: string): string | null {
+	const value = payloadRecord(payload)[key];
+	return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function payloadStringArray(payload: unknown, key: string): string[] {
+	const value = payloadRecord(payload)[key];
+	return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : [];
+}
+
+function taskInteractionKindFromAttention(
+	kind: AttentionItemRecord["kind"] | AgentAttentionV2Record["kind"],
+	ownerKind: AgentRecipientKind,
+): TaskInteractionRecord["kind"] {
+	switch (kind) {
+		case "question_for_user":
+			return "user_question";
+		case "question":
+			return ownerKind === "user" ? "user_question" : "coordinator_question";
+		case "approval":
+			return "approval_request";
+		case "change_request":
+			return "change_request";
+		case "blocked":
+			return "blocker";
+		case "complete":
+			return "completion";
+		default:
+			return "coordinator_question";
+	}
+}
+
+function taskInteractionIcon(kind: TaskInteractionRecord["kind"]): string {
+	switch (kind) {
+		case "user_question":
+			return "❓";
+		case "coordinator_question":
+			return "?";
+		case "approval_request":
+			return "☑";
+		case "change_request":
+			return "↻";
+		case "blocker":
+			return "⛔";
+		case "completion":
+			return "✓";
+		default:
+			return "•";
+	}
+}
+
+function taskInteractionLabel(kind: TaskInteractionRecord["kind"]): string {
+	switch (kind) {
+		case "user_question":
+			return "user question";
+		case "coordinator_question":
+			return "coordinator question";
+		case "approval_request":
+			return "approval request";
+		case "change_request":
+			return "change request";
+		case "blocker":
+			return "blocker";
+		case "completion":
+			return "completion";
+		default:
+			return kind;
+	}
+}
+
+function actorLabelForInteraction(agent: AgentSummary | undefined, fallbackAgentId: string | null): string {
+	if (agent) return `${agent.profile}:${agent.id}`;
+	return fallbackAgentId ? `agent:${fallbackAgentId}` : "system";
+}
+
+function ownerLabelForInteraction(interaction: TaskInteractionRecord): string {
+	return interaction.ownerKind === "agent" ? `agent:${interaction.ownerAgentId ?? "-"}` : interaction.ownerKind;
+}
+
+function buildTaskInteractionActions(
+	kind: TaskInteractionRecord["kind"],
+	taskId: string,
+	agentId: string | null,
+	messageId: string | null,
+	options: { interactionId?: string; canMessageAgent?: boolean } = {},
+): { nextAction: string; actions: string[] } {
+	const replyRef = messageId ? ` inReplyToMessageId=${messageId}` : "";
+	const resolveRef = options.interactionId ? ` resolveInteractionId=${options.interactionId}` : "";
+	const noteAction = (summary: string, resolutionKind = "resolved") => `task_note id=${taskId} summary="${summary}"${resolveRef} resolutionKind=${resolutionKind}`;
+	const canMessageAgent = Boolean(agentId && options.canMessageAgent);
+	const childAnswer = canMessageAgent
+		? `subagent_message id=${agentId} kind=answer summary="<answer>" actionPolicy=resume_if_blocked${replyRef}`
+		: noteAction("Answer recorded");
+	const childRedirect = canMessageAgent
+		? `subagent_message id=${agentId} kind=redirect summary="<requested change>" actionPolicy=replan${replyRef}`
+		: noteAction("Change requested", "changes_requested");
+	const notifyApproval = canMessageAgent ? `; subagent_message id=${agentId} kind=answer summary="Approved" actionPolicy=resume_if_blocked${replyRef}` : "";
+	const notifyRejection = canMessageAgent ? `; subagent_message id=${agentId} kind=redirect summary="Rejected" actionPolicy=replan${replyRef}` : "";
+	const notifyChanges = canMessageAgent ? `; subagent_message id=${agentId} kind=redirect summary="Changes requested" actionPolicy=replan${replyRef}` : "";
+	switch (kind) {
+		case "user_question":
+			return {
+				nextAction: "answer user-facing question, then resume or acknowledge the child",
+				actions: [`answer: ${childAnswer}`, `fallback: ${noteAction("User answer recorded")}`],
+			};
+		case "coordinator_question":
+			return {
+				nextAction: "answer coordinator question through the child control plane",
+				actions: [`answer: ${childAnswer}`, `note-only fallback: ${noteAction("Coordinator answer recorded")}`],
+			};
+		case "blocker":
+			return {
+				nextAction: "unblock with an answer, redirect, or resolved task note",
+				actions: [`unblock: ${childAnswer}`, `redirect: ${childRedirect}`, `fallback: ${noteAction("Blocker disposition")}`],
+			};
+		case "approval_request":
+			return {
+				nextAction: "approve, reject, or request changes; disposition the interaction with task_note so the card closes",
+				actions: [
+					`approve: ${noteAction("Approved", "approved")}${notifyApproval}`,
+					`reject: ${noteAction("Rejected", "rejected")}${notifyRejection}`,
+					`request-changes: ${noteAction("Changes requested", "changes_requested")}${notifyChanges}`,
+				],
+			};
+		case "change_request":
+			return {
+				nextAction: "record requested changes and disposition the interaction",
+				actions: [`request-changes: ${noteAction("Changes requested", "changes_requested")}${notifyChanges}`, `resolve: ${noteAction("Change request recorded")}`],
+			};
+		case "completion":
+			return {
+				nextAction: "review handoff, then accept or request changes; task_note closes the completion card even for terminal agents",
+				actions: [`approve: ${noteAction("Completion accepted", "approved")}`, `request-changes: ${noteAction("Changes requested", "changes_requested")}${notifyChanges}`],
+			};
+		default:
+			return { nextAction: "triage interaction", actions: [`note: ${noteAction("Interaction triaged")}`] };
+	}
+}
+
+function taskInteractionFromLegacyAttention(item: AttentionItemRecord, agent: AgentSummary | undefined): TaskInteractionRecord | null {
+	const taskId = agent?.taskId ?? null;
+	if (!taskId) return null;
+	const ownerKind: AgentRecipientKind = item.audience === "user" ? "user" : "root";
+	const messageId = payloadString(item.payload, "v2MessageId") ?? item.messageId;
+	const recipientRowId = payloadString(item.payload, "v2RecipientRowId");
+	const kind = taskInteractionKindFromAttention(item.kind, ownerKind);
+	const interactionId = `legacy:${item.id}`;
+	const actionInfo = buildTaskInteractionActions(kind, taskId, item.agentId, messageId, {
+		interactionId,
+		canMessageAgent: Boolean(agent && !TERMINAL_AGENT_STATES.includes(agent.state)),
+	});
+	return {
+		id: interactionId,
+		source: "legacy_attention",
+		sourceId: item.id,
+		taskId,
+		agentId: item.agentId,
+		actorLabel: actorLabelForInteraction(agent, item.agentId),
+		ownerKind,
+		ownerAgentId: null,
+		kind,
+		state: item.state,
+		priority: item.priority,
+		summary: item.summary,
+		details: payloadString(item.payload, "details"),
+		answerNeeded: payloadString(item.payload, "answerNeeded"),
+		recommendedNextAction: payloadString(item.payload, "recommendedNextAction"),
+		files: payloadStringArray(item.payload, "files"),
+		messageId,
+		recipientRowId,
+		nextAction: actionInfo.nextAction,
+		actions: actionInfo.actions,
+		payload: item.payload,
+		createdAt: item.createdAt,
+		updatedAt: item.updatedAt,
+	};
+}
+
+function taskInteractionFromAgentAttentionV2(item: AgentAttentionV2Record, agentsById: Map<string, AgentSummary>): TaskInteractionRecord | null {
+	const subject = item.subjectAgentId ? agentsById.get(item.subjectAgentId) : undefined;
+	const taskId = item.taskId ?? subject?.taskId ?? null;
+	if (!taskId) return null;
+	const kind = taskInteractionKindFromAttention(item.kind, item.ownerKind);
+	const interactionId = `v2:${item.id}`;
+	const actionInfo = buildTaskInteractionActions(kind, taskId, item.subjectAgentId, item.messageId, {
+		interactionId,
+		canMessageAgent: Boolean(subject && !TERMINAL_AGENT_STATES.includes(subject.state)),
+	});
+	return {
+		id: interactionId,
+		source: "hierarchy_attention",
+		sourceId: item.id,
+		taskId,
+		agentId: item.subjectAgentId,
+		actorLabel: actorLabelForInteraction(subject, item.subjectAgentId),
+		ownerKind: item.ownerKind,
+		ownerAgentId: item.ownerAgentId,
+		kind,
+		state: item.state,
+		priority: item.priority,
+		summary: item.summary,
+		details: payloadString(item.payload, "details"),
+		answerNeeded: payloadString(item.payload, "answerNeeded"),
+		recommendedNextAction: payloadString(item.payload, "recommendedNextAction"),
+		files: payloadStringArray(item.payload, "files"),
+		messageId: item.messageId,
+		recipientRowId: item.recipientRowId,
+		nextAction: actionInfo.nextAction,
+		actions: actionInfo.actions,
+		payload: item.payload,
+		createdAt: item.createdAt,
+		updatedAt: item.updatedAt,
+	};
+}
+
+function addTaskInteraction(result: Map<string, TaskInteractionRecord[]>, interaction: TaskInteractionRecord | null, taskIds?: Set<string>): void {
+	if (!interaction) return;
+	if (taskIds && !taskIds.has(interaction.taskId)) return;
+	const existing = result.get(interaction.taskId) ?? [];
+	existing.push(interaction);
+	result.set(interaction.taskId, existing);
+}
+
+function sortTaskInteractionsByPriority(items: TaskInteractionRecord[]): TaskInteractionRecord[] {
+	return [...items].sort((left, right) => left.priority - right.priority || right.updatedAt - left.updatedAt || left.createdAt - right.createdAt);
+}
+
+function buildTaskInteractionsByTask(
+	legacyItems: AttentionItemRecord[],
+	v2Items: AgentAttentionV2Record[],
+	agentsById: Map<string, AgentSummary>,
+	taskIds?: Set<string>,
+): Map<string, TaskInteractionRecord[]> {
+	const result = new Map<string, TaskInteractionRecord[]>();
+	for (const item of v2Items) {
+		addTaskInteraction(result, taskInteractionFromAgentAttentionV2(item, agentsById), taskIds);
+	}
+	for (const item of suppressDuplicateLegacyAttentionItems(legacyItems, v2Items)) {
+		addTaskInteraction(result, taskInteractionFromLegacyAttention(item, agentsById.get(item.agentId)), taskIds);
+	}
+	for (const [taskId, interactions] of result.entries()) {
+		result.set(taskId, sortTaskInteractionsByPriority(interactions));
+	}
+	return result;
+}
+
+function mergeAgentAttentionV2Items(...groups: AgentAttentionV2Record[][]): AgentAttentionV2Record[] {
+	const byId = new Map<string, AgentAttentionV2Record>();
+	for (const group of groups) {
+		for (const item of group) byId.set(item.id, item);
+	}
+	return [...byId.values()];
+}
+
+function listTaskInteractionsForTaskIds(taskIds: string[]): Map<string, TaskInteractionRecord[]> {
+	if (taskIds.length === 0) return new Map();
+	const db = getTmuxAgentsDb();
+	const links = listTaskAgentLinks(db, { taskIds, limit: Math.max(1, Math.min(taskIds.length * 50, 500)) });
+	const agentIds = Array.from(new Set(links.map((link) => link.agentId)));
+	const agents = agentIds.length > 0 ? listAgents(db, { ids: agentIds, limit: agentIds.length }) : [];
+	const agentsById = new Map(agents.map((agent) => [agent.id, agent]));
+	const legacyItems = agentIds.length > 0 ? listAttentionItems(db, { agentIds, states: OPEN_ATTENTION_STATES, limit: 500 }) : [];
+	const directV2Items = listAgentAttentionItemsV2(db, { taskIds, states: OPEN_AGENT_ATTENTION_V2_STATES, limit: 500 });
+	const subjectV2Items = agentIds.length > 0
+		? listAgentAttentionItemsV2(db, { subjectAgentIds: agentIds, states: OPEN_AGENT_ATTENTION_V2_STATES, limit: 500 })
+		: [];
+	return buildTaskInteractionsByTask(legacyItems, mergeAgentAttentionV2Items(directV2Items, subjectV2Items), agentsById, new Set(taskIds));
+}
+
+function getTaskInteractions(taskId: string): TaskInteractionRecord[] {
+	return listTaskInteractionsForTaskIds([taskId]).get(taskId) ?? [];
+}
+
+function formatTaskInteractionCard(interaction: TaskInteractionRecord): string {
+	const lines = [
+		`- ${taskInteractionIcon(interaction.kind)} ${taskInteractionLabel(interaction.kind)} · ${interaction.state} · from=${interaction.actorLabel} · owner=${ownerLabelForInteraction(interaction)}`,
+		`  summary: ${interaction.summary}`,
+	];
+	if (interaction.answerNeeded) lines.push(`  answerNeeded: ${interaction.answerNeeded}`);
+	if (interaction.recommendedNextAction) lines.push(`  childNext: ${interaction.recommendedNextAction}`);
+	if (interaction.details) lines.push(`  details: ${truncateText(interaction.details, 220)}`);
+	if (interaction.files.length > 0) lines.push(`  files: ${interaction.files.join(", ")}`);
+	lines.push(`  next: ${interaction.nextAction}`);
+	for (const action of interaction.actions) lines.push(`  action: ${action}`);
+	return lines.join("\n");
+}
+
+function resolvedInteractionState(resolutionKind: string): "resolved" | "superseded" | "cancelled" {
+	if (resolutionKind === "cancelled") return "cancelled";
+	if (["rejected", "changes_requested", "superseded"].includes(resolutionKind)) return "superseded";
+	return "resolved";
+}
+
+function sqlPlaceholders(count: number): string {
+	return Array.from({ length: count }, () => "?").join(", ");
+}
+
+function resolveTaskInteractionWithNote(taskId: string, interactionId: string, resolutionKind: string, resolutionSummary: string): { source: "legacy" | "v2"; changes: number } {
+	const [source, ...rest] = interactionId.split(":");
+	const sourceId = rest.join(":");
+	if (!sourceId || (source !== "legacy" && source !== "v2")) {
+		throw new Error(`Invalid task interaction id \"${interactionId}\". Expected legacy:<id> or v2:<id>.`);
+	}
+	const db = getTmuxAgentsDb();
+	const now = Date.now();
+	const state = resolvedInteractionState(resolutionKind);
+	if (source === "legacy") {
+		const result = db.prepare(
+			`UPDATE attention_items
+			 SET state = ?, updated_at = ?, resolved_at = ?, resolution_kind = ?, resolution_summary = ?
+			 WHERE id = ?
+				AND state IN (${sqlPlaceholders(OPEN_ATTENTION_STATES.length)})
+				AND agent_id IN (SELECT id FROM agents WHERE task_id = ?)`,
+		).run(state, now, now, resolutionKind, resolutionSummary, sourceId, ...OPEN_ATTENTION_STATES, taskId) as { changes?: number };
+		return { source, changes: Number(result.changes ?? 0) };
+	}
+	const result = db.prepare(
+		`UPDATE agent_attention_items_v2
+		 SET state = ?, updated_at = ?, resolved_at = ?, resolution_kind = ?, resolution_summary = ?
+		 WHERE id = ?
+			AND state IN (${sqlPlaceholders(OPEN_AGENT_ATTENTION_V2_STATES.length)})
+			AND (task_id = ? OR subject_agent_id IN (SELECT id FROM agents WHERE task_id = ?))`,
+	).run(state, now, now, resolutionKind, resolutionSummary, sourceId, ...OPEN_AGENT_ATTENTION_V2_STATES, taskId, taskId) as { changes?: number };
+	return { source, changes: Number(result.changes ?? 0) };
+}
+
 function formatTaskAttentionLine(item: TaskAttentionRecord): string {
 	const bits = [
 		item.status,
+		`health=${item.health}`,
+		`lastUseful=${formatStandupAge(item.lastUsefulUpdateAt ?? 0)}`,
 		item.waitingOn ? `waiting=${item.waitingOn}` : null,
 		item.unresolvedDependencyCount > 0 ? `deps=${item.unresolvedDependencyCount}` : null,
 		item.readyUnblocked ? "dependency-ready" : null,
@@ -1203,10 +2022,14 @@ function formatTaskAttentionLine(item: TaskAttentionRecord): string {
 	return `${item.taskId} · ${truncateText(item.title, 42)} · ${bits}`;
 }
 
-function buildTaskAttentionText(items: TaskAttentionRecord[]): string {
+function buildTaskAttentionText(items: TaskAttentionRecord[], interactionsByTask: Map<string, TaskInteractionRecord[]> = new Map()): string {
 	if (items.length === 0) return "No task attention items.";
 	return items
-		.map((item) => `${formatTaskAttentionLine(item)}\nsummary: ${item.summary}\nblocked: ${item.blockedReason ?? "-"}\nreview: ${item.reviewSummary ?? "-"}`)
+		.map((item) => {
+			const interactions = interactionsByTask.get(item.taskId) ?? [];
+			const interactionText = interactions.length > 0 ? `\ninteractions:\n${interactions.map(formatTaskInteractionCard).join("\n")}` : "";
+			return `${formatTaskAttentionLine(item)}\nnext: ${item.nextAction}\nsummary: ${item.summary}\nblocked: ${item.blockedReason ?? "-"}\nreview: ${item.reviewSummary ?? "-"}${interactionText}`;
+		})
 		.join("\n\n");
 }
 
@@ -1317,6 +2140,9 @@ function cleanupAgentTarget(candidate: CleanupCandidate, force = false): { agent
 		summary: force ? "Cleaned up tmux target with force." : "Cleaned up tmux target after terminal state.",
 		payload: { command: result.command, force },
 	});
+	if (agent.taskId) {
+		unlinkTaskAgent(db, agent.taskId, agent.id, force ? "cleanup_force" : "cleanup_terminal_agent");
+	}
 	updateAgent(db, agent.id, { updatedAt: now });
 	return { agentId: agent.id, cleaned: true, reason: force ? "force-cleaned" : "cleaned", command: result.command };
 }
@@ -1409,6 +2235,40 @@ function defaultDownwardActionPolicy(kind: "answer" | "note" | "redirect" | "can
 	}
 }
 
+function isCoalescableWake(kind: AgentMessageRecord["kind"], actionPolicy: DownwardMessageActionPolicy | undefined): boolean {
+	return actionPolicy === "resume_if_blocked" && ["answer", "note", "priority"].includes(kind);
+}
+
+function coalesceQueuedDownwardWakeMessages(
+	db: ReturnType<typeof getTmuxAgentsDb>,
+	agent: AgentSummary,
+	kind: "answer" | "note" | "redirect" | "cancel" | "priority",
+	actionPolicy: DownwardMessageActionPolicy,
+): { expiredMessageIds: string[]; expiredV2MessageIds: string[]; expiredV2RecipientRowIds: string[]; coalescedWakeMessages: NonNullable<DownwardMessagePayload["coalescedWakeMessages"]> } {
+	if (!isCoalescableWake(kind, actionPolicy)) {
+		return { expiredMessageIds: [], expiredV2MessageIds: [], expiredV2RecipientRowIds: [], coalescedWakeMessages: [] };
+	}
+	const queued = listMessagesForRecipient(db, agent.id, { targetKind: "child", limit: 100 }).filter((message) => {
+		const payload = (message.payload && typeof message.payload === "object" ? message.payload : {}) as DownwardMessagePayload;
+		return isCoalescableWake(message.kind, payload.actionPolicy ?? defaultDownwardActionPolicy(message.kind as "answer" | "note" | "redirect" | "cancel" | "priority"));
+	});
+	if (queued.length === 0) {
+		return { expiredMessageIds: [], expiredV2MessageIds: [], expiredV2RecipientRowIds: [], coalescedWakeMessages: [] };
+	}
+	const { expiredMessageIds, expiredV2MessageIds, expiredV2RecipientRowIds, coalescedWakeMessages } = collectQueuedWakeCoalescingContext(queued);
+	markAgentMessages(db, expiredMessageIds, "expired");
+	markAgentMessageRecipientsByMessageIds(db, expiredV2MessageIds, "expired", { recipientAgentId: agent.id, transportKind: "inbox" });
+	markAgentMessageRecipientsByIds(db, expiredV2RecipientRowIds, "expired", { recipientAgentId: agent.id, transportKind: "inbox" });
+	createAgentEvent(db, {
+		id: randomUUID(),
+		agentId: agent.id,
+		eventType: "downward_wake_coalesced",
+		summary: `Coalesced ${queued.length} queued resume/wake message${queued.length === 1 ? "" : "s"}.`,
+		payload: { expiredMessageIds, expiredV2MessageIds, expiredV2RecipientRowIds, coalescedWakeMessages, replacementKind: kind, actionPolicy },
+	});
+	return { expiredMessageIds, expiredV2MessageIds, expiredV2RecipientRowIds, coalescedWakeMessages };
+}
+
 function expectedDownwardHandlingLines(actionPolicy: DownwardMessageActionPolicy): string[] {
 	switch (actionPolicy) {
 		case "resume_if_blocked":
@@ -1454,6 +2314,18 @@ function formatDownwardMessageForChild(message: AgentMessageRecord): string {
 	}
 	if (payload.inReplyToMessageId) {
 		lines.push("", `Replying to message: ${payload.inReplyToMessageId}`);
+	}
+	if (payload.coalescedMessageIds && payload.coalescedMessageIds.length > 0) {
+		lines.push("", `Coalesced prior resume/wake messages: ${payload.coalescedMessageIds.join(", ")}`);
+	}
+	if (payload.coalescedWakeMessages && payload.coalescedWakeMessages.length > 0) {
+		lines.push("", "Prior coalesced wake context:");
+		for (const prior of payload.coalescedWakeMessages) {
+			lines.push(`- ${prior.kind} ${prior.id}: ${prior.summary}`);
+			if (prior.details) lines.push(`  details: ${truncateText(prior.details, 220)}`);
+			if (prior.files && prior.files.length > 0) lines.push(`  files: ${prior.files.join(", ")}`);
+			if (prior.inReplyToMessageId) lines.push(`  inReplyToMessageId: ${prior.inReplyToMessageId}`);
+		}
 	}
 	lines.push("", "Expected handling:");
 	for (const line of expectedDownwardHandlingLines(actionPolicy)) {
@@ -1623,6 +2495,13 @@ function queueDownwardMessage(
 		senderAgentId: actor.kind === "agent" ? actor.agentId : null,
 		actionPolicy: payload.actionPolicy ?? defaultDownwardActionPolicy(kind),
 	};
+	const coalescedWake = coalesceQueuedDownwardWakeMessages(db, agent, kind, fullPayload.actionPolicy!);
+	if (coalescedWake.expiredMessageIds.length > 0) {
+		fullPayload.coalescedMessageIds = coalescedWake.expiredMessageIds;
+		fullPayload.coalescedV2MessageIds = coalescedWake.expiredV2MessageIds;
+		fullPayload.coalescedV2RecipientRowIds = coalescedWake.expiredV2RecipientRowIds;
+		fullPayload.coalescedWakeMessages = coalescedWake.coalescedWakeMessages;
+	}
 	createAgentMessage(db, {
 		id: messageId,
 		threadId: agent.id,
@@ -1639,7 +2518,7 @@ function queueDownwardMessage(
 		agentId: agent.id,
 		eventType: `downward_${kind}`,
 		summary: fullPayload.summary,
-		payload: { messageId, deliveryMode, ...fullPayload },
+		payload: { messageId, deliveryMode, coalescedWake, ...fullPayload },
 	});
 	if (kind === "cancel") {
 		updateAttentionItemsForAgent(
@@ -1749,6 +2628,9 @@ async function stopAgentById(id: string, force: boolean, reason?: string): Promi
 			finishedAt: Date.now(),
 			lastError: reason?.trim() || agent.lastError,
 		});
+		if (agent.taskId) {
+			unlinkTaskAgent(getTmuxAgentsDb(), agent.taskId, agent.id, reason?.trim() || "force_stop_missing_tmux_target");
+		}
 		updateAttentionItemsForAgent(
 			getTmuxAgentsDb(),
 			agent.id,
@@ -1825,6 +2707,9 @@ async function stopAgentById(id: string, force: boolean, reason?: string): Promi
 			finishedAt: Date.now(),
 			lastError: reason?.trim() || agent.lastError,
 		});
+		if (agent.taskId) {
+			unlinkTaskAgent(getTmuxAgentsDb(), agent.taskId, agent.id, reason?.trim() || "force_stop");
+		}
 		updateAttentionItemsForAgent(
 			getTmuxAgentsDb(),
 			agent.id,
@@ -2501,6 +3386,7 @@ function ensureTaskForSpawn(ctx: ExtensionContext, params: {
 	cwd?: string;
 	taskId?: string;
 	priority?: string;
+	allowDuplicateOwner?: boolean;
 }): TaskRecord {
 	const db = getTmuxAgentsDb();
 	const existingTaskId = params.taskId?.trim() || null;
@@ -2511,13 +3397,21 @@ function ensureTaskForSpawn(ctx: ExtensionContext, params: {
 		if (unresolved.length > 0) {
 			throw new Error(`Task ${existingTaskId} has unresolved dependencies: ${unresolved.map((link) => link.targetTaskId).join(", ")}. Do not spawn an agent for this ticket until dependencies resolve.`);
 		}
+		assertTaskLeaseAvailable(db, {
+			taskId: existingTaskId,
+			profile: params.profile,
+			allowDuplicateOwner: params.allowDuplicateOwner,
+		});
 		const now = Date.now();
+		const requestedLeaseKind = taskLeaseKindForProfile(params.profile);
+		const status: TaskState = requestedLeaseKind === "review" && task.status === "in_review" ? "in_review" : "in_progress";
 		updateTask(db, existingTaskId, {
-			status: "in_progress",
+			status,
 			waitingOn: null,
 			blockedReason: null,
 			updatedAt: now,
-			startedAt: task.startedAt ?? now,
+			startedAt: status === "in_progress" ? task.startedAt ?? now : task.startedAt,
+			reviewRequestedAt: status === "in_review" ? task.reviewRequestedAt ?? now : task.reviewRequestedAt,
 		});
 		createTaskEvent(db, {
 			id: randomUUID(),
@@ -2549,15 +3443,19 @@ function getTaskLinkedAgents(taskId: string, activeOnly = false): AgentSummary[]
 }
 
 async function chooseAgentForTaskAction(ctx: ExtensionContext, taskId: string, actionLabel: string): Promise<AgentSummary | null> {
-	const linkedAgents = getTaskLinkedAgents(taskId, true);
+	const linkedAgents = getTaskLinkedAgents(taskId, true).sort(
+		(left, right) =>
+			(taskLeaseKindForProfile(left.profile) === "exclusive" ? 0 : 1) - (taskLeaseKindForProfile(right.profile) === "exclusive" ? 0 : 1) ||
+			left.createdAt - right.createdAt,
+	);
 	if (linkedAgents.length === 0) return null;
 	if (linkedAgents.length === 1 || !ctx.hasUI) return linkedAgents[0] ?? null;
 	const selection = await ctx.ui.select(
 		`${actionLabel}: choose linked agent`,
-		linkedAgents.map((agent) => `${agent.id} · ${agent.profile} · ${agent.state}`),
+		linkedAgents.map((agent) => `${agent.id} · ${agent.profile} · ${agent.state} · lease=${taskLeaseKindForProfile(agent.profile)}`),
 	);
 	if (!selection) return null;
-	return linkedAgents.find((agent) => `${agent.id} · ${agent.profile} · ${agent.state}` === selection) ?? linkedAgents[0] ?? null;
+	return linkedAgents.find((agent) => `${agent.id} · ${agent.profile} · ${agent.state} · lease=${taskLeaseKindForProfile(agent.profile)}` === selection) ?? linkedAgents[0] ?? null;
 }
 
 function spawnChildFromParams(pi: ExtensionAPI, ctx: ExtensionContext, params: {
@@ -2570,6 +3468,7 @@ function spawnChildFromParams(pi: ExtensionAPI, ctx: ExtensionContext, params: {
 	tools?: string[];
 	parentAgentId?: string;
 	priority?: string;
+	allowDuplicateOwner?: boolean;
 }): SpawnSubagentResult {
 	const profile = requireProfile(params.profile);
 	const spawnCwd = resolveInputPath(ctx.cwd, params.cwd);
@@ -2590,6 +3489,7 @@ function spawnChildFromParams(pi: ExtensionAPI, ctx: ExtensionContext, params: {
 		cwd: spawnCwd,
 		taskId: params.taskId,
 		priority: params.priority,
+		allowDuplicateOwner: params.allowDuplicateOwner,
 	});
 	const tools = normalizeBuiltinTools(params.tools ?? profile.tools);
 	const result = spawnSubagent({
@@ -2604,15 +3504,9 @@ function spawnChildFromParams(pi: ExtensionAPI, ctx: ExtensionContext, params: {
 		parentAgentId,
 		spawnedByAgentId: actor.kind === "agent" ? actor.agentId : null,
 		createdByKind: actor.kind === "agent" ? "agent" : "root",
+		allowDuplicateOwner: params.allowDuplicateOwner,
 		spawnSessionId: ctx.sessionManager.getSessionId(),
 		spawnSessionFile: ctx.sessionManager.getSessionFile(),
-	});
-	linkTaskAgent(getTmuxAgentsDb(), {
-		taskId: task.id,
-		agentId: result.agentId,
-		role: profile.name,
-		isActive: true,
-		summary: params.title,
 	});
 	pi.appendEntry(SESSION_CHILD_LINK_ENTRY_TYPE, result.sessionLinkData);
 	updateFleetUi(ctx);
@@ -2809,9 +3703,17 @@ function boardLaneForTask(task: TaskRecord): BoardLaneId {
 	return task.status;
 }
 
-function buildBoardScopeData(tasks: TaskRecord[], agents: AgentSummary[], attentionItems: AttentionItemRecord[]): AgentsBoardData["scopes"]["all"] {
+function buildBoardScopeData(
+	tasks: TaskRecord[],
+	agents: AgentSummary[],
+	attentionItems: AttentionItemRecord[],
+	v2AttentionItems: AgentAttentionV2Record[] = [],
+): AgentsBoardData["scopes"]["all"] {
+	const db = getTmuxAgentsDb();
 	const taskIds = tasks.map((task) => task.id);
-	const links = listTaskAgentLinks(getTmuxAgentsDb(), { taskIds, limit: 500 });
+	const taskIdSet = new Set(taskIds);
+	const links = listTaskAgentLinks(db, { taskIds, limit: 500 });
+	const linkRoleByTaskAgent = new Map(links.map((link) => [`${link.taskId}:${link.agentId}`, link.role] as const));
 	const agentsById = new Map(agents.map((agent) => [agent.id, agent]));
 	const agentsByTaskId = new Map<string, AgentSummary[]>();
 	for (const link of links) {
@@ -2821,11 +3723,11 @@ function buildBoardScopeData(tasks: TaskRecord[], agents: AgentSummary[], attent
 		existing.push(agent);
 		agentsByTaskId.set(link.taskId, existing);
 	}
+	const interactionsByTaskId = buildTaskInteractionsByTask(attentionItems, v2AttentionItems, agentsById, taskIdSet);
+	const healthByTaskId = listTaskHealth(db, tasks);
 	const openAttentionCounts = new Map<string, number>();
-	for (const item of attentionItems) {
-		const agent = agentsById.get(item.agentId);
-		if (!agent?.taskId) continue;
-		openAttentionCounts.set(agent.taskId, (openAttentionCounts.get(agent.taskId) ?? 0) + 1);
+	for (const [taskId, interactions] of interactionsByTaskId.entries()) {
+		openAttentionCounts.set(taskId, interactions.length);
 	}
 	const lanes: Record<BoardLaneId, BoardTicket[]> = {
 		todo: [],
@@ -2838,9 +3740,13 @@ function buildBoardScopeData(tasks: TaskRecord[], agents: AgentSummary[], attent
 	for (const task of tasks) {
 		tasksById.set(task.id, task);
 		const linkedAgents = agentsByTaskId.get(task.id) ?? [];
-		const activeAgentCount = linkedAgents.filter((agent) => ["launching", "running", "idle", "waiting", "blocked"].includes(agent.state)).length;
+		const activeLinkedAgents = linkedAgents.filter((agent) => ["launching", "running", "idle", "waiting", "blocked"].includes(agent.state));
+		const activeExclusiveOwners = activeLinkedAgents.filter((agent) => taskLeaseKindForProfile(linkRoleByTaskAgent.get(`${task.id}:${agent.id}`) ?? agent.profile) === "exclusive");
+		const activeReviewers = activeLinkedAgents.filter((agent) => taskLeaseKindForProfile(linkRoleByTaskAgent.get(`${task.id}:${agent.id}`) ?? agent.profile) === "review");
+		const activeAgentCount = activeLinkedAgents.length;
 		const linkedProfiles = Array.from(new Set(linkedAgents.map((agent) => agent.profile))).sort();
 		const laneId = boardLaneForTask(task);
+		const openAttentionCount = openAttentionCounts.get(task.id) ?? 0;
 		const ticket: BoardTicket = {
 			taskId: task.id,
 			laneId,
@@ -2851,8 +3757,12 @@ function buildBoardScopeData(tasks: TaskRecord[], agents: AgentSummary[], attent
 			blockedReason: task.blockedReason,
 			updatedAt: task.updatedAt,
 			activeAgentCount,
+			exclusiveOwnerCount: activeExclusiveOwners.length,
+			reviewerCount: activeReviewers.length,
+			ownerAgentIds: activeExclusiveOwners.map((agent) => agent.id),
 			linkedProfiles,
-			openAttentionCount: openAttentionCounts.get(task.id) ?? 0,
+			openAttentionCount,
+			health: healthByTaskId.get(task.id) ?? deriveTaskHealth({ task, activeAgentCount, linkedAgentCount: linkedAgents.length, openAttentionCount }),
 			summary: task.blockedReason ?? task.reviewSummary ?? task.summary ?? task.finalSummary ?? task.description ?? "-",
 		};
 		lanes[laneId].push(ticket);
@@ -2866,7 +3776,7 @@ function buildBoardScopeData(tasks: TaskRecord[], agents: AgentSummary[], attent
 				right.updatedAt - left.updatedAt,
 		);
 	}
-	return { lanes, tasksById, agentsByTaskId };
+	return { lanes, tasksById, agentsByTaskId, interactionsByTaskId };
 }
 
 function buildBoardData(ctx: ExtensionContext): AgentsBoardData {
@@ -2903,12 +3813,24 @@ function buildBoardData(ctx: ExtensionContext): AgentsBoardData {
 		}),
 		descendants: listAttentionItems(db, { agentIds: getLinkedChildIds(ctx), states: OPEN_ATTENTION_STATES, limit: 500 }),
 	};
+	const scopeAttentionV2 = {
+		all: listAgentAttentionItemsV2(db, { states: OPEN_AGENT_ATTENTION_V2_STATES, limit: 500 }),
+		current_project: listAgentAttentionItemsV2(db, { projectKey: getProjectKey(ctx.cwd), states: OPEN_AGENT_ATTENTION_V2_STATES, limit: 500 }),
+		current_session: mergeAgentAttentionV2Items(
+			listAgentAttentionItemsV2(db, { taskIds: scopeTasks.current_session.map((task) => task.id), states: OPEN_AGENT_ATTENTION_V2_STATES, limit: 500 }),
+			listAgentAttentionItemsV2(db, { subjectAgentIds: scopeAgents.current_session.map((agent) => agent.id), states: OPEN_AGENT_ATTENTION_V2_STATES, limit: 500 }),
+		),
+		descendants: mergeAgentAttentionV2Items(
+			listAgentAttentionItemsV2(db, { taskIds: scopeTasks.descendants.map((task) => task.id), states: OPEN_AGENT_ATTENTION_V2_STATES, limit: 500 }),
+			listAgentAttentionItemsV2(db, { subjectAgentIds: scopeAgents.descendants.map((agent) => agent.id), states: OPEN_AGENT_ATTENTION_V2_STATES, limit: 500 }),
+		),
+	};
 	return {
 		scopes: {
-			all: buildBoardScopeData(scopeTasks.all, scopeAgents.all, scopeAttention.all),
-			current_project: buildBoardScopeData(scopeTasks.current_project, scopeAgents.current_project, scopeAttention.current_project),
-			current_session: buildBoardScopeData(scopeTasks.current_session, scopeAgents.current_session, scopeAttention.current_session),
-			descendants: buildBoardScopeData(scopeTasks.descendants, scopeAgents.descendants, scopeAttention.descendants),
+			all: buildBoardScopeData(scopeTasks.all, scopeAgents.all, scopeAttention.all, scopeAttentionV2.all),
+			current_project: buildBoardScopeData(scopeTasks.current_project, scopeAgents.current_project, scopeAttention.current_project, scopeAttentionV2.current_project),
+			current_session: buildBoardScopeData(scopeTasks.current_session, scopeAgents.current_session, scopeAttention.current_session, scopeAttentionV2.current_session),
+			descendants: buildBoardScopeData(scopeTasks.descendants, scopeAgents.descendants, scopeAttention.descendants, scopeAttentionV2.descendants),
 		},
 	};
 }
@@ -2923,12 +3845,13 @@ function formatStandupAge(timestamp: number): string {
 }
 
 function standupNextAction(ticket: BoardTicket, linkedAgents: AgentSummary[]): string {
-	if (ticket.openAttentionCount > 0) return ticket.waitingOn === "user" ? "answer user question" : "triage child attention";
+	if (ticket.openAttentionCount > 0) return ticket.waitingOn === "user" ? "answer user interaction" : "triage task interaction";
+	if (ticket.health.nextAction) return ticket.health.nextAction;
 	if (ticket.waitingOn) return `waiting on ${ticket.waitingOn}`;
 	if (ticket.laneId === "blocked") return "add waitingOn or unblock";
 	if (ticket.laneId === "in_review") return "run/synthesize review gate";
-	if (ticket.laneId === "in_progress") return linkedAgents.length > 0 ? "let owner run; inspect only if stale" : "assign owner or move todo";
-	if (ticket.laneId === "todo") return linkedAgents.length > 0 ? "inspect existing agent link" : "spawn next specialist";
+	if (ticket.laneId === "in_progress") return ticket.exclusiveOwnerCount > 0 ? "let owner run; inspect only if stale" : "assign owner or move todo";
+	if (ticket.laneId === "todo") return ticket.exclusiveOwnerCount > 0 ? "inspect existing owner before spawning" : "spawn next specialist";
 	if (ticket.laneId === "done") return ticket.activeAgentCount > 0 ? "cleanup active links/agents" : "archive context if useful";
 	return "inspect task";
 }
@@ -2936,13 +3859,185 @@ function standupNextAction(ticket: BoardTicket, linkedAgents: AgentSummary[]): s
 function formatStandupTicketLine(ticket: BoardTicket, linkedAgents: AgentSummary[] = []): string {
 	const flags = [
 		`status=${ticket.laneId}`,
+		`health=${ticket.health.state}`,
+		`lastUseful=${formatStandupAge(ticket.health.lastUsefulUpdateAt ?? 0)}`,
 		`waiting=${ticket.waitingOn ?? "-"}`,
+		`owners=${ticket.exclusiveOwnerCount}`,
+		`reviewers=${ticket.reviewerCount}`,
 		`agents=${ticket.activeAgentCount}`,
-		`attention=${ticket.openAttentionCount}`,
+		`interactions=${ticket.openAttentionCount}`,
 		`p${ticket.priority}`,
 		`updated=${formatStandupAge(ticket.updatedAt)}`,
 	].join(" · ");
-	return `- ${ticket.taskId} · ${truncateText(ticket.title, 64)} · ${flags}\n  next: ${standupNextAction(ticket, linkedAgents)}${ticket.blockedReason ? `\n  blocked: ${truncateText(ticket.blockedReason, 120)}` : ""}`;
+	return `- ${ticket.taskId} · ${truncateText(ticket.title, 64)} · ${flags}\n  healthReason: ${truncateText(ticket.health.reason, 140)}\n  next: ${standupNextAction(ticket, linkedAgents)}${ticket.blockedReason ? `\n  blocked: ${truncateText(ticket.blockedReason, 120)}` : ""}`;
+}
+
+interface StandupDependencyChain {
+	source: TaskReadinessRecord;
+	path: TaskLinkWithTasksRecord[];
+	terminalTask: TaskRecord | null;
+	terminalStatus: TaskState;
+	terminalTitle: string;
+	blockedTaskCount: number;
+}
+
+function standupTaskStatusRank(status: TaskState): number {
+	switch (status) {
+		case "blocked":
+			return 0;
+		case "in_review":
+			return 1;
+		case "in_progress":
+			return 2;
+		case "todo":
+			return 3;
+		case "done":
+			return 4;
+		default:
+			return 5;
+	}
+}
+
+function compareStandupTickets(left: BoardTicket, right: BoardTicket): number {
+	return (
+		right.openAttentionCount - left.openAttentionCount ||
+		(left.waitingOn === "user" ? -1 : 0) - (right.waitingOn === "user" ? -1 : 0) ||
+		left.priority - right.priority ||
+		right.updatedAt - left.updatedAt ||
+		left.taskId.localeCompare(right.taskId)
+	);
+}
+
+function compareDependencyLinks(left: TaskLinkWithTasksRecord, right: TaskLinkWithTasksRecord): number {
+	return standupTaskStatusRank(left.targetStatus) - standupTaskStatusRank(right.targetStatus) || left.targetTaskId.localeCompare(right.targetTaskId);
+}
+
+function isStandupHealthConcern(ticket: BoardTicket): boolean {
+	return ticket.laneId !== "done" && ticket.health.signals.some((signal) => signal !== "healthy" && signal !== "owner_active");
+}
+
+function formatStandupHealthLine(ticket: BoardTicket, linkedAgents: AgentSummary[] = []): string {
+	const flags = [
+		`health=${ticket.health.state}`,
+		`lastUseful=${formatStandupAge(ticket.health.lastUsefulUpdateAt ?? 0)}`,
+		`owners=${ticket.exclusiveOwnerCount}`,
+		`agents=${ticket.activeAgentCount}`,
+		`interactions=${ticket.openAttentionCount}`,
+		`updated=${formatStandupAge(ticket.updatedAt)}`,
+	].join(" · ");
+	return `- ${ticket.taskId} · ${truncateText(ticket.title, 64)} · ${flags}\n  reason: ${truncateText(ticket.health.reason, 120)}\n  next: ${truncateText(standupNextAction(ticket, linkedAgents), 120)}`;
+}
+
+function appendStandupHealthSection(lines: string[], tickets: BoardTicket[], scopeData: AgentsBoardData["scopes"]["all"], limit = 6): void {
+	lines.push("", "## Health / liveness");
+	if (tickets.length === 0) {
+		lines.push("- no tasks in scope");
+		return;
+	}
+	const ownerActive = tickets.filter((ticket) => ticket.health.signals.includes("owner_active"));
+	const stale = tickets.filter((ticket) => ticket.health.signals.includes("stale"));
+	const noProgress = tickets.filter((ticket) => ticket.health.signals.includes("empty_or_no_progress"));
+	const approval = tickets.filter((ticket) => ticket.health.signals.includes("approval_required") || ticket.health.signals.includes("needs_review"));
+	const external = tickets.filter((ticket) => ticket.health.signals.includes("blocked_external"));
+	lines.push(`- summary: owner-active ${ownerActive.length} · stale ${stale.length} · no-progress ${noProgress.length} · approval/review ${approval.length} · external/user-wait ${external.length}`);
+	const concerns = tickets.filter(isStandupHealthConcern).sort(compareStandupTickets);
+	if (concerns.length === 0) {
+		lines.push("- no stale/no-progress/approval/external liveness concerns detected");
+		return;
+	}
+	for (const ticket of concerns.slice(0, limit)) lines.push(formatStandupHealthLine(ticket, scopeData.agentsByTaskId.get(ticket.taskId) ?? []));
+	if (concerns.length > limit) lines.push(`- +${concerns.length - limit} more`);
+}
+
+function buildDependencyPath(sourceTaskId: string, firstLink: TaskLinkWithTasksRecord, linksBySource: Map<string, TaskLinkWithTasksRecord[]>): TaskLinkWithTasksRecord[] {
+	const path = [firstLink];
+	const seen = new Set([sourceTaskId, firstLink.targetTaskId]);
+	let currentTaskId = firstLink.targetTaskId;
+	while (path.length < 8) {
+		const next = (linksBySource.get(currentTaskId) ?? [])
+			.filter((link) => link.unresolved && !seen.has(link.targetTaskId))
+			.sort(compareDependencyLinks)[0];
+		if (!next) break;
+		path.push(next);
+		currentTaskId = next.targetTaskId;
+		seen.add(currentTaskId);
+	}
+	return path;
+}
+
+function buildStandupDependencyChains(readiness: TaskReadinessRecord[]): StandupDependencyChain[] {
+	const readinessByTaskId = new Map(readiness.map((item) => [item.task.id, item] as const));
+	const linksBySource = new Map<string, TaskLinkWithTasksRecord[]>();
+	for (const item of readiness) {
+		for (const link of item.unresolvedDependencies) {
+			const links = linksBySource.get(link.sourceTaskId) ?? [];
+			links.push(link);
+			linksBySource.set(link.sourceTaskId, links);
+		}
+	}
+	for (const [taskId, links] of linksBySource.entries()) linksBySource.set(taskId, links.sort(compareDependencyLinks));
+	const chains: StandupDependencyChain[] = [];
+	for (const item of readiness) {
+		for (const link of item.unresolvedDependencies.sort(compareDependencyLinks)) {
+			const path = buildDependencyPath(item.task.id, link, linksBySource);
+			const terminalLink = path[path.length - 1] ?? link;
+			const terminalTask = readinessByTaskId.get(terminalLink.targetTaskId)?.task ?? null;
+			chains.push({
+				source: item,
+				path,
+				terminalTask,
+				terminalStatus: terminalTask?.status ?? terminalLink.targetStatus,
+				terminalTitle: terminalTask?.title ?? terminalLink.targetTitle,
+				blockedTaskCount: 1,
+			});
+		}
+	}
+	const terminalSources = new Map<string, Set<string>>();
+	for (const chain of chains) {
+		const terminalTaskId = chain.path[chain.path.length - 1]?.targetTaskId;
+		if (!terminalTaskId) continue;
+		const sources = terminalSources.get(terminalTaskId) ?? new Set<string>();
+		sources.add(chain.source.task.id);
+		terminalSources.set(terminalTaskId, sources);
+	}
+	for (const chain of chains) {
+		const terminalTaskId = chain.path[chain.path.length - 1]?.targetTaskId;
+		chain.blockedTaskCount = terminalTaskId ? terminalSources.get(terminalTaskId)?.size ?? 1 : 1;
+	}
+	return chains.sort(
+		(left, right) =>
+			right.blockedTaskCount - left.blockedTaskCount ||
+			left.source.task.priority - right.source.task.priority ||
+			standupTaskStatusRank(left.terminalStatus) - standupTaskStatusRank(right.terminalStatus) ||
+			right.source.task.updatedAt - left.source.task.updatedAt ||
+			left.source.task.id.localeCompare(right.source.task.id),
+	);
+}
+
+function formatStandupDependencyChain(chain: StandupDependencyChain, scopeData: AgentsBoardData["scopes"]["all"], ticketsById: Map<string, BoardTicket>): string {
+	const source = chain.source.task;
+	const pathIds = [source.id, ...chain.path.map((link) => link.targetTaskId)];
+	const terminalTaskId = pathIds[pathIds.length - 1] ?? source.id;
+	const terminalTicket = ticketsById.get(terminalTaskId);
+	const terminalNext = terminalTicket
+		? standupNextAction(terminalTicket, scopeData.agentsByTaskId.get(terminalTicket.taskId) ?? [])
+		: chain.terminalStatus === "done"
+			? "refresh dependency state"
+			: `finish or replan dependency in ${chain.terminalStatus}`;
+	const rootHealth = terminalTicket ? ` · rootHealth=${terminalTicket.health.state}` : "";
+	const parent = source.parentTaskId ? ` · parent=${source.parentTaskId}` : "";
+	const multipleDeps = chain.source.unresolvedDependencies.length > 1 ? ` · directDeps=${chain.source.unresolvedDependencies.length}` : "";
+	return `- ${pathIds.join(" → ")} · blocks ${chain.blockedTaskCount} task${chain.blockedTaskCount === 1 ? "" : "s"} · depth=${chain.path.length}${parent}${multipleDeps}\n  source: ${truncateText(source.title, 72)} · status=${source.status} · waiting=${source.waitingOn ?? "-"}\n  root blocker: ${terminalTaskId} · ${truncateText(chain.terminalTitle, 72)} · status=${chain.terminalStatus}${rootHealth} · next: ${truncateText(terminalNext, 120)}`;
+}
+
+function appendStandupDependencyChainsSection(lines: string[], chains: StandupDependencyChain[], scopeData: AgentsBoardData["scopes"]["all"], ticketsById: Map<string, BoardTicket>, limit = 6): void {
+	lines.push("", "## Dependency / blocker chains");
+	if (chains.length === 0) {
+		lines.push("- none");
+		return;
+	}
+	for (const chain of chains.slice(0, limit)) lines.push(formatStandupDependencyChain(chain, scopeData, ticketsById));
+	if (chains.length > limit) lines.push(`- +${chains.length - limit} more`);
 }
 
 function appendStandupSection(lines: string[], title: string, tickets: BoardTicket[], scopeData: AgentsBoardData["scopes"]["all"], limit = 6): void {
@@ -2955,6 +4050,29 @@ function appendStandupSection(lines: string[], title: string, tickets: BoardTick
 		lines.push(formatStandupTicketLine(ticket, scopeData.agentsByTaskId.get(ticket.taskId) ?? []));
 	}
 	if (tickets.length > limit) lines.push(`- +${tickets.length - limit} more`);
+}
+
+function formatStandupInteractionCard(interaction: TaskInteractionRecord, ticket: BoardTicket | undefined): string {
+	const taskTitle = ticket ? truncateText(ticket.title, 56) : interaction.taskId;
+	return [
+		`- ${taskInteractionIcon(interaction.kind)} ${taskInteractionLabel(interaction.kind)} · ${interaction.taskId} · ${taskTitle}`,
+		`  from: ${interaction.actorLabel} · owner: ${ownerLabelForInteraction(interaction)} · state: ${interaction.state}`,
+		`  asks: ${truncateText(interaction.answerNeeded ?? interaction.summary, 140)}`,
+		`  next: ${interaction.nextAction}`,
+		...interaction.actions.slice(0, 2).map((action) => `  action: ${action}`),
+	].join("\n");
+}
+
+function appendStandupInteractionsSection(lines: string[], scopeData: AgentsBoardData["scopes"]["all"], tickets: BoardTicket[], limit = 8): void {
+	lines.push("", "## Open task interactions");
+	const ticketsById = new Map(tickets.map((ticket) => [ticket.taskId, ticket]));
+	const interactions = [...scopeData.interactionsByTaskId.values()].flat().sort((left, right) => left.priority - right.priority || right.updatedAt - left.updatedAt);
+	if (interactions.length === 0) {
+		lines.push("- none");
+		return;
+	}
+	for (const interaction of interactions.slice(0, limit)) lines.push(formatStandupInteractionCard(interaction, ticketsById.get(interaction.taskId)));
+	if (interactions.length > limit) lines.push(`- +${interactions.length - limit} more`);
 }
 
 function formatStandupCleanupLine(candidate: CleanupCandidate): string {
@@ -2983,13 +4101,67 @@ function appendStandupReadinessSection(lines: string[], title: string, items: Ta
 	if (items.length > limit) lines.push(`- +${items.length - limit} more`);
 }
 
+function appendStandupUnblockOrderSection(
+	lines: string[],
+	input: {
+		scopeData: AgentsBoardData["scopes"]["all"];
+		chains: StandupDependencyChain[];
+		blockedUser: BoardTicket[];
+		blockedCoordinator: BoardTicket[];
+		review: BoardTicket[];
+		staleOrNoProgress: BoardTicket[];
+		ready: BoardTicket[];
+		ticketsById: Map<string, BoardTicket>;
+	},
+	limit = 7,
+): void {
+	lines.push("", "## Recommended unblock order");
+	const items: string[] = [];
+	const interactions = [...input.scopeData.interactionsByTaskId.values()].flat().sort((left, right) => left.priority - right.priority || right.updatedAt - left.updatedAt);
+	if (interactions.length > 0) {
+		const first = interactions[0]!;
+		items.push(`triage ${interactions.length} open interaction${interactions.length === 1 ? "" : "s"}; start with ${first.taskId} (${taskInteractionLabel(first.kind)})`);
+	}
+	const seenTerminalTaskIds = new Set<string>();
+	for (const chain of input.chains) {
+		const terminalTaskId = chain.path[chain.path.length - 1]?.targetTaskId;
+		if (!terminalTaskId || seenTerminalTaskIds.has(terminalTaskId)) continue;
+		seenTerminalTaskIds.add(terminalTaskId);
+		const terminalTicket = input.ticketsById.get(terminalTaskId);
+		const terminalNext = terminalTicket
+			? standupNextAction(terminalTicket, input.scopeData.agentsByTaskId.get(terminalTicket.taskId) ?? [])
+			: chain.terminalStatus === "done"
+				? "refresh dependency state"
+				: `finish or replan dependency in ${chain.terminalStatus}`;
+		items.push(`resolve blocker ${terminalTaskId} to unblock ${chain.blockedTaskCount} task${chain.blockedTaskCount === 1 ? "" : "s"}; next: ${truncateText(terminalNext, 110)}`);
+	}
+	for (const ticket of input.blockedUser.slice().sort(compareStandupTickets)) {
+		items.push(`answer user-wait ${ticket.taskId}; next: ${truncateText(standupNextAction(ticket, input.scopeData.agentsByTaskId.get(ticket.taskId) ?? []), 110)}`);
+	}
+	for (const ticket of input.blockedCoordinator.slice().sort(compareStandupTickets)) {
+		items.push(`clear blocker ${ticket.taskId} (${ticket.waitingOn ?? "coordinator"}); next: ${truncateText(standupNextAction(ticket, input.scopeData.agentsByTaskId.get(ticket.taskId) ?? []), 110)}`);
+	}
+	for (const ticket of input.review.slice().sort(compareStandupTickets)) {
+		items.push(`synthesize review ${ticket.taskId}; next: ${truncateText(standupNextAction(ticket, input.scopeData.agentsByTaskId.get(ticket.taskId) ?? []), 110)}`);
+	}
+	for (const ticket of input.staleOrNoProgress.slice().sort(compareStandupTickets)) {
+		items.push(`refresh liveness ${ticket.taskId}; next: ${truncateText(standupNextAction(ticket, input.scopeData.agentsByTaskId.get(ticket.taskId) ?? []), 110)}`);
+	}
+	if (input.ready.length > 0) items.push(`then pull Ready to start (${input.ready.length}); first ${input.ready[0]!.taskId} if blockers/review/WIP are under control`);
+	if (items.length === 0) {
+		lines.push("- no unblock work detected; ready-to-start work can be considered if WIP is under control");
+		return;
+	}
+	for (const [index, item] of items.slice(0, limit).entries()) lines.push(`${index + 1}. ${item}`);
+	if (items.length > limit) lines.push(`- +${items.length - limit} more`);
+}
+
 function buildStandupText(ctx: ExtensionContext, scope: "all" | "current_project" | "current_session" | "descendants" = "current_project"): string {
 	const board = buildBoardData(ctx);
 	const scopeData = board.scopes[scope];
 	const lanes = scopeData.lanes;
 	const allTickets = Object.values(lanes).flat();
-	const blockedUser = lanes.blocked.filter((ticket) => ticket.waitingOn === "user");
-	const blockedCoordinator = lanes.blocked.filter((ticket) => ticket.waitingOn !== "user");
+	const ticketsById = new Map(allTickets.map((ticket) => [ticket.taskId, ticket] as const));
 	const review = lanes.in_review;
 	const activeWip = lanes.in_progress;
 	const ready = lanes.todo;
@@ -2997,8 +4169,16 @@ function buildStandupText(ctx: ExtensionContext, scope: "all" | "current_project
 	const readiness = listTaskReadiness(getTmuxAgentsDb(), { ids: allTickets.map((ticket) => ticket.taskId), includeDone: false, limit: Math.max(allTickets.length, 1) });
 	const dependencyBlocked = readiness.filter((item) => item.unresolvedDependencies.length > 0);
 	const dependencyReady = readiness.filter((item) => item.ready && item.resolvedDependencies.length > 0);
-	const staleCutoffMs = 24 * 60 * 60 * 1000;
-	const stale = allTickets.filter((ticket) => ticket.laneId !== "done" && Date.now() - ticket.updatedAt > staleCutoffMs);
+	const dependencyChains = buildStandupDependencyChains(dependencyBlocked);
+	const dependencyBlockedTaskIds = new Set(dependencyBlocked.map((item) => item.task.id));
+	const blockedUser = lanes.blocked.filter((ticket) => ticket.waitingOn === "user");
+	const blockedCoordinator = lanes.blocked.filter((ticket) => ticket.waitingOn !== "user" && !dependencyBlockedTaskIds.has(ticket.taskId));
+	const stale = allTickets.filter((ticket) => ticket.health.signals.includes("stale"));
+	const noProgress = allTickets.filter((ticket) => ticket.health.signals.includes("empty_or_no_progress"));
+	const approvalRequired = allTickets.filter((ticket) => ticket.health.signals.includes("approval_required"));
+	const externalBlocked = allTickets.filter((ticket) => ticket.health.signals.includes("blocked_external"));
+	const ownerActive = allTickets.filter((ticket) => ticket.health.signals.includes("owner_active"));
+	const staleOrNoProgress = allTickets.filter((ticket) => ticket.health.signals.includes("stale") || ticket.health.signals.includes("empty_or_no_progress"));
 	const openAttention = allTickets.reduce((count, ticket) => count + ticket.openAttentionCount, 0);
 	const activeAgents = allTickets.reduce((count, ticket) => count + ticket.activeAgentCount, 0);
 	const counts = [`todo ${ready.length}`, `blocked ${lanes.blocked.length}`, `in-progress ${activeWip.length}`, `review ${review.length}`, `done ${lanes.done.length}`].join(" · ");
@@ -3006,18 +4186,21 @@ function buildStandupText(ctx: ExtensionContext, scope: "all" | "current_project
 		`# Standup · ${scope}`,
 		`Generated: ${new Date().toISOString()}`,
 		`Board: ${counts}`,
-		`Signals: ${blockedUser.length} user-wait · ${blockedCoordinator.length} coordinator/blocker · ${dependencyBlocked.length} dependency-blocked · ${dependencyReady.length} dependency-ready · ${review.length} review · ${openAttention} attention · ${activeAgents} active agents · ${stale.length} stale>24h · ${cleanupCandidates.length} cleanup`,
+		`Signals: ${blockedUser.length} user-wait · ${blockedCoordinator.length} free-text blocker · ${externalBlocked.length} external-blocked · ${dependencyChains.length} dependency-chain · ${dependencyReady.length} dependency-ready · ${review.length} review · ${approvalRequired.length} approval-required · ${openAttention} interactions · ${activeAgents} active agents · ${ownerActive.length} owner-active · ${stale.length} stale · ${noProgress.length} no-progress · ${cleanupCandidates.length} cleanup`,
 	];
+	appendStandupHealthSection(lines, allTickets, scopeData, 6);
+	appendStandupInteractionsSection(lines, scopeData, allTickets, 8);
 	appendStandupSection(lines, "Needs user", blockedUser, scopeData, 5);
-	appendStandupReadinessSection(lines, "Dependency blocked", dependencyBlocked, 6);
+	appendStandupDependencyChainsSection(lines, dependencyChains, scopeData, ticketsById, 6);
 	appendStandupReadinessSection(lines, "Newly dependency-ready", dependencyReady, 6);
-	appendStandupSection(lines, "Needs coordinator / unblock", blockedCoordinator, scopeData, 6);
+	appendStandupSection(lines, "Needs coordinator / free-text blockers", blockedCoordinator, scopeData, 6);
 	appendStandupSection(lines, "Ready for review / acceptance", review, scopeData, 6);
 	appendStandupSection(lines, "Active WIP", activeWip, scopeData, 8);
-	appendStandupSection(lines, "Stale >24h", stale, scopeData, 6);
+	appendStandupSection(lines, "Stale / no progress", staleOrNoProgress, scopeData, 6);
 	appendStandupCleanupSection(lines, cleanupCandidates, 6);
+	appendStandupUnblockOrderSection(lines, { scopeData, chains: dependencyChains, blockedUser, blockedCoordinator, review, staleOrNoProgress, ready, ticketsById }, 7);
 	appendStandupSection(lines, "Ready to start", ready, scopeData, 6);
-	lines.push("", "## Recommended operating order", "1. Answer `Needs user` items or keep them blocked with a clear waiting target.", "2. Resolve dependency-blocked chains before spawning dependents.", "3. Dispatch newly dependency-ready tickets with `task_dispatch_ready`.", "4. Unblock coordinator-owned tasks before spawning more WIP.", "5. Synthesize review items and move them to `done` or back to `in_progress`.", "6. Let active owners continue unless their published status is stale.", "7. Spawn from `Ready to start` only after blockers/review/WIP are under control.", "8. Cleanup terminal agents after completion has been synthesized.");
+	lines.push("", "## Operating notes", "- Prefer the `Recommended unblock order` before spawning from `Ready to start`; use `task_dispatch_ready` for dependency-ready tickets and cleanup terminal agents after accepted completion.");
 	return lines.join("\n");
 }
 
@@ -3094,6 +4277,27 @@ function moveTaskById(taskId: string, params: { status: TaskState; reason?: stri
 		},
 		createdAt: now,
 	});
+	const lease = getTaskLease(db, taskId);
+	if (params.status === "in_progress" && lease.exclusiveOwners.length > 0) {
+		createTaskEvent(db, {
+			id: randomUUID(),
+			taskId,
+			eventType: "task_lease_owner_active",
+			summary: `Task in_progress with active owner ${lease.exclusiveOwners.map((owner) => owner.agentId).join(", ")}`,
+			payload: { ownerAgentIds: lease.exclusiveOwners.map((owner) => owner.agentId) },
+			createdAt: now,
+		});
+	}
+	if (params.status === "done" && lease.activeOwners.length > 0) {
+		createTaskEvent(db, {
+			id: randomUUID(),
+			taskId,
+			eventType: "task_lease_cleanup_recommended",
+			summary: `Task done while ${lease.activeOwners.length} active lease(s) remain; cleanup/reconcile should release them after synthesis.`,
+			payload: { agentIds: lease.activeOwners.map((owner) => owner.agentId) },
+			createdAt: now,
+		});
+	}
 	if (params.status === "done") {
 		resolveDependenciesForCompletedTask(db, taskId, now);
 	}
@@ -3147,6 +4351,49 @@ async function runTaskMoveFlow(ctx: ExtensionContext, taskId: string): Promise<v
 	ctx.ui.notify(`Moved ${moved.id} to ${moved.status}.`, "info");
 }
 
+async function runTaskSubtreeControlFlow(ctx: ExtensionContext, taskId: string): Promise<void> {
+	if (!ctx.hasUI) return;
+	const selection = await ctx.ui.select("Subtree control:", ["Preview only", "Pause subtree", "Resume paused subtree", "Cancel subtree", "Back"]);
+	if (!selection || selection === "Back") return;
+	const actionMap: Record<string, TaskSubtreeControlAction> = {
+		"Preview only": "preview",
+		"Pause subtree": "pause",
+		"Resume paused subtree": "resume",
+		"Cancel subtree": "cancel",
+	};
+	const action = actionMap[selection] ?? "preview";
+	const reason = action === "preview" ? undefined : (await ctx.ui.input(`${selection} reason:`, ""))?.trim() || undefined;
+	const preview = buildTaskSubtreeControlPreview(ctx, taskId, action, { reason });
+	await ctx.ui.editor(`Subtree ${action} preview`, formatTaskSubtreeControlPreview(preview));
+	if (action === "preview") return;
+	const ok = await ctx.ui.confirm(`Confirm subtree ${action}`, formatTaskSubtreeControlConfirmation(preview));
+	if (!ok) return;
+	const result = await applyTaskSubtreeControl(ctx, taskId, action, { reason, previewToken: preview.previewToken });
+	ctx.ui.notify(`Applied subtree ${action}: ${result.updatedTasks.length} task(s), ${result.stopResults.length} graceful stop request(s).`, result.stopErrors.length > 0 ? "warning" : "info");
+	await ctx.ui.editor(`Subtree ${action} result`, formatTaskSubtreeControlApplyResult(result));
+}
+
+async function confirmTaskLeaseOverride(ctx: ExtensionContext, taskId: string | undefined, profileName: string): Promise<boolean> {
+	if (!taskId) return false;
+	const conflict = getTaskLeaseConflict(getTmuxAgentsDb(), { taskId, profile: profileName });
+	if (!conflict) return false;
+	if (!ctx.hasUI) throw new Error(formatTaskLeaseConflict(conflict));
+	const ok = await ctx.ui.confirm(
+		"Active task owner",
+		`${formatTaskLeaseConflict(conflict)}\n\nSpawn/link another exclusive owner anyway?`,
+	);
+	if (ok) {
+		createTaskEvent(getTmuxAgentsDb(), {
+			id: randomUUID(),
+			taskId,
+			eventType: "task_lease_override_confirmed",
+			summary: `Coordinator allowed duplicate exclusive owner for ${profileName}`,
+			payload: { profile: profileName, conflictingOwners: conflict.conflictingOwners.map((owner) => owner.agentId) },
+		});
+	}
+	return ok;
+}
+
 async function runTaskSpawnWizard(pi: ExtensionAPI, ctx: ExtensionContext, taskId?: string): Promise<void> {
 	if (!ctx.hasUI) return;
 	const gateItems = listAttentionItems(getTmuxAgentsDb(), resolveAttentionFilters(ctx, "current_project", { limit: 5 }));
@@ -3166,12 +4413,14 @@ async function runTaskSpawnWizard(pi: ExtensionAPI, ctx: ExtensionContext, taskI
 	if (!cwd?.trim()) return;
 	const selectedTaskId = taskId ?? ((await ctx.ui.input("Existing task id (optional, blank = auto-create):", ""))?.trim() || undefined);
 	try {
+		const allowDuplicateOwner = await confirmTaskLeaseOverride(ctx, selectedTaskId, profile.name);
 		const result = spawnChildFromParams(pi, ctx, {
 			title: title.trim(),
 			task: task.trim(),
 			profile: profile.name,
 			taskId: selectedTaskId,
 			cwd: cwd.trim(),
+			allowDuplicateOwner,
 		});
 		ctx.ui.notify(`Spawned ${result.agentId} in tmux ${result.tmuxSessionName}.`, "info");
 		await ctx.ui.editor(`Spawned ${result.agentId}`, formatSpawnSuccess(result));
@@ -3216,8 +4465,9 @@ async function runAgentsDashboard(pi: ExtensionAPI, ctx: ExtensionContext, initi
 					await runSpawnWizard(pi, ctx);
 					break;
 				case "sync": {
-					const result = await reconcileAgents(ctx, { scope: state.scope, activeOnly: false, limit: 200 });
-					ctx.ui.notify(formatReconcileResult(result), "info");
+					const agentResult = await reconcileAgents(ctx, { scope: state.scope, activeOnly: false, limit: 200 });
+					const taskResult = reconcileTasks(getTmuxAgentsDb(), resolveTaskFilters(ctx, state.scope, { includeDone: true, limit: 200 }));
+					ctx.ui.notify(`${formatReconcileResult(agentResult)}\nTasks: ${taskResult.backfilled} backfilled, ${taskResult.deactivatedLinks} links deactivated.`, "info");
 					break;
 				}
 				default:
@@ -3243,7 +4493,7 @@ async function runAgentsBoard(pi: ExtensionAPI, ctx: ExtensionContext, initialSt
 			switch (action.type) {
 				case "inspect": {
 					const task = getTask(getTmuxAgentsDb(), selectedId!);
-					if (task) await ctx.ui.editor(`Task ${task.id}`, formatTaskDetails(task, getTaskLinkedAgents(task.id), listTaskEvents(getTmuxAgentsDb(), { taskIds: [task.id], limit: 20 })));
+					if (task) await ctx.ui.editor(`Task ${task.id}`, formatTaskDetails(task, getTaskLinkedAgents(task.id), listTaskEvents(getTmuxAgentsDb(), { taskIds: [task.id], limit: 20 }), {}, getTaskInteractions(task.id)));
 					break;
 				}
 				case "focus": {
@@ -3279,13 +4529,16 @@ async function runAgentsBoard(pi: ExtensionAPI, ctx: ExtensionContext, initialSt
 				case "move":
 					await runTaskMoveFlow(ctx, selectedId!);
 					break;
+				case "subtree":
+					await runTaskSubtreeControlFlow(ctx, selectedId!);
+					break;
 				case "create":
 					await runTaskCreateWizard(ctx);
 					break;
 				case "sync": {
-					const taskResult = reconcileTasks(getTmuxAgentsDb(), resolveTaskFilters(ctx, state.scope, { includeDone: true, limit: 200 }));
 					const agentResult = await reconcileAgents(ctx, { scope: state.scope, activeOnly: false, limit: 200 });
-					ctx.ui.notify(`Tasks: ${taskResult.backfilled} backfilled, ${taskResult.deactivatedLinks} links deactivated.\n${formatReconcileResult(agentResult)}`, "info");
+					const taskResult = reconcileTasks(getTmuxAgentsDb(), resolveTaskFilters(ctx, state.scope, { includeDone: true, limit: 200 }));
+					ctx.ui.notify(`${formatReconcileResult(agentResult)}\nTasks: ${taskResult.backfilled} backfilled, ${taskResult.deactivatedLinks} links deactivated.`, "info");
 					break;
 				}
 				default:
@@ -3381,6 +4634,7 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 			"Use subagent_spawn when work should be delegated into an isolated child context.",
 			"Prefer attaching the child to an existing taskId. If taskId is omitted, a new task is auto-created.",
 			"Before spawning more work, inspect unresolved attention with subagent_attention and handle blockers/questions first when appropriate.",
+			"If the task already has an active exclusive owner, use a reviewer profile or set allowDuplicateOwner=true only after explicit confirmation that duplicate implementation is intentional.",
 			"Pick the most appropriate profile and keep the delegated task narrowly scoped.",
 			"Do not pass `find` in tool overrides. Use `grep` and `bash` with `rg --files` instead.",
 		],
@@ -3600,10 +4854,12 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 		parameters: SubagentReconcileParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const result = await reconcileAgents(ctx, params);
+			const taskFilters = resolveTaskFilters(ctx, params.scope ?? "current_project", { includeDone: true, limit: params.limit });
+			const taskResult = reconcileTasks(getTmuxAgentsDb(), { ids: taskFilters.ids, projectKey: taskFilters.projectKey, spawnSessionId: taskFilters.spawnSessionId, spawnSessionFile: taskFilters.spawnSessionFile, limit: params.limit });
 			updateFleetUi(ctx);
 			return {
-				content: [{ type: "text", text: formatReconcileResult(result) }],
-				details: result,
+				content: [{ type: "text", text: `${formatReconcileResult(result)}\nTasks: ${taskResult.backfilled} backfilled · ${taskResult.deactivatedLinks} stale links released.` }],
+				details: { ...result, taskResult },
 			};
 		},
 	});
@@ -3850,7 +5106,7 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 			const task = createTaskFromParams(ctx, params);
 			updateFleetUi(ctx);
 			return {
-				content: [{ type: "text", text: formatTaskDetails(task) }],
+				content: [{ type: "text", text: formatTaskDetails(task, [], [], {}, getTaskInteractions(task.id)) }],
 				details: { task },
 			};
 		},
@@ -3898,8 +5154,9 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 				agentsByTask.set(link.taskId, existing);
 			}
 			const readinessByTask = new Map(listTaskReadiness(getTmuxAgentsDb(), { ids: tasks.map((task) => task.id), includeDone: true, limit: Math.max(tasks.length, 1) }).map((item) => [item.task.id, item]));
+			const healthByTask = listTaskHealth(getTmuxAgentsDb(), tasks);
 			const header = `scope=${summarizeTaskFilters(scope, filters)} · ${tasks.length} task${tasks.length === 1 ? "" : "s"}`;
-			const body = tasks.length === 0 ? "No tasks matched." : tasks.map((task) => formatTaskLine(task, agentsByTask.get(task.id) ?? [], readinessByTask.get(task.id))).join("\n");
+			const body = tasks.length === 0 ? "No tasks matched." : tasks.map((task) => formatTaskLine(task, agentsByTask.get(task.id) ?? [], readinessByTask.get(task.id), healthByTask.get(task.id))).join("\n");
 			updateFleetUi(ctx);
 			return {
 				content: [{ type: "text", text: `${header}\n\n${body}` }],
@@ -3945,6 +5202,8 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 				}
 			}
 			const dependencyLinks = listTaskLinks(getTmuxAgentsDb(), { taskIds: tasks.map((task) => task.id), includeResolved: true, limit: 1000 });
+			const interactionsByTask = listTaskInteractionsForTaskIds(tasks.map((task) => task.id));
+			const healthByTask = listTaskHealth(getTmuxAgentsDb(), tasks);
 			const text = tasks.length === 0
 				? "No matching tasks found."
 				: tasks
@@ -3952,13 +5211,13 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 						formatTaskDetails(task, agentsByTask.get(task.id) ?? [], eventsByTask.get(task.id) ?? [], {
 							dependencies: dependencyLinks.filter((link) => link.sourceTaskId === task.id),
 							dependents: dependencyLinks.filter((link) => link.targetTaskId === task.id),
-						}),
+						}, interactionsByTask.get(task.id) ?? [], healthByTask.get(task.id)),
 					)
 					.join("\n\n---\n\n");
 			updateFleetUi(ctx);
 			return {
 				content: [{ type: "text", text }],
-				details: { tasks, taskLinks: dependencyLinks },
+				details: { tasks, taskLinks: dependencyLinks, interactionsByTask, healthByTask },
 			};
 		},
 	});
@@ -4005,7 +5264,7 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 			const updated = getTask(getTmuxAgentsDb(), params.id)!;
 			updateFleetUi(ctx);
 			return {
-				content: [{ type: "text", text: formatTaskDetails(updated, getTaskLinkedAgents(updated.id), listTaskEvents(getTmuxAgentsDb(), { taskIds: [updated.id], limit: 10 })) }],
+				content: [{ type: "text", text: formatTaskDetails(updated, getTaskLinkedAgents(updated.id), listTaskEvents(getTmuxAgentsDb(), { taskIds: [updated.id], limit: 10 }), {}, getTaskInteractions(updated.id)) }],
 				details: { task: updated },
 			};
 		},
@@ -4045,7 +5304,7 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 			const dispatchText = dispatchResult ? `\n\n${buildTaskDispatchText(dispatchResult, false)}` : "";
 			updateFleetUi(ctx);
 			return {
-				content: [{ type: "text", text: `${formatTaskDetails(moved, getTaskLinkedAgents(moved.id), listTaskEvents(getTmuxAgentsDb(), { taskIds: [moved.id], limit: 10 }))}${dependencyText}${dispatchText}` }],
+				content: [{ type: "text", text: `${formatTaskDetails(moved, getTaskLinkedAgents(moved.id), listTaskEvents(getTmuxAgentsDb(), { taskIds: [moved.id], limit: 10 }), {}, getTaskInteractions(moved.id))}${dependencyText}${dispatchText}` }],
 				details: { task: moved, readyDependents, dispatchResult },
 			};
 		},
@@ -4054,24 +5313,38 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "task_note",
 		label: "Task Note",
-		description: "Append a structured task-level note or handoff event.",
-		promptSnippet: "Add a note to the task history without changing board state.",
+		description: "Append a structured task-level note or handoff event, optionally resolving one task interaction card.",
+		promptSnippet: "Add a note to the task history without changing board state; pass resolveInteractionId to disposition a visible task interaction.",
 		parameters: TaskNoteParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const task = getTask(getTmuxAgentsDb(), params.id);
 			if (!task) throw new Error(`Unknown task id \"${params.id}\".`);
+			const resolution = params.resolveInteractionId
+				? resolveTaskInteractionWithNote(params.id, params.resolveInteractionId, params.resolutionKind ?? "resolved", params.resolutionSummary ?? params.summary)
+				: null;
+			if (params.resolveInteractionId && resolution?.changes === 0) {
+				throw new Error(`No open task interaction ${params.resolveInteractionId} matched task ${params.id}.`);
+			}
 			createTaskEvent(getTmuxAgentsDb(), {
 				id: randomUUID(),
 				taskId: params.id,
 				eventType: "note",
 				summary: params.summary,
-				payload: { details: params.details ?? null, files: params.files ?? [] },
+				payload: {
+					details: params.details ?? null,
+					files: params.files ?? [],
+					resolvedInteractionId: params.resolveInteractionId ?? null,
+					resolutionKind: params.resolveInteractionId ? params.resolutionKind ?? "resolved" : null,
+					resolutionSummary: params.resolveInteractionId ? params.resolutionSummary ?? params.summary : null,
+					resolutionChanges: resolution?.changes ?? 0,
+				},
 			});
 			updateTask(getTmuxAgentsDb(), params.id, { updatedAt: Date.now(), files: params.files ? [...new Set([...task.files, ...params.files])] : task.files });
 			updateFleetUi(ctx);
+			const resolutionText = resolution ? ` and resolved ${resolution.changes} ${resolution.source} interaction(s)` : "";
 			return {
-				content: [{ type: "text", text: `Added note to ${task.id}: ${params.summary}` }],
-				details: { taskId: task.id },
+				content: [{ type: "text", text: `Added note to ${task.id}: ${params.summary}${resolutionText}` }],
+				details: { taskId: task.id, resolution },
 			};
 		},
 	});
@@ -4094,9 +5367,12 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 				agentId: params.agentId,
 				role: params.role,
 				isActive: params.active,
+				allowDuplicateOwner: params.allowDuplicateOwner,
 			});
 			if (params.active ?? true) {
-				updateTask(getTmuxAgentsDb(), params.taskId, { status: "in_progress", waitingOn: null, blockedReason: null, updatedAt: Date.now() });
+				const linkedTask = getTask(getTmuxAgentsDb(), params.taskId);
+				const status: TaskState = taskLeaseKindForProfile(link.role) === "review" && linkedTask?.status === "in_review" ? "in_review" : "in_progress";
+				updateTask(getTmuxAgentsDb(), params.taskId, { status, waitingOn: null, blockedReason: null, updatedAt: Date.now() });
 			}
 			updateFleetUi(ctx);
 			return {
@@ -4271,10 +5547,11 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 			const scope = params.scope ?? "current_project";
 			const filters = resolveTaskFilters(ctx, scope, { includeDone: true, limit: params.limit });
 			const items = listTaskAttention(getTmuxAgentsDb(), { ids: filters.ids, projectKey: filters.projectKey, spawnSessionId: filters.spawnSessionId, spawnSessionFile: filters.spawnSessionFile, limit: params.limit });
+			const interactionsByTask = listTaskInteractionsForTaskIds(items.map((item) => item.taskId));
 			updateFleetUi(ctx);
 			return {
-				content: [{ type: "text", text: buildTaskAttentionText(items) }],
-				details: { scope, items },
+				content: [{ type: "text", text: buildTaskAttentionText(items, interactionsByTask) }],
+				details: { scope, items, interactionsByTask },
 			};
 		},
 	});
@@ -4293,6 +5570,69 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 			return {
 				content: [{ type: "text", text: `Reconciled tasks · ${result.backfilled} backfilled · ${result.deactivatedLinks} links deactivated.` }],
 				details: { scope, result },
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "task_subtree_control",
+		label: "Task Subtree Control",
+		description: "Preview and optionally apply safe pause/resume/cancel-like controls across a parent/child task subtree.",
+		promptSnippet: "Preview a task family before pausing, resuming, or cancelling its tasks and linked agents.",
+		promptGuidelines: [
+			"Use a dry-run first (target action with confirm=false, or action=preview for read-only inspection) to inspect the recursive parentTaskId subtree, linked agents, blockers, attention, and cleanup candidates.",
+			"Pause/resume/cancel require confirm=true plus the previewToken returned by the prior dry-run preview for that same action/selection.",
+			"If previewComplete is no, the tool refuses to apply so large task families are not partially controlled from truncated data.",
+			"Pause/cancel use graceful subagent stop requests for active linked agents and write durable task events; they never force-kill or cleanup tmux targets.",
+			"Resume only unblocks tasks previously marked with [subtree paused] and does not spawn agents automatically.",
+		],
+		parameters: TaskSubtreeControlParams,
+		prepareArguments(args) {
+			if (!args || typeof args !== "object") return args;
+			const input = args as { taskId?: string; id?: string };
+			if (typeof input.taskId === "string" && typeof input.id !== "string") return { ...args, id: input.taskId };
+			return args;
+		},
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const action = (params.action ?? "preview") as TaskSubtreeControlAction;
+			const preview = buildTaskSubtreeControlPreview(ctx, params.id, action, { includeRoot: params.includeRoot, reason: params.reason });
+			if (action === "preview" || !(params.confirm ?? false)) {
+				const confirmationText = action === "preview" ? "" : `\n\nConfirmation required: rerun with confirm=true previewToken=${preview.previewToken} to apply this bulk action.`;
+				updateFleetUi(ctx);
+				return {
+					content: [{ type: "text", text: `${formatTaskSubtreeControlPreview(preview)}${confirmationText}` }],
+					details: {
+						dryRun: true,
+						action,
+						previewToken: preview.previewToken,
+						isComplete: preview.isComplete,
+						truncationWarnings: preview.truncationWarnings,
+						rootTask: preview.rootTask,
+						tasks: preview.tasks,
+						taskIdsToUpdate: preview.taskIdsToUpdate,
+						linkedAgents: preview.linkedAgents,
+						activeAgents: preview.activeAgents,
+						agentIdsToStop: preview.agentIdsToStop,
+						attentionItems: preview.attentionItems,
+						agentAttentionItems: preview.agentAttentionItems,
+						cleanupCandidates: preview.cleanupCandidates,
+					},
+				};
+			}
+			const result = await applyTaskSubtreeControl(ctx, params.id, action as Exclude<TaskSubtreeControlAction, "preview">, { includeRoot: params.includeRoot, reason: params.reason, previewToken: params.previewToken });
+			updateFleetUi(ctx);
+			return {
+				content: [{ type: "text", text: `${formatTaskSubtreeControlPreview(preview)}\n\n---\n\n${formatTaskSubtreeControlApplyResult(result)}` }],
+				details: {
+					dryRun: false,
+					action,
+					previewToken: result.preview.previewToken,
+					rootTask: result.preview.rootTask,
+					updatedTasks: result.updatedTasks,
+					stopResults: result.stopResults,
+					stopErrors: result.stopErrors,
+					taskEventsCreated: result.taskEventsCreated,
+				},
 			};
 		},
 	});
@@ -4490,7 +5830,8 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 			}
 			const filters = resolveTaskFilters(ctx, scope, { includeDone: true, limit: 200 });
 			const tasks = listTasks(getTmuxAgentsDb(), filters);
-			const text = `${`scope=${summarizeTaskFilters(scope, filters)} · ${tasks.length} task${tasks.length === 1 ? "" : "s"}`}${tasks.length === 0 ? "\n\nNo tasks matched." : `\n\n${tasks.map((task) => formatTaskLine(task, getTaskLinkedAgents(task.id))).join("\n")}`}`;
+			const healthByTask = listTaskHealth(getTmuxAgentsDb(), tasks);
+			const text = `${`scope=${summarizeTaskFilters(scope, filters)} · ${tasks.length} task${tasks.length === 1 ? "" : "s"}`}${tasks.length === 0 ? "\n\nNo tasks matched." : `\n\n${tasks.map((task) => formatTaskLine(task, getTaskLinkedAgents(task.id), undefined, healthByTask.get(task.id))).join("\n")}`}`;
 			if (ctx.hasUI) await ctx.ui.editor("tasks", text);
 			else ctx.ui.notify(text, "info");
 			updateFleetUi(ctx);
@@ -4501,7 +5842,7 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 		description: "Create a tracked task",
 		handler: async (_args, ctx) => {
 			const created = await runTaskCreateWizard(ctx);
-			if (created && ctx.hasUI) await ctx.ui.editor(`Task ${created.id}`, formatTaskDetails(created));
+			if (created && ctx.hasUI) await ctx.ui.editor(`Task ${created.id}`, formatTaskDetails(created, [], [], {}, getTaskInteractions(created.id)));
 			updateFleetUi(ctx);
 		},
 	});
@@ -4519,7 +5860,7 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 				ctx.ui.notify(`Unknown task id \"${id}\".`, "error");
 				return;
 			}
-			const text = formatTaskDetails(task, getTaskLinkedAgents(task.id), listTaskEvents(getTmuxAgentsDb(), { taskIds: [task.id], limit: 20 }));
+			const text = formatTaskDetails(task, getTaskLinkedAgents(task.id), listTaskEvents(getTmuxAgentsDb(), { taskIds: [task.id], limit: 20 }), {}, getTaskInteractions(task.id));
 			if (ctx.hasUI) await ctx.ui.editor(`Task ${task.id}`, text);
 			else ctx.ui.notify(text, "info");
 			updateFleetUi(ctx);
@@ -4578,8 +5919,16 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 				ctx.ui.notify("Usage: /task-link-agent <task-id> <agent-id> [role]", "warning");
 				return;
 			}
-			const link = linkTaskAgent(getTmuxAgentsDb(), { taskId, agentId, role, isActive: true });
-			updateTask(getTmuxAgentsDb(), taskId, { status: "in_progress", waitingOn: null, blockedReason: null, updatedAt: Date.now() });
+			const agent = getAgent(getTmuxAgentsDb(), agentId);
+			if (!agent) {
+				ctx.ui.notify(`Unknown agent id \"${agentId}\".`, "error");
+				return;
+			}
+			const allowDuplicateOwner = await confirmTaskLeaseOverride(ctx, taskId, role || agent.profile);
+			const existingTask = getTask(getTmuxAgentsDb(), taskId);
+			const link = linkTaskAgent(getTmuxAgentsDb(), { taskId, agentId, role, isActive: true, allowDuplicateOwner });
+			const status: TaskState = taskLeaseKindForProfile(link.role) === "review" && existingTask?.status === "in_review" ? "in_review" : "in_progress";
+			updateTask(getTmuxAgentsDb(), taskId, { status, waitingOn: null, blockedReason: null, updatedAt: Date.now() });
 			ctx.ui.notify(`Linked ${link.agentId} to ${link.taskId}.`, "info");
 			updateFleetUi(ctx);
 		},
@@ -4611,7 +5960,8 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 			}
 			const filters = resolveTaskFilters(ctx, scope, { includeDone: true, limit: 200 });
 			const items = listTaskAttention(getTmuxAgentsDb(), { ids: filters.ids, projectKey: filters.projectKey, spawnSessionId: filters.spawnSessionId, spawnSessionFile: filters.spawnSessionFile, limit: 200 });
-			const text = buildTaskAttentionText(items);
+			const interactionsByTask = listTaskInteractionsForTaskIds(items.map((item) => item.taskId));
+			const text = buildTaskAttentionText(items, interactionsByTask);
 			if (ctx.hasUI) await ctx.ui.editor("task attention", text);
 			else ctx.ui.notify(text, "info");
 			updateFleetUi(ctx);
@@ -4629,6 +5979,49 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 			const filters = resolveTaskFilters(ctx, scope, { includeDone: true, limit: 200 });
 			const result = reconcileTasks(getTmuxAgentsDb(), { ids: filters.ids, projectKey: filters.projectKey, spawnSessionId: filters.spawnSessionId, spawnSessionFile: filters.spawnSessionFile, limit: 200 });
 			ctx.ui.notify(`Reconciled tasks · ${result.backfilled} backfilled · ${result.deactivatedLinks} links deactivated.`, "info");
+			updateFleetUi(ctx);
+		},
+	});
+
+	pi.registerCommand("task-subtree", {
+		description: "Preview or confirm safe task-family subtree controls",
+		handler: async (args, ctx) => {
+			const parts = args?.trim().split(/\s+/).filter(Boolean) ?? [];
+			const id = parts[0];
+			const validActions = new Set<TaskSubtreeControlAction>(["preview", "pause", "resume", "cancel"]);
+			const rawAction = parts[1] as TaskSubtreeControlAction | undefined;
+			if (!id || (rawAction && !validActions.has(rawAction) && !rawAction.startsWith("--"))) {
+				ctx.ui.notify("Usage: /task-subtree <task-id> [preview|pause|resume|cancel] [--confirm] [--preview-token=<token>] [reason...]", "warning");
+				return;
+			}
+			const action = rawAction && validActions.has(rawAction) ? rawAction : "preview";
+			const remaining = parts.slice(rawAction && validActions.has(rawAction) ? 2 : 1);
+			const confirm = remaining.includes("--confirm") || remaining.includes("confirm");
+			const previewToken = remaining.find((part) => part.startsWith("--preview-token="))?.slice("--preview-token=".length);
+			const reason = remaining.filter((part) => part !== "--confirm" && part !== "confirm" && !part.startsWith("--preview-token=")).join(" ").trim() || undefined;
+			try {
+				const preview = buildTaskSubtreeControlPreview(ctx, id, action, { reason });
+				const previewText = formatTaskSubtreeControlPreview(preview);
+				if (ctx.hasUI) await ctx.ui.editor(`Subtree ${action} preview`, previewText);
+				else ctx.ui.notify(previewText, "info");
+				if (action === "preview") {
+					updateFleetUi(ctx);
+					return;
+				}
+				let ok = confirm;
+				if (!ok && ctx.hasUI) ok = await ctx.ui.confirm(`Confirm subtree ${action}`, formatTaskSubtreeControlConfirmation(preview));
+				if (!ok) {
+					ctx.ui.notify("Subtree control not applied; explicit confirmation is required.", "warning");
+					updateFleetUi(ctx);
+					return;
+				}
+				const result = await applyTaskSubtreeControl(ctx, id, action, { reason, previewToken: previewToken ?? (ctx.hasUI ? preview.previewToken : undefined) });
+				const resultText = formatTaskSubtreeControlApplyResult(result);
+				if (ctx.hasUI) await ctx.ui.editor(`Subtree ${action} result`, resultText);
+				else ctx.ui.notify(resultText, result.stopErrors.length > 0 ? "warning" : "info");
+			} catch (error) {
+				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+			}
 			updateFleetUi(ctx);
 		},
 	});
@@ -4940,8 +6333,8 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 
 	pi.on("session_start", async (_event, ctx) => {
 		const db = getTmuxAgentsDb();
-		reconcileTasks(db, { projectKey: getProjectKey(ctx.cwd), limit: 500 });
 		await reconcileAgents(ctx, { scope: "current_project", activeOnly: false, limit: 200 }).catch(() => {});
+		reconcileTasks(db, { projectKey: getProjectKey(ctx.cwd), limit: 500 });
 		const activeAgents = listAgents(db, { projectKey: getProjectKey(ctx.cwd), activeOnly: true, limit: 200 });
 		for (const agent of activeAgents) {
 			if (agent.transportKind === "rpc_bridge") {

@@ -1,7 +1,7 @@
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
-import type { AgentSummary } from "./types.js";
-import type { TaskRecord, TaskWaitingOn } from "./task-types.js";
+import type { AgentSummary, TaskInteractionRecord } from "./types.js";
+import type { TaskHealthSnapshot, TaskHealthState, TaskRecord, TaskWaitingOn } from "./task-types.js";
 
 export type BoardScope = "current_project" | "current_session" | "descendants" | "all";
 export type BoardLaneId = "todo" | "blocked" | "in_progress" | "in_review" | "done";
@@ -16,8 +16,12 @@ export interface BoardTicket {
 	blockedReason: string | null;
 	updatedAt: number;
 	activeAgentCount: number;
+	exclusiveOwnerCount: number;
+	reviewerCount: number;
+	ownerAgentIds: string[];
 	linkedProfiles: string[];
 	openAttentionCount: number;
+	health: TaskHealthSnapshot;
 	summary: string;
 }
 
@@ -25,6 +29,7 @@ export interface AgentsBoardScopeData {
 	lanes: Record<BoardLaneId, BoardTicket[]>;
 	tasksById: Map<string, TaskRecord>;
 	agentsByTaskId: Map<string, AgentSummary[]>;
+	interactionsByTaskId: Map<string, TaskInteractionRecord[]>;
 }
 
 export interface AgentsBoardData {
@@ -38,7 +43,7 @@ export interface AgentsBoardState {
 }
 
 export interface AgentsBoardAction {
-	type: "close" | "inspect" | "focus" | "stop" | "reply" | "capture" | "spawn" | "sync" | "move" | "create";
+	type: "close" | "inspect" | "focus" | "stop" | "reply" | "capture" | "spawn" | "sync" | "move" | "create" | "subtree";
 	selectedId?: string;
 	state: AgentsBoardState;
 }
@@ -113,7 +118,27 @@ function waitingBadge(waitingOn: TaskWaitingOn | null): string {
 	}
 }
 
-function relativeAge(timestamp: number): string {
+function healthBadge(health: TaskHealthState): string {
+	switch (health) {
+		case "blocked_external":
+			return "ext";
+		case "approval_required":
+			return "appr";
+		case "empty_or_no_progress":
+			return "empty";
+		case "needs_review":
+			return "review";
+		case "owner_active":
+			return "owner";
+		case "stale":
+			return "stale";
+		case "healthy":
+		default:
+			return "ok";
+	}
+}
+
+function relativeAge(timestamp: number | null): string {
 	if (!timestamp) return "unknown";
 	const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
 	if (seconds < 60) return `${seconds}s ago`;
@@ -149,15 +174,54 @@ function shortProfiles(profiles: string[], max = 2): string {
 	return [...shown, suffix].filter(Boolean).join("/");
 }
 
+function interactionIcon(kind: TaskInteractionRecord["kind"]): string {
+	switch (kind) {
+		case "user_question":
+			return "❓";
+		case "coordinator_question":
+			return "?";
+		case "approval_request":
+			return "☑";
+		case "change_request":
+			return "↻";
+		case "blocker":
+			return "⛔";
+		case "completion":
+			return "✓";
+		default:
+			return "•";
+	}
+}
+
+function interactionLabel(kind: TaskInteractionRecord["kind"]): string {
+	switch (kind) {
+		case "user_question":
+			return "user question";
+		case "coordinator_question":
+			return "coordinator question";
+		case "approval_request":
+			return "approval request";
+		case "change_request":
+			return "change request";
+		case "blocker":
+			return "blocker";
+		case "completion":
+			return "completion";
+		default:
+			return kind;
+	}
+}
+
 function nextActionForTicket(ticket: BoardTicket, task: TaskRecord | undefined, linkedAgents: AgentSummary[]): string {
 	if (ticket.openAttentionCount > 0) {
-		if (ticket.waitingOn === "user") return "answer user-facing question, then resume the child";
-		return "triage attention; reply, unblock, or move the task";
+		if (ticket.waitingOn === "user") return "answer user-facing interaction, then resume the child";
+		return "triage task interaction; reply, unblock, approve, or request changes";
 	}
+	if (ticket.health.nextAction) return ticket.health.nextAction;
 	if (ticket.waitingOn) return `waiting on ${ticket.waitingOn}; keep blocked until resolved`;
 	if (ticket.laneId === "blocked") return "record waitingOn/blocker or move back once unblocked";
-	if (ticket.laneId === "todo") return ticket.activeAgentCount > 0 ? "inspect linked agent before spawning more work" : "spawn the right specialist or refine acceptance criteria";
-	if (ticket.laneId === "in_progress") return linkedAgents.length > 0 ? "focus/capture active agent only if reporting is stale" : "assign an owner or move back to todo";
+	if (ticket.laneId === "todo") return ticket.exclusiveOwnerCount > 0 ? "inspect active owner before spawning more work" : "spawn the right specialist or refine acceptance criteria";
+	if (ticket.laneId === "in_progress") return ticket.exclusiveOwnerCount > 0 ? "let active owner run; focus/capture only if reporting is stale" : "assign an owner or move back to todo";
 	if (ticket.laneId === "in_review") return task?.reviewSummary ? "synthesize review and move done or back to in_progress" : "run the review/QA gate before accepting";
 	if (ticket.laneId === "done") return "cleanup linked agents after synthesis";
 	return "inspect task";
@@ -304,10 +368,13 @@ class AgentsBoardComponent {
 			const selected = selectedLane && ticket.taskId === this.state.selectedTaskId;
 			const prefix = selected ? ">" : " ";
 			const flags = [
+				healthBadge(ticket.health.state),
 				ticket.openAttentionCount > 0 ? `${ticket.openAttentionCount}!` : null,
 				waitingBadge(ticket.waitingOn),
 				ticket.priority <= 1 ? `P${ticket.priority}` : null,
-				ticket.activeAgentCount > 0 ? `${ticket.activeAgentCount}a` : null,
+				ticket.exclusiveOwnerCount > 0 ? `${ticket.exclusiveOwnerCount}o` : null,
+				ticket.reviewerCount > 0 ? `${ticket.reviewerCount}r` : null,
+				ticket.activeAgentCount > ticket.exclusiveOwnerCount + ticket.reviewerCount ? `${ticket.activeAgentCount}a` : null,
 				shortProfiles(ticket.linkedProfiles),
 			]
 				.filter((value): value is string => Boolean(value))
@@ -333,10 +400,13 @@ class AgentsBoardComponent {
 		}
 		const task = this.getScopeData().tasksById.get(selected.taskId);
 		const linkedAgents = this.getScopeData().agentsByTaskId.get(selected.taskId) ?? [];
+		const interactions = this.getScopeData().interactionsByTaskId.get(selected.taskId) ?? [];
 		lines.push(`${laneIcon(selected.laneId)} ${selected.title} · ${selected.taskId}`);
 		lines.push(`next: ${short(nextActionForTicket(selected, task, linkedAgents), Math.max(24, width - 7))}`);
+		lines.push(`health: ${selected.health.state} · signals: ${short(selected.health.signals.join(", "), Math.max(24, width - 20))}`);
+		lines.push(`last useful: ${relativeAge(selected.health.lastUsefulUpdateAt)} · ${short(selected.health.lastUsefulUpdateSummary, Math.max(24, width - 22))}`);
 		lines.push(`lane: ${laneLabel(selected.laneId)} · priority: ${selected.priority}${selected.priorityLabel ? ` (${selected.priorityLabel})` : ""} · updated: ${relativeAge(selected.updatedAt)}`);
-		lines.push(`waiting: ${selected.waitingOn ?? "-"} · active agents: ${selected.activeAgentCount} · open attention: ${selected.openAttentionCount}`);
+		lines.push(`waiting: ${selected.waitingOn ?? "-"} · owners: ${selected.exclusiveOwnerCount} · reviewers: ${selected.reviewerCount} · active agents: ${selected.activeAgentCount} · interactions: ${interactions.length}`);
 		lines.push(`summary: ${short(task?.summary ?? selected.summary, Math.max(24, width - 10))}`);
 		lines.push(`blocked: ${short(task?.blockedReason ?? selected.blockedReason, Math.max(24, width - 10))}`);
 		lines.push(`acceptance: ${short(task?.acceptanceCriteria.join(" | "), Math.max(24, width - 13))}`);
@@ -344,6 +414,18 @@ class AgentsBoardComponent {
 		lines.push(`validation: ${short(task?.validationSteps.join(" | "), Math.max(24, width - 13))}`);
 		lines.push(`labels: ${short(task?.labels.join(", "), Math.max(24, width - 9))}`);
 		lines.push(`files: ${short(task?.files.join(", "), Math.max(24, width - 8))}`);
+		if (interactions.length > 0) {
+			lines.push("interactions:");
+			for (const interaction of interactions.slice(0, 3)) {
+				const label = `${interactionIcon(interaction.kind)} ${interactionLabel(interaction.kind)} · ${interaction.actorLabel} · ${interaction.state}`;
+				lines.push(`- ${short(label, Math.max(24, width - 3))}`);
+				lines.push(`  ask: ${short(interaction.answerNeeded ?? interaction.summary, Math.max(24, width - 7))}`);
+				lines.push(`  next: ${short(interaction.nextAction, Math.max(24, width - 8))}`);
+				if (interaction.actions[0]) lines.push(`  action: ${short(interaction.actions[0], Math.max(24, width - 10))}`);
+			}
+			if (interactions.length > 3) lines.push(`- +${interactions.length - 3} more interactions`);
+		}
+		lines.push(`owners: ${selected.ownerAgentIds.length > 0 ? short(selected.ownerAgentIds.join(", "), Math.max(24, width - 9)) : "-"}`);
 		lines.push(`agents: ${linkedAgents.length > 0 ? short(linkedAgents.map((agent) => `${agent.id}:${agent.profile}:${agent.state}`).join(", "), Math.max(24, width - 9)) : "-"}`);
 		return lines.map((line) => truncateToWidth(line, width));
 	}
@@ -355,11 +437,15 @@ class AgentsBoardComponent {
 		const review = lanes.in_review.length;
 		const active = lanes.in_progress.reduce((count, ticket) => count + ticket.activeAgentCount, 0);
 		const attention = LANE_ORDER.reduce((count, laneId) => count + lanes[laneId].reduce((laneCount, ticket) => laneCount + ticket.openAttentionCount, 0), 0);
+		const allTickets = LANE_ORDER.flatMap((laneId) => lanes[laneId]);
+		const stale = allTickets.filter((ticket) => ticket.health.signals.includes("stale")).length;
+		const noProgress = allTickets.filter((ticket) => ticket.health.signals.includes("empty_or_no_progress")).length;
+		const approvals = allTickets.filter((ticket) => ticket.health.signals.includes("approval_required")).length;
 		const overWip = LANE_ORDER.flatMap((laneId) => {
 			const limit = SOFT_WIP_LIMITS[laneId];
 			return limit && lanes[laneId].length > limit ? [`${laneLabel(laneId)} ${lanes[laneId].length}/${limit}`] : [];
 		});
-		const summary = `hot: ${blocked} blocked (${userWaiting} user) · ${review} review · ${attention} attention · ${active} active agents${overWip.length > 0 ? ` · WIP ${overWip.join(", ")}` : ""}`;
+		const summary = `hot: ${blocked} blocked (${userWaiting} user) · ${review} review · ${attention} interactions · ${active} active agents · ${stale} stale · ${noProgress} no-progress · ${approvals} approval${overWip.length > 0 ? ` · WIP ${overWip.join(", ")}` : ""}`;
 		return truncateToWidth(this.theme.fg(attention > 0 || blocked > 0 ? "accent" : "muted", summary), width);
 	}
 
@@ -374,7 +460,7 @@ class AgentsBoardComponent {
 			truncateToWidth(
 				this.theme.fg(
 					"dim",
-					"keys: ←→ lanes · ↑↓ tasks · enter inspect · s spawn · m move · n new · o focus · r reply · x stop · c capture · y sync · f scope · esc close",
+					"keys: ←→ lanes · ↑↓ tasks · enter inspect · s spawn · m move · u subtree · n new · o focus · r reply · x stop · c capture · y sync · f scope · esc close",
 				),
 				width,
 			),
@@ -424,6 +510,7 @@ class AgentsBoardComponent {
 		if (data === "s") return void this.done(this.makeAction("spawn"));
 		if (data === "n") return void this.done(this.makeAction("create"));
 		if (data === "m") return void this.done(this.makeAction("move"));
+		if (data === "u") return void this.done(this.makeAction("subtree"));
 		if (data === "y") return void this.done(this.makeAction("sync"));
 		if (data === "f") {
 			this.cycleScope();

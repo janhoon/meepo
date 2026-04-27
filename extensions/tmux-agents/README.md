@@ -22,6 +22,7 @@ Implemented so far:
   - `task_dispatch_ready`
   - `task_attention`
   - `task_reconcile`
+  - `task_subtree_control`
   - `subagent_spawn`
   - `subagent_focus`
   - `subagent_stop`
@@ -53,6 +54,7 @@ Implemented so far:
   - `/task-unlink-agent <task-id> <agent-id>`
   - `/task-attention [scope]`
   - `/task-sync [scope]`
+  - `/task-subtree <task-id> [preview|pause|resume|cancel] [--confirm] [--preview-token=<token>] [reason...]`
   - `/task-spawn [task-id]`
   - `/agent-open <id>`
   - `/agent-stop <id> [force]`
@@ -127,8 +129,11 @@ Implemented so far:
   - first-class task dependency links: `task_link` records `sourceTaskId depends_on targetTaskId`, blocks dispatch while prerequisites are unresolved, and resolves links when prerequisites move to `done`
   - dependency-ready dispatch: `task_ready` lists tickets with no unresolved dependencies and `task_dispatch_ready` launches one agent per ready ticket using `recommendedProfile`
   - selected-task next-action guidance for unblock/reply/spawn/review/cleanup decisions
-  - `/standup` digest for user waits, dependency-blocked/newly-ready tickets, coordinator blockers, review queue, active WIP, stale tasks, ready work, and cleanup candidates
+  - derived task health/liveness (`healthy`, `stale`, `blocked_external`, `approval_required`, `empty_or_no_progress`, `owner_active`, `needs_review`) shown alongside, but separate from, the Kanban lane
+  - `/standup` digest for user waits, dependency-blocked/newly-ready tickets, coordinator blockers, review queue, active WIP, stale/no-progress health, ready work, and cleanup candidates
   - linked agents remain available for focus/reply/stop/capture from the selected task
+  - advanced/later subtree control preview: `/task-subtree`, `task_subtree_control`, and board key `u` select the root task plus recursive `parentTaskId` descendants, then preview affected tasks, linked active agents, blockers/open attention, and terminal cleanup candidates before any pause/resume/cancel-like action
+  - subtree pause/cancel actions require explicit confirmation, write durable task events, and request graceful subagent stops for active linked agents without force-killing or cleaning tmux targets; resume only clears tasks marked `[subtree paused]` and never spawns agents automatically
   - keyboard navigation across lanes and tasks
   - per-task inspect/focus/reply/stop/capture/spawn/move/sync actions
 - terminal agent cleanup behavior:
@@ -147,6 +152,12 @@ Not implemented yet:
 - richer child reply/ack UI polish
 - more capture/transcript options, but keep capture debug-only relative to the message/inbox control plane
 - stronger rg-only guard enforcement inside the extension runtime
+
+Task health and Kanban lane semantics:
+- `task.status` remains the durable board lane (`todo`, `blocked`, `in_progress`, `in_review`, `done`). It is still the only value used for board columns, dependency state transitions, dispatch eligibility, and acceptance/done semantics.
+- Health is derived at read/render time from task metadata, task events, dependency links, open attention/interactions, and linked-agent activity. No task-health columns are persisted, so existing registries need no migration or backfill.
+- Health can add operational liveness without changing the lane: for example an `in_progress` task can be `owner_active`, a `todo` task can be `empty_or_no_progress`, a `blocked` task waiting on a user/service/external party can be `blocked_external`, and an `in_review` task can be `needs_review`/`approval_required`.
+- `lastUsefulUpdate` is the newest useful signal found from task events, linked-agent updates, task update timestamps, or creation time. `/standup`, `task_list`, `task_get`, `task_attention`, and `/task-board` show this with a derived `nextAction` so stale sessions are visible without moving their Kanban lane.
 
 Quick operator notes for the RPC path:
 - `subagent_get`, `subagent_list`, dashboard details, and reconcile output now expose transport state for bridge-backed children.

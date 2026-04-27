@@ -1,9 +1,12 @@
 export const TASK_STATES = ["todo", "blocked", "in_progress", "in_review", "done"] as const;
+export const TASK_HEALTH_STATES = ["healthy", "stale", "blocked_external", "approval_required", "empty_or_no_progress", "owner_active", "needs_review"] as const;
 export const TASK_WAITING_ON_VALUES = ["user", "coordinator", "service", "external"] as const;
 export const TASK_LINK_TYPES = ["depends_on", "relates_to", "duplicates", "spawned_from"] as const;
 export const TASK_LINK_STATES = ["active", "resolved", "cancelled"] as const;
 
 export type TaskState = (typeof TASK_STATES)[number];
+export type TaskHealthState = (typeof TASK_HEALTH_STATES)[number];
+export type TaskHealthSignal = TaskHealthState;
 export type TaskWaitingOn = (typeof TASK_WAITING_ON_VALUES)[number];
 export type TaskLinkType = (typeof TASK_LINK_TYPES)[number];
 export type TaskLinkState = (typeof TASK_LINK_STATES)[number];
@@ -36,6 +39,16 @@ export interface TaskRecord {
 	startedAt: number | null;
 	reviewRequestedAt: number | null;
 	finishedAt: number | null;
+}
+
+export interface TaskHealthSnapshot {
+	state: TaskHealthState;
+	signals: TaskHealthSignal[];
+	lastUsefulUpdateAt: number | null;
+	lastUsefulUpdateSummary: string;
+	nextAction: string;
+	reason: string;
+	staleAfterMs: number;
 }
 
 export interface CreateTaskInput {
@@ -183,6 +196,7 @@ export interface LinkTaskAgentInput {
 	isActive?: boolean;
 	linkedAt?: number;
 	summary?: string | null;
+	allowDuplicateOwner?: boolean;
 }
 
 export interface TaskAgentLinkRecord {
@@ -244,6 +258,10 @@ export interface TaskAttentionRecord {
 	openAttentionCount: number;
 	unresolvedDependencyCount: number;
 	readyUnblocked: boolean;
+	health: TaskHealthState;
+	healthSignals: TaskHealthSignal[];
+	lastUsefulUpdateAt: number | null;
+	nextAction: string;
 }
 
 export function normalizeTaskState(value: string | null | undefined): TaskState {

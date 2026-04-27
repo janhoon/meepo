@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import type { AgentState, AttentionItemKind, AttentionItemState } from "./types.js";
+import type { AgentAttentionV2State, AgentState, AttentionItemKind, AttentionItemState } from "./types.js";
 import type {
 	CreateTaskEventInput,
 	CreateTaskInput,
@@ -13,6 +13,9 @@ import type {
 	TaskAgentLinkRecord,
 	TaskAttentionRecord,
 	TaskEventRecord,
+	TaskHealthSignal,
+	TaskHealthSnapshot,
+	TaskHealthState,
 	TaskLinkState,
 	TaskLinkType,
 	TaskLinkWithTasksRecord,
@@ -26,6 +29,37 @@ import type {
 
 const ACTIVE_AGENT_STATES: AgentState[] = ["launching", "running", "idle", "waiting", "blocked"];
 const OPEN_ATTENTION_STATES: AttentionItemState[] = ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user"];
+const OPEN_AGENT_ATTENTION_V2_STATES: AgentAttentionV2State[] = ["open", "acknowledged", "waiting_on_owner"];
+export const TASK_HEALTH_DEFAULT_STALE_AFTER_MS = 24 * 60 * 60 * 1000;
+const TASK_REVIEW_LEASE_PROFILES = new Set(["principal-engineer", "qa-lead", "reviewer"]);
+
+export type TaskLeaseKind = "exclusive" | "review";
+
+export interface TaskLeaseOwnerRecord {
+	taskId: string;
+	agentId: string;
+	profile: string;
+	role: string;
+	state: AgentState;
+	title: string;
+	linkedAt: number;
+	summary: string | null;
+	leaseKind: TaskLeaseKind;
+}
+
+export interface TaskLeaseStateRecord {
+	taskId: string;
+	activeOwners: TaskLeaseOwnerRecord[];
+	exclusiveOwners: TaskLeaseOwnerRecord[];
+	reviewOwners: TaskLeaseOwnerRecord[];
+}
+
+export interface TaskLeaseConflictRecord {
+	taskId: string;
+	requestedProfile: string;
+	requestedLeaseKind: TaskLeaseKind;
+	conflictingOwners: TaskLeaseOwnerRecord[];
+}
 
 const TASK_FIELD_TO_COLUMN: Record<keyof UpdateTaskInput, string> = {
 	parentTaskId: "parent_task_id",
@@ -82,6 +116,27 @@ function mergeStringArrays(...parts: Array<string[] | null | undefined>): string
 
 function makePlaceholders(count: number): string {
 	return new Array(count).fill("?").join(", ");
+}
+
+export function taskLeaseKindForProfile(profile: string | null | undefined): TaskLeaseKind {
+	const normalized = (profile ?? "").trim().toLowerCase();
+	return TASK_REVIEW_LEASE_PROFILES.has(normalized) ? "review" : "exclusive";
+}
+
+function toTaskLeaseOwnerRecord(row: Record<string, unknown>): TaskLeaseOwnerRecord {
+	const profile = row.profile as string;
+	const role = (row.role as string | null) ?? profile;
+	return {
+		taskId: row.task_id as string,
+		agentId: row.agent_id as string,
+		profile,
+		role,
+		state: row.state as AgentState,
+		title: row.title as string,
+		linkedAt: Number(row.linked_at ?? 0),
+		summary: (row.summary as string | null) ?? null,
+		leaseKind: taskLeaseKindForProfile(role || profile),
+	};
 }
 
 function addSessionScopeFilter(
@@ -353,6 +408,88 @@ export function getTask(db: DatabaseSync, id: string): TaskRecord | null {
 	return listTasks(db, { ids: [id], includeDone: true, limit: 1 })[0] ?? null;
 }
 
+export interface TaskSubtreeQueryResult {
+	tasks: TaskRecord[];
+	limit: number;
+	maxDepth: number;
+	returnedCount: number;
+	maxReturnedDepth: number;
+	hitLimit: boolean;
+	hitDepthLimit: boolean;
+}
+
+export function listTaskSubtreeWithMeta(
+	db: DatabaseSync,
+	rootTaskId: string,
+	options: { includeRoot?: boolean; includeDone?: boolean; limit?: number; maxDepth?: number } = {},
+): TaskSubtreeQueryResult {
+	const includeRoot = options.includeRoot ?? true;
+	const includeDone = options.includeDone ?? true;
+	const limit = Math.max(1, Math.min(options.limit ?? 500, 1000));
+	const maxDepth = Math.max(0, Math.min(options.maxDepth ?? limit, 1000));
+	const rows = db
+		.prepare(
+			`WITH RECURSIVE task_subtree(id, depth, path) AS (
+				SELECT id, 0, '|' || id || '|'
+				FROM tasks
+				WHERE id = ?
+				UNION ALL
+				SELECT child.id, task_subtree.depth + 1, task_subtree.path || child.id || '|'
+				FROM tasks child
+				JOIN task_subtree ON child.parent_task_id = task_subtree.id
+				WHERE task_subtree.depth < ?
+					AND instr(task_subtree.path, '|' || child.id || '|') = 0
+			)
+			SELECT t.*, task_subtree.depth AS subtree_depth
+			FROM task_subtree
+			JOIN tasks t ON t.id = task_subtree.id
+			WHERE (? = 1 OR t.id != ?)
+				AND (? = 1 OR t.status != 'done')
+			ORDER BY task_subtree.depth ASC, ${taskStatusOrderSql("t.status")}, t.priority ASC, t.updated_at DESC
+			LIMIT ?`,
+		)
+		.all(rootTaskId, maxDepth, includeRoot ? 1 : 0, rootTaskId, includeDone ? 1 : 0, limit) as Array<Record<string, unknown>>;
+	const depthProbe = db
+		.prepare(
+			`WITH RECURSIVE task_subtree(id, depth, path) AS (
+				SELECT id, 0, '|' || id || '|'
+				FROM tasks
+				WHERE id = ?
+				UNION ALL
+				SELECT child.id, task_subtree.depth + 1, task_subtree.path || child.id || '|'
+				FROM tasks child
+				JOIN task_subtree ON child.parent_task_id = task_subtree.id
+				WHERE task_subtree.depth < ?
+					AND instr(task_subtree.path, '|' || child.id || '|') = 0
+			)
+			SELECT 1 AS hit
+			FROM task_subtree
+			JOIN tasks child ON child.parent_task_id = task_subtree.id
+			WHERE task_subtree.depth = ?
+				AND instr(task_subtree.path, '|' || child.id || '|') = 0
+			LIMIT 1`,
+		)
+		.get(rootTaskId, maxDepth, maxDepth) as { hit?: number } | undefined;
+	const maxReturnedDepth = rows.reduce((max, row) => Math.max(max, Number(row.subtree_depth ?? 0)), 0);
+	return {
+		tasks: rows.map(toTaskRecord),
+		limit,
+		maxDepth,
+		returnedCount: rows.length,
+		maxReturnedDepth,
+		hitLimit: rows.length >= limit,
+		hitDepthLimit: Boolean(depthProbe?.hit),
+	};
+}
+
+export function listTaskSubtree(
+	db: DatabaseSync,
+	rootTaskId: string,
+	options: { includeRoot?: boolean; includeDone?: boolean; limit?: number; maxDepth?: number } = {},
+): TaskRecord[] {
+	return listTaskSubtreeWithMeta(db, rootTaskId, options).tasks;
+}
+
 export function createTaskEvent(db: DatabaseSync, input: CreateTaskEventInput): void {
 	db.prepare(
 		"INSERT INTO task_events (id, task_id, agent_id, event_type, summary, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -387,6 +524,318 @@ export function listTaskEvents(db: DatabaseSync, filters: ListTaskEventsFilters 
 		)
 		.all(...params) as Array<Record<string, unknown>>;
 	return rows.map(toTaskEventRecord);
+}
+
+interface TaskHealthMetrics {
+	activeAgentCount: number;
+	linkedAgentCount: number;
+	openAttentionCount: number;
+	openCompletionAttentionCount: number;
+	unresolvedDependencyCount: number;
+	latestEvent: TaskEventRecord | null;
+	latestAgentUpdateAt: number | null;
+	latestActiveAgentUpdateAt: number | null;
+}
+
+function createTaskHealthMetrics(): TaskHealthMetrics {
+	return {
+		activeAgentCount: 0,
+		linkedAgentCount: 0,
+		openAttentionCount: 0,
+		openCompletionAttentionCount: 0,
+		unresolvedDependencyCount: 0,
+		latestEvent: null,
+		latestAgentUpdateAt: null,
+		latestActiveAgentUpdateAt: null,
+	};
+}
+
+function normalizeHealthSignals(signals: TaskHealthSignal[]): TaskHealthSignal[] {
+	const seen = new Set<TaskHealthSignal>();
+	const normalized: TaskHealthSignal[] = [];
+	for (const signal of signals) {
+		if (seen.has(signal)) continue;
+		seen.add(signal);
+		normalized.push(signal);
+	}
+	return normalized.length > 0 ? normalized : ["healthy"];
+}
+
+function taskHasUsefulBody(task: TaskRecord): boolean {
+	return Boolean(
+		task.summary?.trim() ||
+			task.description?.trim() ||
+			task.blockedReason?.trim() ||
+			task.reviewSummary?.trim() ||
+			task.finalSummary?.trim() ||
+			task.acceptanceCriteria.length > 0 ||
+			task.planSteps.length > 0 ||
+			task.validationSteps.length > 0 ||
+			task.files.length > 0,
+	);
+}
+
+function healthDuration(valueMs: number): string {
+	const minutes = Math.max(1, Math.round(valueMs / 60000));
+	if (minutes < 60) return `${minutes}m`;
+	const hours = Math.round(minutes / 60);
+	if (hours < 48) return `${hours}h`;
+	return `${Math.round(hours / 24)}d`;
+}
+
+function pluralize(count: number, singular: string, plural = `${singular}s`): string {
+	return `${count} ${count === 1 ? singular : plural}`;
+}
+
+export function deriveTaskHealth(input: {
+	task: TaskRecord;
+	activeAgentCount?: number;
+	linkedAgentCount?: number;
+	openAttentionCount?: number;
+	openCompletionAttentionCount?: number;
+	unresolvedDependencyCount?: number;
+	latestEvent?: TaskEventRecord | null;
+	latestAgentUpdateAt?: number | null;
+	latestActiveAgentUpdateAt?: number | null;
+	now?: number;
+	staleAfterMs?: number;
+}): TaskHealthSnapshot {
+	const task = input.task;
+	const now = input.now ?? Date.now();
+	const staleAfterMs = input.staleAfterMs ?? TASK_HEALTH_DEFAULT_STALE_AFTER_MS;
+	const activeAgentCount = input.activeAgentCount ?? 0;
+	const linkedAgentCount = input.linkedAgentCount ?? 0;
+	const openAttentionCount = input.openAttentionCount ?? 0;
+	const openCompletionAttentionCount = input.openCompletionAttentionCount ?? 0;
+	const unresolvedDependencyCount = input.unresolvedDependencyCount ?? 0;
+	const latestEvent = input.latestEvent ?? null;
+	const latestAgentUpdateAt = input.latestAgentUpdateAt ?? null;
+	const latestActiveAgentUpdateAt = input.latestActiveAgentUpdateAt ?? null;
+	const candidates: Array<{ at: number; summary: string }> = [];
+	if (latestEvent?.createdAt) {
+		candidates.push({ at: latestEvent.createdAt, summary: `${latestEvent.eventType}: ${latestEvent.summary}` });
+	}
+	if (latestActiveAgentUpdateAt) {
+		candidates.push({ at: latestActiveAgentUpdateAt, summary: `${pluralize(activeAgentCount, "active linked agent")} updated` });
+	}
+	if (latestAgentUpdateAt && latestAgentUpdateAt !== latestActiveAgentUpdateAt) {
+		candidates.push({ at: latestAgentUpdateAt, summary: "linked agent updated" });
+	}
+	if (task.reviewRequestedAt && task.reviewSummary) {
+		candidates.push({ at: task.reviewRequestedAt, summary: `review requested: ${task.reviewSummary}` });
+	}
+	if (task.finishedAt && task.finalSummary) {
+		candidates.push({ at: task.finishedAt, summary: `finished: ${task.finalSummary}` });
+	}
+	if (task.updatedAt) {
+		candidates.push({ at: task.updatedAt, summary: "task metadata updated" });
+	}
+	if (task.createdAt) {
+		candidates.push({ at: task.createdAt, summary: "task created" });
+	}
+	candidates.sort((left, right) => right.at - left.at);
+	const lastUseful = candidates[0] ?? null;
+	const blockedExternal = task.status === "blocked" && (task.waitingOn === "user" || task.waitingOn === "service" || task.waitingOn === "external");
+	const needsReview = task.status === "in_review";
+	const approvalRequired = needsReview || openCompletionAttentionCount > 0;
+	const ownerActive = activeAgentCount > 0;
+	const emptyOrNoProgress =
+		task.status !== "done" &&
+		!blockedExternal &&
+		!needsReview &&
+		((task.status === "in_progress" && !ownerActive && !latestEvent) || (!taskHasUsefulBody(task) && linkedAgentCount === 0 && !latestEvent));
+	const stale = task.status !== "done" && Boolean(lastUseful?.at && now - lastUseful.at > staleAfterMs);
+	const signals = normalizeHealthSignals([
+		blockedExternal ? "blocked_external" : null,
+		approvalRequired ? "approval_required" : null,
+		needsReview ? "needs_review" : null,
+		emptyOrNoProgress ? "empty_or_no_progress" : null,
+		stale ? "stale" : null,
+		ownerActive ? "owner_active" : null,
+	].filter((value): value is TaskHealthSignal => Boolean(value)));
+	const priorityOrder: TaskHealthState[] = ["blocked_external", "needs_review", "approval_required", "empty_or_no_progress", "stale", "owner_active", "healthy"];
+	const state = priorityOrder.find((candidate) => signals.includes(candidate)) ?? "healthy";
+	const reason = (() => {
+		if (blockedExternal) return `Kanban status is blocked and waiting on ${task.waitingOn ?? "external input"}.`;
+		if (needsReview) return "Kanban status is in_review, so acceptance/review synthesis is required.";
+		if (approvalRequired) return "A completion or approval-style attention item is open.";
+		if (emptyOrNoProgress) return "No active owner or useful progress signal has been recorded yet.";
+		if (stale) return `Last useful update is older than ${healthDuration(staleAfterMs)}.`;
+		if (ownerActive) return `${pluralize(activeAgentCount, "active owner")} linked to this task.`;
+		return "No liveness concerns detected from task, attention, dependency, or linked-agent metadata.";
+	})();
+	const nextAction = (() => {
+		if (openAttentionCount > 0 && task.waitingOn === "user") return "answer the user-facing attention item, then resume the owner or keep the task blocked";
+		if (blockedExternal) return `follow up with ${task.waitingOn ?? "the external owner"}, or keep the blocker current with waitingOn/blocker details`;
+		if (unresolvedDependencyCount > 0) return `wait for ${pluralize(unresolvedDependencyCount, "unresolved dependency", "unresolved dependencies")} before dispatching work`;
+		if (needsReview) return "run or synthesize the review gate, then move done or back to in_progress";
+		if (approvalRequired) return "resolve the completion/approval attention before cleanup or acceptance";
+		if (emptyOrNoProgress) return "add acceptance criteria or assign an owner before expecting progress";
+		if (stale) return ownerActive ? "ask/focus the active owner for a concise update, then let it continue or replan" : "refresh the task, assign an owner, or move it to the correct lane";
+		if (ownerActive) return "let the active owner continue; inspect only if attention opens or updates go stale";
+		if (task.status === "todo") return task.recommendedProfile ? `dispatch ${task.recommendedProfile} when dependencies are clear` : "refine scope or spawn the next specialist";
+		if (task.status === "done") return "cleanup linked terminal agents and archive context if useful";
+		if (task.status === "blocked") return "add waitingOn/blocker details or move back when unblocked";
+		return "inspect task metadata and choose the next lane/action";
+	})();
+	return {
+		state,
+		signals,
+		lastUsefulUpdateAt: lastUseful?.at ?? null,
+		lastUsefulUpdateSummary: lastUseful?.summary ?? "no useful update recorded",
+		nextAction,
+		reason,
+		staleAfterMs,
+	};
+}
+
+export function listTaskHealth(
+	db: DatabaseSync,
+	tasks: TaskRecord[],
+	options: { now?: number; staleAfterMs?: number } = {},
+): Map<string, TaskHealthSnapshot> {
+	const result = new Map<string, TaskHealthSnapshot>();
+	const taskIds = [...new Set(tasks.map((task) => task.id))];
+	if (taskIds.length === 0) return result;
+	const metrics = new Map<string, TaskHealthMetrics>();
+	for (const taskId of taskIds) metrics.set(taskId, createTaskHealthMetrics());
+	const taskIdPlaceholders = makePlaceholders(taskIds.length);
+	const activeStatePlaceholders = makePlaceholders(ACTIVE_AGENT_STATES.length);
+	const agentRows = db
+		.prepare(
+			`SELECT
+				tal.task_id,
+				COUNT(DISTINCT tal.agent_id) AS linked_agent_count,
+				SUM(CASE WHEN tal.is_active = 1 AND a.state IN (${activeStatePlaceholders}) THEN 1 ELSE 0 END) AS active_agent_count,
+				MAX(a.updated_at) AS latest_agent_update_at,
+				MAX(CASE WHEN tal.is_active = 1 AND a.state IN (${activeStatePlaceholders}) THEN a.updated_at ELSE NULL END) AS latest_active_agent_update_at
+			 FROM task_agent_links tal
+			 JOIN agents a ON a.id = tal.agent_id
+			 WHERE tal.task_id IN (${taskIdPlaceholders})
+			 GROUP BY tal.task_id`,
+		)
+		.all(...ACTIVE_AGENT_STATES, ...ACTIVE_AGENT_STATES, ...taskIds) as Array<Record<string, unknown>>;
+	for (const row of agentRows) {
+		const metric = metrics.get(row.task_id as string);
+		if (!metric) continue;
+		metric.linkedAgentCount = Number(row.linked_agent_count ?? 0);
+		metric.activeAgentCount = Number(row.active_agent_count ?? 0);
+		metric.latestAgentUpdateAt = row.latest_agent_update_at == null ? null : Number(row.latest_agent_update_at);
+		metric.latestActiveAgentUpdateAt = row.latest_active_agent_update_at == null ? null : Number(row.latest_active_agent_update_at);
+	}
+	const attentionStatePlaceholders = makePlaceholders(OPEN_ATTENTION_STATES.length);
+	const attentionRows = db
+		.prepare(
+			`SELECT
+				tal.task_id,
+				COUNT(DISTINCT ai.id) AS open_attention_count,
+				COUNT(DISTINCT CASE WHEN ai.kind = 'complete' THEN ai.id ELSE NULL END) AS open_completion_attention_count
+			 FROM task_agent_links tal
+			 JOIN attention_items ai ON ai.agent_id = tal.agent_id
+			 WHERE tal.task_id IN (${taskIdPlaceholders})
+				AND ai.state IN (${attentionStatePlaceholders})
+			 GROUP BY tal.task_id`,
+		)
+		.all(...taskIds, ...OPEN_ATTENTION_STATES) as Array<Record<string, unknown>>;
+	for (const row of attentionRows) {
+		const metric = metrics.get(row.task_id as string);
+		if (!metric) continue;
+		metric.openAttentionCount = Number(row.open_attention_count ?? 0);
+		metric.openCompletionAttentionCount = Number(row.open_completion_attention_count ?? 0);
+	}
+	const v2AttentionStatePlaceholders = makePlaceholders(OPEN_AGENT_ATTENTION_V2_STATES.length);
+	const v2AttentionRows = db
+		.prepare(
+			`SELECT
+				task_id,
+				COUNT(DISTINCT id) AS open_attention_count,
+				COUNT(DISTINCT CASE WHEN kind IN ('complete', 'approval') THEN id ELSE NULL END) AS open_completion_attention_count
+			 FROM (
+				SELECT
+					aiv2.task_id AS task_id,
+					aiv2.id AS id,
+					aiv2.kind AS kind
+				 FROM agent_attention_items_v2 aiv2
+				 WHERE aiv2.task_id IN (${taskIdPlaceholders})
+					AND aiv2.state IN (${v2AttentionStatePlaceholders})
+				UNION
+				SELECT
+					tal.task_id AS task_id,
+					aiv2.id AS id,
+					aiv2.kind AS kind
+				 FROM task_agent_links tal
+				 JOIN agent_attention_items_v2 aiv2 ON aiv2.subject_agent_id = tal.agent_id
+				 WHERE tal.task_id IN (${taskIdPlaceholders})
+					AND aiv2.state IN (${v2AttentionStatePlaceholders})
+			 ) v2_attention
+			 GROUP BY task_id`,
+		)
+		.all(...taskIds, ...OPEN_AGENT_ATTENTION_V2_STATES, ...taskIds, ...OPEN_AGENT_ATTENTION_V2_STATES) as Array<Record<string, unknown>>;
+	for (const row of v2AttentionRows) {
+		const metric = metrics.get(row.task_id as string);
+		if (!metric) continue;
+		metric.openAttentionCount += Number(row.open_attention_count ?? 0);
+		metric.openCompletionAttentionCount += Number(row.open_completion_attention_count ?? 0);
+	}
+	const dependencyRows = db
+		.prepare(
+			`SELECT
+				tl.source_task_id AS task_id,
+				COUNT(*) AS unresolved_dependency_count
+			 FROM task_links tl
+			 JOIN tasks target ON target.id = tl.target_task_id
+			 WHERE tl.source_task_id IN (${taskIdPlaceholders})
+				AND tl.link_type = 'depends_on'
+				AND tl.state = 'active'
+				AND target.status != 'done'
+			 GROUP BY tl.source_task_id`,
+		)
+		.all(...taskIds) as Array<Record<string, unknown>>;
+	for (const row of dependencyRows) {
+		const metric = metrics.get(row.task_id as string);
+		if (!metric) continue;
+		metric.unresolvedDependencyCount = Number(row.unresolved_dependency_count ?? 0);
+	}
+	const latestEventRows = db
+		.prepare(
+			`SELECT te.*
+			 FROM task_events te
+			 WHERE te.task_id IN (${taskIdPlaceholders})
+				AND te.id = (
+					SELECT latest.id
+					FROM task_events latest
+					WHERE latest.task_id = te.task_id
+					ORDER BY latest.created_at DESC, latest.id DESC
+					LIMIT 1
+				)
+			 ORDER BY te.created_at DESC`,
+		)
+		.all(...taskIds) as Array<Record<string, unknown>>;
+	for (const row of latestEventRows) {
+		const metric = metrics.get(row.task_id as string);
+		if (!metric) continue;
+		metric.latestEvent = toTaskEventRecord(row);
+	}
+	for (const task of tasks) {
+		const metric = metrics.get(task.id) ?? createTaskHealthMetrics();
+		result.set(
+			task.id,
+			deriveTaskHealth({
+				task,
+				activeAgentCount: metric.activeAgentCount,
+				linkedAgentCount: metric.linkedAgentCount,
+				openAttentionCount: metric.openAttentionCount,
+				openCompletionAttentionCount: metric.openCompletionAttentionCount,
+				unresolvedDependencyCount: metric.unresolvedDependencyCount,
+				latestEvent: metric.latestEvent,
+				latestAgentUpdateAt: metric.latestAgentUpdateAt,
+				latestActiveAgentUpdateAt: metric.latestActiveAgentUpdateAt,
+				now: options.now,
+				staleAfterMs: options.staleAfterMs,
+			}),
+		);
+	}
+	return result;
 }
 
 function buildDependencyBlockedReason(links: TaskLinkWithTasksRecord[]): string {
@@ -675,6 +1124,94 @@ export function listTaskReadiness(db: DatabaseSync, filters: ListTasksFilters = 
 	});
 }
 
+export function listTaskLeaseOwners(
+	db: DatabaseSync,
+	filters: Pick<ListTaskAgentLinksFilters, "taskIds" | "agentIds" | "limit"> & { activeOnly?: boolean } = {},
+): TaskLeaseOwnerRecord[] {
+	if ((filters.taskIds && filters.taskIds.length === 0) || (filters.agentIds && filters.agentIds.length === 0)) return [];
+	const where: string[] = ["tal.is_active = 1"];
+	const params: unknown[] = [];
+	if (filters.taskIds && filters.taskIds.length > 0) {
+		where.push(`tal.task_id IN (${makePlaceholders(filters.taskIds.length)})`);
+		params.push(...filters.taskIds);
+	}
+	if (filters.agentIds && filters.agentIds.length > 0) {
+		where.push(`tal.agent_id IN (${makePlaceholders(filters.agentIds.length)})`);
+		params.push(...filters.agentIds);
+	}
+	if (filters.activeOnly ?? true) {
+		where.push(`a.state IN (${makePlaceholders(ACTIVE_AGENT_STATES.length)})`);
+		params.push(...ACTIVE_AGENT_STATES);
+	}
+	const limit = Math.max(1, Math.min(filters.limit ?? 500, 1000));
+	params.push(limit);
+	const rows = db
+		.prepare(
+			`SELECT
+				tal.task_id,
+				tal.agent_id,
+				tal.role,
+				tal.linked_at,
+				tal.summary,
+				a.profile,
+				a.state,
+				a.title
+			 FROM task_agent_links tal
+			 JOIN agents a ON a.id = tal.agent_id
+			 WHERE ${where.join(" AND ")}
+			 ORDER BY tal.linked_at ASC
+			 LIMIT ?`,
+		)
+		.all(...params) as Array<Record<string, unknown>>;
+	return rows.map(toTaskLeaseOwnerRecord);
+}
+
+export function getTaskLease(db: DatabaseSync, taskId: string): TaskLeaseStateRecord {
+	const activeOwners = listTaskLeaseOwners(db, { taskIds: [taskId], activeOnly: true, limit: 500 });
+	return {
+		taskId,
+		activeOwners,
+		exclusiveOwners: activeOwners.filter((owner) => owner.leaseKind === "exclusive"),
+		reviewOwners: activeOwners.filter((owner) => owner.leaseKind === "review"),
+	};
+}
+
+export function getTaskLeaseConflict(
+	db: DatabaseSync,
+	options: { taskId: string; profile: string | null | undefined; requesterAgentId?: string | null },
+): TaskLeaseConflictRecord | null {
+	const requestedProfile = options.profile?.trim() || "contributor";
+	const requestedLeaseKind = taskLeaseKindForProfile(requestedProfile);
+	if (requestedLeaseKind === "review") return null;
+	const lease = getTaskLease(db, options.taskId);
+	const conflictingOwners = lease.exclusiveOwners.filter((owner) => owner.agentId !== options.requesterAgentId);
+	if (conflictingOwners.length === 0) return null;
+	return {
+		taskId: options.taskId,
+		requestedProfile,
+		requestedLeaseKind,
+		conflictingOwners,
+	};
+}
+
+export function formatTaskLeaseConflict(conflict: TaskLeaseConflictRecord): string {
+	const owners = conflict.conflictingOwners
+		.map((owner) => `${owner.agentId} (${owner.profile}, ${owner.state})`)
+		.join(", ");
+	return `Task ${conflict.taskId} already has active exclusive owner${conflict.conflictingOwners.length === 1 ? "" : "s"}: ${owners}. Spawning or linking another exclusive profile (${conflict.requestedProfile}) may duplicate long-running work. Use a reviewer profile for intentional review siblings, or pass allowDuplicateOwner=true only when a second implementer is intentional.`;
+}
+
+export function assertTaskLeaseAvailable(
+	db: DatabaseSync,
+	options: { taskId: string; profile: string | null | undefined; requesterAgentId?: string | null; allowDuplicateOwner?: boolean },
+): TaskLeaseConflictRecord | null {
+	const conflict = getTaskLeaseConflict(db, options);
+	if (conflict && !options.allowDuplicateOwner) {
+		throw new Error(formatTaskLeaseConflict(conflict));
+	}
+	return conflict;
+}
+
 export function listTaskAgentLinks(db: DatabaseSync, filters: ListTaskAgentLinksFilters = {}): TaskAgentLinkRecord[] {
 	if ((filters.taskIds && filters.taskIds.length === 0) || (filters.agentIds && filters.agentIds.length === 0)) return [];
 	const where: string[] = [];
@@ -726,56 +1263,121 @@ function deactivateActiveLinksForAgent(db: DatabaseSync, agentId: string, except
 			payload: { reason },
 			createdAt: now,
 		});
+		createTaskEvent(db, {
+			id: randomUUID(),
+			taskId: row.task_id,
+			agentId,
+			eventType: "task_lease_released",
+			summary: `Released task lease for ${agentId}`,
+			payload: { reason },
+			createdAt: now,
+		});
 	}
 	return rows.map((row) => row.task_id);
 }
 
-export function linkTaskAgent(db: DatabaseSync, input: LinkTaskAgentInput): TaskAgentLinkRecord {
-	const now = input.linkedAt ?? Date.now();
-	const task = getTask(db, input.taskId);
-	if (!task) throw new Error(`Unknown task id \"${input.taskId}\".`);
-	const agentRow = db.prepare("SELECT profile FROM agents WHERE id = ?").get(input.agentId) as { profile?: string } | undefined;
-	if (!agentRow) throw new Error(`Unknown agent id \"${input.agentId}\".`);
-	deactivateActiveLinksForAgent(db, input.agentId, input.taskId, "linked_to_new_task", now);
-	const existing = db
-		.prepare("SELECT * FROM task_agent_links WHERE task_id = ? AND agent_id = ? AND is_active = 1 LIMIT 1")
-		.get(input.taskId, input.agentId) as Record<string, unknown> | undefined;
-	if (existing) {
-		db.prepare("UPDATE task_agent_links SET role = ?, summary = ? WHERE id = ?").run(
-			input.role?.trim() || (existing.role as string | null) || agentRow.profile || "contributor",
-			input.summary?.trim() || (existing.summary as string | null) || null,
-			existing.id,
-		);
-		updateTask(db, input.taskId, { updatedAt: now });
-		db.prepare("UPDATE agents SET task_id = ? WHERE id = ?").run(input.taskId, input.agentId);
-		return toTaskAgentLinkRecord({ ...existing, role: input.role ?? existing.role, summary: input.summary ?? existing.summary });
+function runImmediateTransaction<T>(db: DatabaseSync, callback: () => T): T {
+	db.exec("BEGIN IMMEDIATE;");
+	try {
+		const result = callback();
+		db.exec("COMMIT;");
+		return result;
+	} catch (error) {
+		try {
+			db.exec("ROLLBACK;");
+		} catch {
+			// Preserve the original error.
+		}
+		throw error;
 	}
-	const record: TaskAgentLinkRecord = {
-		id: input.id ?? randomUUID(),
-		taskId: input.taskId,
-		agentId: input.agentId,
-		role: input.role?.trim() || agentRow.profile || "contributor",
-		isActive: input.isActive ?? true,
-		linkedAt: now,
-		unlinkedAt: null,
-		summary: input.summary?.trim() || null,
-	};
-	db.prepare(
-		`INSERT INTO task_agent_links (id, task_id, agent_id, role, is_active, linked_at, unlinked_at, summary)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-	).run(record.id, record.taskId, record.agentId, record.role, record.isActive ? 1 : 0, record.linkedAt, record.unlinkedAt, record.summary);
-	db.prepare("UPDATE agents SET task_id = ? WHERE id = ?").run(record.taskId, record.agentId);
-	updateTask(db, record.taskId, { updatedAt: now });
-	createTaskEvent(db, {
-		id: randomUUID(),
-		taskId: record.taskId,
-		agentId: record.agentId,
-		eventType: "agent_linked",
-		summary: `Linked ${record.agentId} as ${record.role}`,
-		payload: { role: record.role, summary: record.summary },
-		createdAt: now,
+}
+
+export function linkTaskAgent(db: DatabaseSync, input: LinkTaskAgentInput): TaskAgentLinkRecord {
+	return runImmediateTransaction(db, () => {
+		const now = input.linkedAt ?? Date.now();
+		const task = getTask(db, input.taskId);
+		if (!task) throw new Error(`Unknown task id \"${input.taskId}\".`);
+		const agentRow = db.prepare("SELECT profile FROM agents WHERE id = ?").get(input.agentId) as { profile?: string } | undefined;
+		if (!agentRow) throw new Error(`Unknown agent id \"${input.agentId}\".`);
+		const requestedRole = input.role?.trim() || agentRow.profile || "contributor";
+		const leaseConflict = (input.isActive ?? true)
+			? assertTaskLeaseAvailable(db, {
+					taskId: input.taskId,
+					profile: requestedRole,
+					requesterAgentId: input.agentId,
+					allowDuplicateOwner: input.allowDuplicateOwner,
+				})
+			: null;
+		deactivateActiveLinksForAgent(db, input.agentId, input.taskId, "linked_to_new_task", now);
+		const existing = db
+			.prepare("SELECT * FROM task_agent_links WHERE task_id = ? AND agent_id = ? AND is_active = 1 LIMIT 1")
+			.get(input.taskId, input.agentId) as Record<string, unknown> | undefined;
+		if (existing) {
+			const role = input.role?.trim() || (existing.role as string | null) || agentRow.profile || "contributor";
+			const summary = input.summary?.trim() || (existing.summary as string | null) || null;
+			db.prepare("UPDATE task_agent_links SET role = ?, summary = ? WHERE id = ?").run(role, summary, existing.id);
+			updateTask(db, input.taskId, { updatedAt: now });
+			db.prepare("UPDATE agents SET task_id = ? WHERE id = ?").run(input.taskId, input.agentId);
+			createTaskEvent(db, {
+				id: randomUUID(),
+				taskId: input.taskId,
+				agentId: input.agentId,
+				eventType: "task_lease_refreshed",
+				summary: `Refreshed ${taskLeaseKindForProfile(role)} task lease for ${input.agentId}`,
+				payload: {
+					role,
+					summary,
+					leaseKind: taskLeaseKindForProfile(role),
+					override: Boolean(leaseConflict),
+					conflictingOwners: leaseConflict?.conflictingOwners.map((owner) => owner.agentId) ?? [],
+				},
+				createdAt: now,
+			});
+			return toTaskAgentLinkRecord({ ...existing, role, summary });
+		}
+		const record: TaskAgentLinkRecord = {
+			id: input.id ?? randomUUID(),
+			taskId: input.taskId,
+			agentId: input.agentId,
+			role: requestedRole,
+			isActive: input.isActive ?? true,
+			linkedAt: now,
+			unlinkedAt: null,
+			summary: input.summary?.trim() || null,
+		};
+		db.prepare(
+			`INSERT INTO task_agent_links (id, task_id, agent_id, role, is_active, linked_at, unlinked_at, summary)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		).run(record.id, record.taskId, record.agentId, record.role, record.isActive ? 1 : 0, record.linkedAt, record.unlinkedAt, record.summary);
+		db.prepare("UPDATE agents SET task_id = ? WHERE id = ?").run(record.taskId, record.agentId);
+		updateTask(db, record.taskId, { updatedAt: now });
+		createTaskEvent(db, {
+			id: randomUUID(),
+			taskId: record.taskId,
+			agentId: record.agentId,
+			eventType: "agent_linked",
+			summary: `Linked ${record.agentId} as ${record.role}`,
+			payload: { role: record.role, summary: record.summary },
+			createdAt: now,
+		});
+		if (record.isActive) {
+			createTaskEvent(db, {
+				id: randomUUID(),
+				taskId: record.taskId,
+				agentId: record.agentId,
+				eventType: "task_lease_claimed",
+				summary: `Claimed ${taskLeaseKindForProfile(record.role)} task lease for ${record.agentId}`,
+				payload: {
+					role: record.role,
+					leaseKind: taskLeaseKindForProfile(record.role),
+					override: Boolean(leaseConflict),
+					conflictingOwners: leaseConflict?.conflictingOwners.map((owner) => owner.agentId) ?? [],
+				},
+				createdAt: now,
+			});
+		}
+		return record;
 	});
-	return record;
 }
 
 export function unlinkTaskAgent(db: DatabaseSync, taskId: string, agentId: string, reason?: string): number {
@@ -794,13 +1396,23 @@ export function unlinkTaskAgent(db: DatabaseSync, taskId: string, agentId: strin
 	if (changes > 0) {
 		db.prepare("UPDATE agents SET task_id = NULL WHERE id = ? AND task_id = ?").run(agentId, taskId);
 		updateTask(db, taskId, { updatedAt: now });
+		const releaseReason = reason?.trim() || null;
 		createTaskEvent(db, {
 			id: randomUUID(),
 			taskId,
 			agentId,
 			eventType: "agent_unlinked",
 			summary: `Unlinked ${agentId}`,
-			payload: { reason: reason?.trim() || null },
+			payload: { reason: releaseReason },
+			createdAt: now,
+		});
+		createTaskEvent(db, {
+			id: randomUUID(),
+			taskId,
+			agentId,
+			eventType: "task_lease_released",
+			summary: `Released task lease for ${agentId}`,
+			payload: { reason: releaseReason },
 			createdAt: now,
 		});
 	}
@@ -867,6 +1479,7 @@ export function listTaskAttention(
 		params.push(filters.projectKey);
 	}
 	addSessionScopeFilter(where, params, filters.spawnSessionId, filters.spawnSessionFile);
+	const v2AttentionStatePlaceholders = makePlaceholders(OPEN_AGENT_ATTENTION_V2_STATES.length);
 	const limit = Math.max(1, Math.min(filters.limit ?? 100, 500));
 	params.push(limit);
 	const rows = db
@@ -888,13 +1501,30 @@ export function listTaskAttention(
 						AND tal.is_active = 1
 						AND a.state IN (${makePlaceholders(ACTIVE_AGENT_STATES.length)})
 				), 0) AS active_agent_count,
-				COALESCE((
-					SELECT COUNT(*)
-					FROM task_agent_links tal
-					JOIN attention_items ai ON ai.agent_id = tal.agent_id
-					WHERE tal.task_id = t.id
-						AND ai.state IN (${makePlaceholders(OPEN_ATTENTION_STATES.length)})
-				), 0) AS open_attention_count,
+				(
+					COALESCE((
+						SELECT COUNT(DISTINCT ai.id)
+						FROM task_agent_links tal
+						JOIN attention_items ai ON ai.agent_id = tal.agent_id
+						WHERE tal.task_id = t.id
+							AND ai.state IN (${makePlaceholders(OPEN_ATTENTION_STATES.length)})
+					), 0)
+					+
+					COALESCE((
+						SELECT COUNT(DISTINCT aiv2.id)
+						FROM agent_attention_items_v2 aiv2
+						WHERE aiv2.state IN (${v2AttentionStatePlaceholders})
+							AND (
+								aiv2.task_id = t.id
+								OR EXISTS (
+									SELECT 1
+									FROM task_agent_links v2_tal
+									WHERE v2_tal.task_id = t.id
+										AND v2_tal.agent_id = aiv2.subject_agent_id
+								)
+							)
+					), 0)
+				) AS open_attention_count,
 				COALESCE((
 					SELECT COUNT(*)
 					FROM task_links tl
@@ -932,8 +1562,8 @@ export function listTaskAttention(
 				t.updated_at DESC
 			LIMIT ?`,
 		)
-		.all(...ACTIVE_AGENT_STATES, ...OPEN_ATTENTION_STATES, ...params) as Array<Record<string, unknown>>;
-	return rows.map((row) => ({
+		.all(...ACTIVE_AGENT_STATES, ...OPEN_ATTENTION_STATES, ...OPEN_AGENT_ATTENTION_V2_STATES, ...params) as Array<Record<string, unknown>>;
+	const items = rows.map((row) => ({
 		taskId: row.id as string,
 		title: row.title as string,
 		status: row.status as TaskState,
@@ -947,6 +1577,19 @@ export function listTaskAttention(
 		unresolvedDependencyCount: Number(row.unresolved_dependency_count ?? 0),
 		readyUnblocked: Number(row.ready_unblocked ?? 0) === 1,
 	}));
+	const tasks = items.length > 0 ? listTasks(db, { ids: items.map((item) => item.taskId), includeDone: true, limit: items.length }) : [];
+	const healthByTask = listTaskHealth(db, tasks);
+	return items.map((item) => {
+		const task = tasks.find((candidate) => candidate.id === item.taskId);
+		const health = healthByTask.get(item.taskId) ?? (task ? deriveTaskHealth({ task }) : null);
+		return {
+			...item,
+			health: (health?.state ?? "healthy") as TaskHealthState,
+			healthSignals: (health?.signals ?? ["healthy"]) as TaskHealthSignal[],
+			lastUsefulUpdateAt: health?.lastUsefulUpdateAt ?? item.updatedAt,
+			nextAction: health?.nextAction ?? "inspect task",
+		};
+	});
 }
 
 export function applyChildPublishToLinkedTask(
@@ -1251,12 +1894,22 @@ export function reconcileTasks(
 	for (const row of rows) {
 		if (ACTIVE_AGENT_STATES.includes(row.state)) continue;
 		db.prepare("UPDATE task_agent_links SET is_active = 0, unlinked_at = ? WHERE id = ?").run(now, row.id);
+		db.prepare("UPDATE agents SET task_id = NULL WHERE id = ? AND task_id = ?").run(row.agent_id, row.task_id);
 		createTaskEvent(db, {
 			id: randomUUID(),
 			taskId: row.task_id,
 			agentId: row.agent_id,
 			eventType: "agent_unlinked",
 			summary: `Unlinked terminal agent ${row.agent_id}`,
+			payload: { state: row.state, reason: "reconcile_terminal_agent" },
+			createdAt: now,
+		});
+		createTaskEvent(db, {
+			id: randomUUID(),
+			taskId: row.task_id,
+			agentId: row.agent_id,
+			eventType: "task_lease_released",
+			summary: `Released stale task lease for terminal agent ${row.agent_id}`,
 			payload: { state: row.state, reason: "reconcile_terminal_agent" },
 			createdAt: now,
 		});
