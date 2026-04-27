@@ -44,7 +44,12 @@ export interface AgentsBoardAction {
 }
 
 const LANE_ORDER: BoardLaneId[] = ["todo", "blocked", "in_progress", "in_review", "done"];
+const ACTION_LANE_ORDER: BoardLaneId[] = ["blocked", "in_review", "in_progress", "todo", "done"];
 const SCOPE_ORDER: BoardScope[] = ["current_project", "current_session", "descendants", "all"];
+const SOFT_WIP_LIMITS: Partial<Record<BoardLaneId, number>> = {
+	in_progress: 3,
+	in_review: 5,
+};
 
 function laneLabel(laneId: BoardLaneId): string {
 	switch (laneId) {
@@ -108,6 +113,56 @@ function waitingBadge(waitingOn: TaskWaitingOn | null): string {
 	}
 }
 
+function relativeAge(timestamp: number): string {
+	if (!timestamp) return "unknown";
+	const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+	if (seconds < 60) return `${seconds}s ago`;
+	const minutes = Math.floor(seconds / 60);
+	if (minutes < 60) return `${minutes}m ago`;
+	const hours = Math.floor(minutes / 60);
+	if (hours < 48) return `${hours}h ago`;
+	const days = Math.floor(hours / 24);
+	return `${days}d ago`;
+}
+
+function emptyLaneText(laneId: BoardLaneId): string {
+	switch (laneId) {
+		case "todo":
+			return "no ready work";
+		case "blocked":
+			return "no blockers";
+		case "in_progress":
+			return "no active work";
+		case "in_review":
+			return "no review queue";
+		case "done":
+			return "nothing done yet";
+		default:
+			return "empty";
+	}
+}
+
+function shortProfiles(profiles: string[], max = 2): string {
+	if (profiles.length === 0) return "";
+	const shown = profiles.slice(0, max).map((profile) => profile.replace(/[^a-z0-9-]/gi, "").slice(0, 3).toLowerCase());
+	const suffix = profiles.length > max ? `+${profiles.length - max}` : "";
+	return [...shown, suffix].filter(Boolean).join("/");
+}
+
+function nextActionForTicket(ticket: BoardTicket, task: TaskRecord | undefined, linkedAgents: AgentSummary[]): string {
+	if (ticket.openAttentionCount > 0) {
+		if (ticket.waitingOn === "user") return "answer user-facing question, then resume the child";
+		return "triage attention; reply, unblock, or move the task";
+	}
+	if (ticket.waitingOn) return `waiting on ${ticket.waitingOn}; keep blocked until resolved`;
+	if (ticket.laneId === "blocked") return "record waitingOn/blocker or move back once unblocked";
+	if (ticket.laneId === "todo") return ticket.activeAgentCount > 0 ? "inspect linked agent before spawning more work" : "spawn the right specialist or refine acceptance criteria";
+	if (ticket.laneId === "in_progress") return linkedAgents.length > 0 ? "focus/capture active agent only if reporting is stale" : "assign an owner or move back to todo";
+	if (ticket.laneId === "in_review") return task?.reviewSummary ? "synthesize review and move done or back to in_progress" : "run the review/QA gate before accepting";
+	if (ticket.laneId === "done") return "cleanup linked agents after synthesis";
+	return "inspect task";
+}
+
 class AgentsBoardComponent {
 	private readonly boardRows = 10;
 	private state: AgentsBoardState;
@@ -136,7 +191,10 @@ class AgentsBoardComponent {
 	}
 
 	private getFirstNonEmptyLane(): BoardLaneId | undefined {
-		for (const laneId of LANE_ORDER) {
+		for (const laneId of ACTION_LANE_ORDER) {
+			if (this.getLaneTickets(laneId).some((ticket) => ticket.openAttentionCount > 0)) return laneId;
+		}
+		for (const laneId of ACTION_LANE_ORDER) {
 			if (this.getLaneTickets(laneId).length > 0) return laneId;
 		}
 		return undefined;
@@ -224,32 +282,41 @@ class AgentsBoardComponent {
 		const tickets = this.getLaneTickets(laneId);
 		const selectedLane = this.state.selectedLaneId === laneId;
 		const selectedIndex = tickets.findIndex((ticket) => ticket.taskId === this.state.selectedTaskId);
-		const visibleCount = this.boardRows - 1;
+		const visibleCount = this.boardRows - 2;
 		const start =
 			selectedIndex >= 0
 				? Math.max(0, Math.min(selectedIndex - Math.floor(visibleCount / 2), Math.max(0, tickets.length - visibleCount)))
 				: 0;
 		const end = Math.min(tickets.length, start + visibleCount);
 		const lines: string[] = [];
-		const header = `${laneLabel(laneId)} (${tickets.length})`;
+		const attentionCount = tickets.reduce((count, ticket) => count + ticket.openAttentionCount, 0);
+		const wipLimit = SOFT_WIP_LIMITS[laneId];
+		const wipWarning = wipLimit && tickets.length > wipLimit ? `>${wipLimit}` : "";
+		const header = `${laneLabel(laneId)} (${tickets.length}${attentionCount > 0 ? ` · ${attentionCount}!` : ""}${wipWarning ? ` · ${wipWarning}` : ""})`;
 		lines.push(
 			selectedLane ? this.theme.fg("accent", this.theme.bold(padToWidth(header, width))) : this.theme.fg("muted", padToWidth(header, width)),
 		);
+		if (tickets.length === 0) {
+			lines.push(this.theme.fg("dim", padToWidth(`  ${emptyLaneText(laneId)}`, width)));
+		}
 		for (let index = start; index < end; index++) {
 			const ticket = tickets[index]!;
 			const selected = selectedLane && ticket.taskId === this.state.selectedTaskId;
 			const prefix = selected ? ">" : " ";
 			const flags = [
-				ticket.priority <= 1 ? `P${ticket.priority}` : null,
-				waitingBadge(ticket.waitingOn),
-				ticket.activeAgentCount > 0 ? `${ticket.activeAgentCount}a` : null,
 				ticket.openAttentionCount > 0 ? `${ticket.openAttentionCount}!` : null,
+				waitingBadge(ticket.waitingOn),
+				ticket.priority <= 1 ? `P${ticket.priority}` : null,
+				ticket.activeAgentCount > 0 ? `${ticket.activeAgentCount}a` : null,
+				shortProfiles(ticket.linkedProfiles),
 			]
 				.filter((value): value is string => Boolean(value))
 				.join(" ");
-			const body = `${prefix} ${laneIcon(ticket.laneId)} ${short(ticket.title, Math.max(8, width - 8))}${flags ? ` ${flags}` : ""}`;
+			const titleWidth = Math.max(8, width - 6 - visibleWidth(flags));
+			const body = `${prefix} ${laneIcon(ticket.laneId)} ${short(ticket.title, titleWidth)}${flags ? ` ${flags}` : ""}`;
 			lines.push(selected ? this.theme.fg("accent", padToWidth(body, width)) : padToWidth(body, width));
 		}
+		if (tickets.length > end) lines.push(this.theme.fg("dim", padToWidth(`  +${tickets.length - end} more`, width)));
 		while (lines.length < this.boardRows) {
 			lines.push(this.theme.fg("dim", padToWidth("·", width)));
 		}
@@ -267,15 +334,33 @@ class AgentsBoardComponent {
 		const task = this.getScopeData().tasksById.get(selected.taskId);
 		const linkedAgents = this.getScopeData().agentsByTaskId.get(selected.taskId) ?? [];
 		lines.push(`${laneIcon(selected.laneId)} ${selected.title} · ${selected.taskId}`);
-		lines.push(`lane: ${laneLabel(selected.laneId)} · priority: ${selected.priority}${selected.priorityLabel ? ` (${selected.priorityLabel})` : ""}`);
+		lines.push(`next: ${short(nextActionForTicket(selected, task, linkedAgents), Math.max(24, width - 7))}`);
+		lines.push(`lane: ${laneLabel(selected.laneId)} · priority: ${selected.priority}${selected.priorityLabel ? ` (${selected.priorityLabel})` : ""} · updated: ${relativeAge(selected.updatedAt)}`);
 		lines.push(`waiting: ${selected.waitingOn ?? "-"} · active agents: ${selected.activeAgentCount} · open attention: ${selected.openAttentionCount}`);
 		lines.push(`summary: ${short(task?.summary ?? selected.summary, Math.max(24, width - 10))}`);
 		lines.push(`blocked: ${short(task?.blockedReason ?? selected.blockedReason, Math.max(24, width - 10))}`);
+		lines.push(`acceptance: ${short(task?.acceptanceCriteria.join(" | "), Math.max(24, width - 13))}`);
 		lines.push(`plan: ${short(task?.planSteps.join(" | "), Math.max(24, width - 7))}`);
 		lines.push(`validation: ${short(task?.validationSteps.join(" | "), Math.max(24, width - 13))}`);
+		lines.push(`labels: ${short(task?.labels.join(", "), Math.max(24, width - 9))}`);
 		lines.push(`files: ${short(task?.files.join(", "), Math.max(24, width - 8))}`);
 		lines.push(`agents: ${linkedAgents.length > 0 ? short(linkedAgents.map((agent) => `${agent.id}:${agent.profile}:${agent.state}`).join(", "), Math.max(24, width - 9)) : "-"}`);
 		return lines.map((line) => truncateToWidth(line, width));
+	}
+
+	private renderBoardSummary(width: number): string {
+		const lanes = this.getScopeData().lanes;
+		const blocked = lanes.blocked.length;
+		const userWaiting = lanes.blocked.filter((ticket) => ticket.waitingOn === "user").length;
+		const review = lanes.in_review.length;
+		const active = lanes.in_progress.reduce((count, ticket) => count + ticket.activeAgentCount, 0);
+		const attention = LANE_ORDER.reduce((count, laneId) => count + lanes[laneId].reduce((laneCount, ticket) => laneCount + ticket.openAttentionCount, 0), 0);
+		const overWip = LANE_ORDER.flatMap((laneId) => {
+			const limit = SOFT_WIP_LIMITS[laneId];
+			return limit && lanes[laneId].length > limit ? [`${laneLabel(laneId)} ${lanes[laneId].length}/${limit}`] : [];
+		});
+		const summary = `hot: ${blocked} blocked (${userWaiting} user) · ${review} review · ${attention} attention · ${active} active agents${overWip.length > 0 ? ` · WIP ${overWip.join(", ")}` : ""}`;
+		return truncateToWidth(this.theme.fg(attention > 0 || blocked > 0 ? "accent" : "muted", summary), width);
 	}
 
 	render(width: number): string[] {
@@ -283,12 +368,13 @@ class AgentsBoardComponent {
 		const separator = " │ ";
 		const laneWidth = Math.max(14, Math.floor((width - separator.length * (LANE_ORDER.length - 1)) / LANE_ORDER.length));
 		const lines: string[] = [];
-		lines.push(truncateToWidth(`${this.theme.fg("accent", this.theme.bold("tmux tasks board"))} · scope:${this.state.scope}`, width));
+		lines.push(truncateToWidth(`${this.theme.fg("accent", this.theme.bold("kanban task board"))} · scope:${this.state.scope}`, width));
+		lines.push(this.renderBoardSummary(width));
 		lines.push(
 			truncateToWidth(
 				this.theme.fg(
 					"dim",
-					"auto-refresh 5s · ←→ lanes · ↑↓ tasks · enter inspect · s spawn · m move · n new · o open agent · x stop agent · r reply · c capture · y sync · f scope · esc close",
+					"keys: ←→ lanes · ↑↓ tasks · enter inspect · s spawn · m move · n new · o focus · r reply · x stop · c capture · y sync · f scope · esc close",
 				),
 				width,
 			),

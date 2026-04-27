@@ -8,20 +8,28 @@ import { StringEnum } from "@mariozechner/pi-ai";
 import { Type } from "@sinclair/typebox";
 import { randomUUID } from "node:crypto";
 import { getTmuxAgentsDb } from "./db.js";
-import { readRpcBridgeStatus } from "./rpc-client.js";
+import { getRpcBridgeSocketPath, readRpcBridgeStatus, sendRpcBridgeCommand } from "./rpc-client.js";
 import { TASK_STATES, TASK_WAITING_ON_VALUES } from "./task-types.js";
 import { applyChildPublishToLinkedTask } from "./task-registry.js";
 import {
+	createAgentAttentionItemV2,
 	createAgentEvent,
 	createAgentMessage,
 	createAttentionItem,
+	createMessageWithRecipients,
 	getAgent,
+	listActiveAgentEdges,
 	listMessagesForRecipient,
+	markAgentMessageRecipientsByIds,
+	markAgentMessageRecipientsByMessageIds,
 	markAgentMessages,
+	resolveAgentActorContext,
 	updateAgent,
 } from "./registry.js";
 import type {
 	AgentMessageRecord,
+	AgentRecipientRef,
+	AgentThreadKind,
 	AgentTransportState,
 	ChildDownwardDeliveryMode,
 	ChildRuntimeEnvironment,
@@ -141,7 +149,9 @@ function expectedHandlingLines(actionPolicy: DownwardMessageActionPolicy): strin
 function formatDownwardMessage(message: AgentMessageRecord): string {
 	const payload = (message.payload && typeof message.payload === "object" ? message.payload : {}) as DownwardMessagePayload;
 	const actionPolicy = payload.actionPolicy ?? defaultDownwardActionPolicy(message.kind);
-	const lines = [`[Coordinator ${message.kind} · action ${actionPolicy}]`];
+	const sender = payload.senderAgentId ?? message.senderAgentId ?? "root";
+	const route = payload.routeKind ? ` · route ${payload.routeKind}` : "";
+	const lines = [`[Hierarchy ${message.kind} · from ${sender} · action ${actionPolicy}${route}]`];
 	if (payload.summary) lines.push(payload.summary);
 	if (payload.details) lines.push("", payload.details);
 	if (Array.isArray(payload.files) && payload.files.length > 0) {
@@ -167,6 +177,168 @@ function getDeliveryOptions(message: AgentMessageRecord): { deliverAs: "steer" |
 		case "immediate":
 		default:
 			return { deliverAs: "steer", triggerTurn: true };
+	}
+}
+
+interface ParentPublishDeliveryResult {
+	attempted: boolean;
+	delivered: number;
+	deferred: number;
+	transportState: AgentTransportState | "missing";
+	legacyMessageIds: string[];
+	v2AckedMessageIds: string[];
+	error?: string;
+	reason?: string;
+}
+
+function getV2Payload(message: AgentMessageRecord): DownwardMessagePayload | null {
+	return message.payload && typeof message.payload === "object" ? (message.payload as DownwardMessagePayload) : null;
+}
+
+function markV2RecipientStatusForLegacyMessage(
+	db: ReturnType<typeof getTmuxAgentsDb>,
+	message: AgentMessageRecord,
+	status: "read" | "acked",
+	recipientAgentId: string,
+	transportKind: "rpc_bridge" | "poll_fallback",
+): string | null {
+	const payload = getV2Payload(message);
+	if (payload?.v2RecipientRowId) {
+		markAgentMessageRecipientsByIds(db, [payload.v2RecipientRowId], status, { recipientAgentId, transportKind });
+		return payload.v2MessageId ?? null;
+	}
+	if (payload?.v2MessageId) {
+		markAgentMessageRecipientsByMessageIds(db, [payload.v2MessageId], status, { recipientAgentId, transportKind });
+		return payload.v2MessageId;
+	}
+	return null;
+}
+
+async function deliverQueuedParentMessagesViaBridge(parentAgentId: string): Promise<ParentPublishDeliveryResult> {
+	const db = getTmuxAgentsDb();
+	const queued = listMessagesForRecipient(db, parentAgentId, { targetKind: "child", limit: 50 });
+	const legacyMessageIds = queued.map((message) => message.id);
+	const parent = getAgent(db, parentAgentId);
+	if (!parent) {
+		return { attempted: false, delivered: 0, deferred: queued.length, transportState: "missing", legacyMessageIds, v2AckedMessageIds: [], reason: "Parent agent was not found." };
+	}
+	if (queued.length === 0) {
+		return { attempted: false, delivered: 0, deferred: 0, transportState: parent.transportState, legacyMessageIds, v2AckedMessageIds: [] };
+	}
+	if (parent.transportKind !== "rpc_bridge") {
+		return {
+			attempted: false,
+			delivered: 0,
+			deferred: queued.length,
+			transportState: parent.transportState,
+			legacyMessageIds,
+			v2AckedMessageIds: [],
+			reason: "parent agent is using poll-fallback delivery",
+		};
+	}
+	const socketPath = getRpcBridgeSocketPath(parent);
+	if (!socketPath) {
+		const now = Date.now();
+		updateAgent(db, parent.id, {
+			transportKind: "rpc_bridge",
+			transportState: "fallback",
+			bridgeUpdatedAt: now,
+			bridgeLastError: "RPC bridge socket is unavailable for parent-routed publish delivery.",
+			updatedAt: now,
+		});
+		createAgentEvent(db, {
+			id: randomUUID(),
+			agentId: parent.id,
+			eventType: "parent_publish_live_deferred",
+			summary: "RPC bridge socket is unavailable for parent-routed publish delivery.",
+			payload: { queued: queued.length, legacyMessageIds },
+		});
+		return {
+			attempted: true,
+			delivered: 0,
+			deferred: queued.length,
+			transportState: "fallback",
+			legacyMessageIds,
+			v2AckedMessageIds: [],
+			reason: "RPC bridge socket is unavailable.",
+		};
+	}
+
+	let isStreaming = false;
+	let stateProbeError: string | null = null;
+	try {
+		const stateResponse = await sendRpcBridgeCommand(socketPath, { command: "get_state" }, 2500);
+		if (stateResponse.success && stateResponse.data && typeof stateResponse.data === "object") {
+			isStreaming = Boolean((stateResponse.data as { isStreaming?: boolean }).isStreaming);
+		}
+	} catch (error) {
+		stateProbeError = error instanceof Error ? error.message : String(error);
+		isStreaming = true;
+	}
+
+	let delivered = 0;
+	const v2AckedMessageIds: string[] = [];
+	try {
+		for (const message of queued) {
+			const formatted = formatDownwardMessage(message);
+			const bridgeCommand = !isStreaming
+				? { command: "prompt" as const, message: formatted }
+				: message.deliveryMode === "follow_up" || message.deliveryMode === "idle_only"
+					? { command: "follow_up" as const, message: formatted }
+					: { command: "steer" as const, message: formatted };
+			const response = await sendRpcBridgeCommand(socketPath, bridgeCommand, 5000);
+			if (!response.success) throw new Error(response.error ?? `RPC bridge rejected ${message.kind}.`);
+			markAgentMessages(db, [message.id], "delivered");
+			markAgentMessages(db, [message.id], "acked");
+			const ackedV2MessageId = markV2RecipientStatusForLegacyMessage(db, message, "acked", parent.id, "rpc_bridge");
+			if (ackedV2MessageId) v2AckedMessageIds.push(ackedV2MessageId);
+			createAgentEvent(db, {
+				id: randomUUID(),
+				agentId: parent.id,
+				eventType: "parent_publish_live_delivered",
+				summary: getV2Payload(message)?.summary ?? `${message.kind} delivered via RPC bridge`,
+				payload: { messageId: message.id, v2MessageId: ackedV2MessageId, bridgeCommand: bridgeCommand.command, deliveryMode: message.deliveryMode },
+			});
+			delivered += 1;
+			isStreaming = true;
+		}
+		const now = Date.now();
+		updateAgent(db, parent.id, {
+			transportKind: "rpc_bridge",
+			transportState: "live",
+			bridgeSocketPath: socketPath,
+			bridgeConnectedAt: now,
+			bridgeUpdatedAt: now,
+			bridgeLastError: stateProbeError,
+			updatedAt: now,
+		});
+		return { attempted: true, delivered, deferred: Math.max(0, queued.length - delivered), transportState: "live", legacyMessageIds, v2AckedMessageIds };
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		const now = Date.now();
+		updateAgent(db, parent.id, {
+			transportKind: "rpc_bridge",
+			transportState: "fallback",
+			bridgeUpdatedAt: now,
+			bridgeLastError: message,
+			updatedAt: now,
+		});
+		createAgentEvent(db, {
+			id: randomUUID(),
+			agentId: parent.id,
+			eventType: "parent_publish_live_deferred",
+			summary: message,
+			payload: { error: message, queued: Math.max(0, queued.length - delivered), delivered, legacyMessageIds },
+		});
+		return {
+			attempted: true,
+			delivered,
+			deferred: Math.max(0, queued.length - delivered),
+			transportState: "fallback",
+			legacyMessageIds,
+			v2AckedMessageIds,
+			error: message,
+		};
 	}
 }
 
@@ -274,6 +446,37 @@ function attentionPriority(kind: SubagentPublishPayload["kind"]): number | null 
 	}
 }
 
+function publishThreadKind(kind: SubagentPublishPayload["kind"]): AgentThreadKind {
+	switch (kind) {
+		case "blocked":
+			return "blocker";
+		case "question":
+		case "question_for_user":
+			return "question";
+		case "complete":
+			return "handoff";
+		case "milestone":
+		case "note":
+		default:
+			return "task_update";
+	}
+}
+
+function resolvePublishRecipient(db: ReturnType<typeof getTmuxAgentsDb>, environment: ChildRuntimeEnvironment, kind: SubagentPublishPayload["kind"]): AgentRecipientRef {
+	if (kind === "question_for_user") return { kind: "user" };
+	const parentEdge = listActiveAgentEdges(db, { childAgentId: environment.childId, edgeType: "reports_to", limit: 1 })[0] ?? null;
+	if (parentEdge) return { kind: "agent", agentId: parentEdge.parentAgentId };
+	return { kind: "root" };
+}
+
+function recipientLabel(recipient: AgentRecipientRef): string {
+	return recipient.kind === "agent" ? `agent:${recipient.agentId}` : recipient.kind;
+}
+
+function legacyPublishTargetKind(kind: SubagentPublishPayload["kind"]): AgentMessageRecord["targetKind"] {
+	return kind === "question_for_user" ? "user" : "primary";
+}
+
 function updateStatus(
 	environment: ChildRuntimeEnvironment,
 	_ctx: ExtensionContext,
@@ -348,50 +551,120 @@ function publishChildUpdate(
 	kind: SubagentPublishPayload["kind"],
 	payload: Omit<SubagentPublishPayload, "kind">,
 	state: RuntimeStatusSnapshot["state"],
-): void {
+): {
+	recipient: AgentRecipientRef;
+	messageId: string;
+	routeKind: string;
+	recipientRowIds: string[];
+	legacyMessageIds: string[];
+} {
 	const db = getTmuxAgentsDb();
 	const fullPayload: SubagentPublishPayload = { kind, ...payload };
 	const agent = getAgent(db, environment.childId);
+	if (!agent) throw new Error(`Cannot publish from unknown child agent ${environment.childId}.`);
+	const actor = resolveAgentActorContext(db, { currentAgentId: environment.childId });
+	const recipient = resolvePublishRecipient(db, environment, kind);
 	createAgentEvent(db, {
 		id: randomUUID(),
 		agentId: environment.childId,
 		eventType: kind,
 		summary: payload.summary,
-		payload: fullPayload,
-	});
-	const messageId = randomUUID();
-	const targetKind = kind === "question_for_user" ? "user" : "primary";
-	createAgentMessage(db, {
-		id: messageId,
-		threadId: environment.childId,
-		senderAgentId: environment.childId,
-		recipientAgentId: environment.parentAgentId,
-		targetKind,
-		kind,
-		deliveryMode: kind === "blocked" || kind === "question" || kind === "question_for_user" ? "immediate" : "follow_up",
-		payload: fullPayload,
-		status: "queued",
+		payload: { ...fullPayload, recipient },
 	});
 	const priority = attentionPriority(kind);
-	if (priority !== null) {
-		const attentionKind = kind as "question" | "question_for_user" | "blocked" | "complete";
-		createAttentionItem(db, {
-			id: messageId,
-			messageId,
-			agentId: environment.childId,
+	const deliveryMode = kind === "blocked" || kind === "question" || kind === "question_for_user" ? "immediate" : "follow_up";
+	const messageResult = createMessageWithRecipients(db, {
+		actor,
+		recipients: [{ ...recipient, deliveryMode, transportKind: recipient.kind === "agent" ? "inbox" : null }],
+		orgId: agent.orgId,
+		projectKey: agent.projectKey,
+		taskId: environment.taskId,
+		subjectAgentId: environment.childId,
+		kind,
+		summary: payload.summary,
+		bodyMarkdown: payload.details ?? null,
+		payload: fullPayload,
+		priority: priority ?? 3,
+		requiresResponse: priority !== null,
+		thread: { kind: publishThreadKind(kind), title: payload.summary },
+	});
+	const routeKind = messageResult.routes[0]?.routeKind ?? "multi_hop";
+	const v2RecipientRowId = messageResult.recipients[0]?.id;
+	const v2Payload: SubagentPublishPayload & DownwardMessagePayload = {
+		...fullPayload,
+		v2MessageId: messageResult.message.id,
+		v2RecipientRowId,
+		senderKind: "agent",
+		senderAgentId: environment.childId,
+		routeKind,
+	};
+	const legacyMessageIds: string[] = [];
+	if (recipient.kind === "agent") {
+		const routedMessageId = randomUUID();
+		legacyMessageIds.push(routedMessageId);
+		createAgentMessage(db, {
+			id: routedMessageId,
 			threadId: environment.childId,
-			projectKey: agent?.projectKey ?? "unknown",
-			spawnSessionId: environment.spawnSessionId,
-			spawnSessionFile: environment.spawnSessionFile,
-			audience: targetKind === "user" ? "user" : "coordinator",
-			kind: attentionKind,
-			priority,
-			state: kind === "question_for_user" ? "waiting_on_user" : "waiting_on_coordinator",
-			summary: payload.summary,
-			payload: fullPayload,
+			senderAgentId: environment.childId,
+			recipientAgentId: recipient.agentId,
+			targetKind: "child",
+			kind,
+			deliveryMode,
+			payload: v2Payload,
+			status: "queued",
+		});
+	} else {
+		const legacyMessageId = randomUUID();
+		legacyMessageIds.push(legacyMessageId);
+		createAgentMessage(db, {
+			id: legacyMessageId,
+			threadId: environment.childId,
+			senderAgentId: environment.childId,
+			recipientAgentId: null,
+			targetKind: legacyPublishTargetKind(kind),
+			kind,
+			deliveryMode,
+			payload: v2Payload,
+			status: "queued",
 		});
 	}
-	appendRunEvent(environment, kind, payload.summary, fullPayload);
+	if (priority !== null) {
+		const attentionKind = kind as "question" | "question_for_user" | "blocked" | "complete";
+		if (recipient.kind !== "agent") {
+			const legacyMessageId = legacyMessageIds[0] ?? messageResult.message.id;
+			createAttentionItem(db, {
+				id: legacyMessageId,
+				messageId: legacyMessageId,
+				agentId: environment.childId,
+				threadId: environment.childId,
+				projectKey: agent.projectKey,
+				spawnSessionId: environment.spawnSessionId,
+				spawnSessionFile: environment.spawnSessionFile,
+				audience: recipient.kind === "user" ? "user" : "coordinator",
+				kind: attentionKind,
+				priority,
+				state: recipient.kind === "user" ? "waiting_on_user" : "waiting_on_coordinator",
+				summary: payload.summary,
+				payload: v2Payload,
+			});
+		}
+		createAgentAttentionItemV2(db, {
+			messageId: messageResult.message.id,
+			recipientRowId: messageResult.recipients[0]?.id ?? null,
+			orgId: messageResult.message.orgId,
+			projectKey: agent.projectKey,
+			taskId: environment.taskId,
+			subjectAgentId: environment.childId,
+			ownerKind: recipient.kind,
+			ownerAgentId: recipient.kind === "agent" ? recipient.agentId : null,
+			kind: attentionKind,
+			priority,
+			state: "waiting_on_owner",
+			summary: payload.summary,
+			payload: v2Payload,
+		});
+	}
+	appendRunEvent(environment, kind, payload.summary, { ...v2Payload, recipient });
 	const dbAgent = getAgent(db, environment.childId);
 	const dbBridgeOwnedTerminal = !!dbAgent && BRIDGE_TERMINAL_STATES.has(dbAgent.state as RuntimeStatusSnapshot["state"]);
 	// Also honor on-disk latest-status.json when the bridge (source === "rpc_bridge")
@@ -429,6 +702,13 @@ function publishChildUpdate(
 		reviewSummary: payload.reviewSummary,
 		finalSummary: payload.finalSummary,
 	});
+	return {
+		recipient,
+		messageId: messageResult.message.id,
+		routeKind,
+		recipientRowIds: messageResult.recipients.map((item) => item.id),
+		legacyMessageIds,
+	};
 }
 
 export function registerChildRuntime(pi: ExtensionAPI, environment: ChildRuntimeEnvironment): void {
@@ -437,6 +717,8 @@ export function registerChildRuntime(pi: ExtensionAPI, environment: ChildRuntime
 	let downwardPoll: ReturnType<typeof setInterval> | undefined;
 	let downwardDeliveryMode: ChildDownwardDeliveryMode = environment.transportKind === "rpc_bridge" ? "rpc_bridge" : "poll_fallback";
 	const pendingAckIds = new Set<string>();
+	const pendingV2AckRecipientRowIds = new Set<string>();
+	const pendingV2AckMessageIds = new Set<string>();
 	let statusSnapshot: RuntimeStatusSnapshot = {
 		agentId: environment.childId,
 		profile: environment.profile,
@@ -503,6 +785,28 @@ export function registerChildRuntime(pi: ExtensionAPI, environment: ChildRuntime
 		return downwardDeliveryMode;
 	}
 
+	function ackPendingPollFallbackDeliveries(): void {
+		const db = getTmuxAgentsDb();
+		if (pendingAckIds.size > 0) {
+			markAgentMessages(db, [...pendingAckIds], "acked");
+			pendingAckIds.clear();
+		}
+		if (pendingV2AckRecipientRowIds.size > 0) {
+			markAgentMessageRecipientsByIds(db, [...pendingV2AckRecipientRowIds], "acked", {
+				recipientAgentId: environment.childId,
+				transportKind: "poll_fallback",
+			});
+			pendingV2AckRecipientRowIds.clear();
+		}
+		if (pendingV2AckMessageIds.size > 0) {
+			markAgentMessageRecipientsByMessageIds(db, [...pendingV2AckMessageIds], "acked", {
+				recipientAgentId: environment.childId,
+				transportKind: "poll_fallback",
+			});
+			pendingV2AckMessageIds.clear();
+		}
+	}
+
 	async function drainDownwardMessages(): Promise<void> {
 		const db = getTmuxAgentsDb();
 		const messages = listMessagesForRecipient(db, environment.childId, { targetKind: "child", limit: 25 });
@@ -518,9 +822,25 @@ export function registerChildRuntime(pi: ExtensionAPI, environment: ChildRuntime
 					getDeliveryOptions(message),
 				);
 				markAgentMessages(db, [message.id], "delivered");
+				const v2Payload = getV2Payload(message);
+				if (v2Payload?.v2RecipientRowId) {
+					markAgentMessageRecipientsByIds(db, [v2Payload.v2RecipientRowId], "read", {
+						recipientAgentId: environment.childId,
+						transportKind: "poll_fallback",
+					});
+					pendingV2AckRecipientRowIds.add(v2Payload.v2RecipientRowId);
+				} else if (v2Payload?.v2MessageId) {
+					markAgentMessageRecipientsByMessageIds(db, [v2Payload.v2MessageId], "read", {
+						recipientAgentId: environment.childId,
+						transportKind: "poll_fallback",
+					});
+					pendingV2AckMessageIds.add(v2Payload.v2MessageId);
+				}
 				pendingAckIds.add(message.id);
 				appendRunEvent(environment, "downward_delivered", `Delivered ${message.kind}`, {
 					messageId: message.id,
+					v2MessageId: v2Payload?.v2MessageId ?? null,
+					v2RecipientRowId: v2Payload?.v2RecipientRowId ?? null,
 					deliveryMode: "poll_fallback",
 				});
 			} catch (error) {
@@ -580,7 +900,16 @@ export function registerChildRuntime(pi: ExtensionAPI, environment: ChildRuntime
 						: params.kind === "complete"
 							? "done"
 							: "running";
-			publishChildUpdate(environment, params.kind, payload, nextState);
+			const publishResult = publishChildUpdate(environment, params.kind, payload, nextState);
+			const parentDelivery = publishResult.recipient.kind === "agent" ? await deliverQueuedParentMessagesViaBridge(publishResult.recipient.agentId) : null;
+			const readReceiptStatus = parentDelivery?.v2AckedMessageIds.includes(publishResult.messageId) ? "acked" : "queued";
+			const deliveryText = parentDelivery
+				? parentDelivery.delivered > 0
+					? `; delivered ${parentDelivery.delivered} parent message${parentDelivery.delivered === 1 ? "" : "s"} via RPC bridge`
+					: parentDelivery.attempted
+						? `; parent live delivery deferred (${parentDelivery.error ?? parentDelivery.reason ?? parentDelivery.transportState})`
+						: `; queued for parent inbox/poll-fallback (${parentDelivery.reason ?? "pending"})`
+				: "";
 			const clearLastErrorWhenResolvingBlock =
 				(params.kind === "milestone" || params.kind === "note" || params.kind === "complete") &&
 				(statusSnapshot.state === "blocked" || !!statusSnapshot.lastError);
@@ -601,8 +930,18 @@ export function registerChildRuntime(pi: ExtensionAPI, environment: ChildRuntime
 			);
 			if (params.kind === "complete") completePublished = true;
 			return {
-				content: [{ type: "text", text: `Published ${params.kind}: ${params.summary}` }],
-				details: { kind: params.kind, childId: environment.childId },
+				content: [{ type: "text", text: `Published ${params.kind} from agent:${environment.childId} to ${recipientLabel(publishResult.recipient)} via ${publishResult.routeKind}${deliveryText}: ${params.summary}` }],
+				details: {
+					kind: params.kind,
+					childId: environment.childId,
+					sender: { kind: "agent", agentId: environment.childId },
+					recipient: publishResult.recipient,
+					messageId: publishResult.messageId,
+					routeKind: publishResult.routeKind,
+					readReceipt: { status: readReceiptStatus, recipientRowIds: publishResult.recipientRowIds },
+					legacyMessageIds: publishResult.legacyMessageIds,
+					parentDelivery,
+				},
 			};
 		},
 	});
@@ -634,10 +973,7 @@ export function registerChildRuntime(pi: ExtensionAPI, environment: ChildRuntime
 
 	pi.on("agent_start", async (_event, ctx) => {
 		const resolvedMode = resolveDownwardDeliveryMode(environment);
-		if (pendingAckIds.size > 0) {
-			markAgentMessages(getTmuxAgentsDb(), [...pendingAckIds], "acked");
-			pendingAckIds.clear();
-		}
+		ackPendingPollFallbackDeliveries();
 		if (startedPublished) return;
 		startedPublished = true;
 		createAgentEvent(getTmuxAgentsDb(), {
@@ -749,7 +1085,7 @@ export function registerChildRuntime(pi: ExtensionAPI, environment: ChildRuntime
 		if (completePublished) return;
 		if (statusSnapshot.state === "blocked" || statusSnapshot.state === "waiting") return;
 		const completionSummary = truncateText(finalText || statusSnapshot.lastAssistantPreview || "Task completed.", 400);
-		publishChildUpdate(
+		const publishResult = publishChildUpdate(
 			environment,
 			"complete",
 			{
@@ -759,6 +1095,9 @@ export function registerChildRuntime(pi: ExtensionAPI, environment: ChildRuntime
 			},
 			"done",
 		);
+		if (publishResult.recipient.kind === "agent") {
+			await deliverQueuedParentMessagesViaBridge(publishResult.recipient.agentId);
+		}
 		completePublished = true;
 		const resolvedMode = resolveDownwardDeliveryMode(environment);
 		statusSnapshot = updateStatus(
@@ -779,13 +1118,15 @@ export function registerChildRuntime(pi: ExtensionAPI, environment: ChildRuntime
 	pi.on("session_shutdown", async (_event, ctx) => {
 		if (downwardPoll) clearInterval(downwardPoll);
 		downwardPoll = undefined;
-		if (pendingAckIds.size > 0) {
+		if (pendingAckIds.size > 0 || pendingV2AckRecipientRowIds.size > 0 || pendingV2AckMessageIds.size > 0) {
 			try {
-				markAgentMessages(getTmuxAgentsDb(), [...pendingAckIds], "acked");
+				ackPendingPollFallbackDeliveries();
 			} catch {
 				// Best-effort: shutdown path must not throw.
 			}
 			pendingAckIds.clear();
+			pendingV2AckRecipientRowIds.clear();
+			pendingV2AckMessageIds.clear();
 		}
 		ctx.ui.setStatus("tmux-agents-child", undefined);
 	});

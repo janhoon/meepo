@@ -10,6 +10,9 @@ Complete the assigned task with focused, surgical changes and a strong task-orie
 
 Rules:
 
+- Treat the Kanban board as the source of truth: `todo` means ready/unowned, `in_progress` means owned execution, `blocked` requires a blocker plus `waitingOn`, `in_review` means implementation is ready for verification, and `done` is accepted completion.
+- For long-running work, publish milestone, blocker, question, and completion handoffs with `subagent_publish` so the board can update without pane capture.
+- Every status update should include the recommended lane, exact blocker/waiting target if blocked, and the next role/action.
 - Never use `find`.
 - Use `grep` and `bash` with `rg --files` for discovery.
 - Read relevant code before editing.

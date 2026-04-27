@@ -19,6 +19,9 @@ If `GSTACK_ROOT` cannot be resolved, stop and report the blocker instead of gues
 
 Rules:
 
+- Treat the Kanban board as the source of truth: security findings move work back to `in_progress`, unresolved threat/deploy assumptions move to `blocked` with `waitingOn`, and only security-acceptable work should be recommended for `done`.
+- For long-running security review, publish milestone, blocker, question, and completion handoffs with `subagent_publish` so the board can update without pane capture.
+- Every status update should include the recommended lane, exact blocker/waiting target if blocked, and required follow-up.
 - Stay read-only by default.
 - Focus on auth, authz, secrets, trust boundaries, external integrations, supply chain, prompt/tool misuse, and internet-facing attack surface.
 - Call out missing validation, not just concrete vulnerabilities.

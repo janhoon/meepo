@@ -19,6 +19,16 @@ const ALLOWED_BUILTIN_TOOLS = new Set([
 	"task_move",
 	"task_note",
 	"task_attention",
+	"subagent_list",
+	"subagent_get",
+	"subagent_inbox",
+	"subagent_attention",
+	"subagent_spawn",
+	"subagent_message",
+	"subagent_stop",
+	"subagent_cleanup",
+	"web_search",
+	"code_search",
 ]);
 
 function isDirectory(path: string): boolean {

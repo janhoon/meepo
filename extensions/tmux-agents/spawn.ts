@@ -4,7 +4,18 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { ensureTmuxAgentsRuntimePaths, getSubagentRunPaths, type SubagentRunPaths } from "./paths.js";
-import { createAgent, createAgentEvent, createArtifact, updateAgent } from "./registry.js";
+import {
+	createAgent,
+	createAgentEvent,
+	createAgentHierarchyEdge,
+	createArtifact,
+	ensureAgentHierarchySelfClosure,
+	getAgent,
+	getAgentOrg,
+	getAgentRole,
+	updateAgent,
+	upsertAgentOrg,
+} from "./registry.js";
 import { getTask } from "./task-registry.js";
 import type { TaskRecord } from "./task-types.js";
 import type {
@@ -348,12 +359,84 @@ function spawnTmuxWindow(launchScript: string, title: string, agentId: string): 
 	);
 }
 
+function roleKeyForProfile(profileName: string): string {
+	return profileName === "principal-engineer" ? "reviewer" : profileName;
+}
+
+function existingRoleKeyForProfile(profileName: string): string | null {
+	const db = getTmuxAgentsDb();
+	const roleKey = roleKeyForProfile(profileName);
+	return getAgentRole(db, roleKey) ? roleKey : null;
+}
+
+function deterministicOrgId(projectKey: string, spawnSessionId: string | null, spawnSessionFile: string | null): string {
+	return `org:spawn:${projectKey}:session:${spawnSessionId ?? ""}:file:${spawnSessionFile ?? ""}`;
+}
+
+function ensureSpawnOrg(input: SpawnSubagentInput, projectKey: string, parentAgentId: string | null): string {
+	const db = getTmuxAgentsDb();
+	const parent = parentAgentId ? getAgent(db, parentAgentId) : null;
+	const orgId = parent?.orgId ?? deterministicOrgId(projectKey, input.spawnSessionId, input.spawnSessionFile);
+	const existingOrg = getAgentOrg(db, orgId);
+	upsertAgentOrg(db, {
+		id: orgId,
+		projectKey,
+		rootAgentId: existingOrg?.rootAgentId ?? (parent && !parent.parentAgentId ? parent.id : null),
+		title: existingOrg?.title ?? (parent
+			? `Hierarchy for ${projectKey} under ${parent.id}`
+			: `Hierarchy for ${projectKey}${input.spawnSessionId ? ` session ${input.spawnSessionId}` : ""}`),
+		metadata: existingOrg?.metadata ?? { source: "spawn", spawnSessionId: input.spawnSessionId, spawnSessionFile: input.spawnSessionFile },
+	});
+	return orgId;
+}
+
+function ensureAgentRoleKey(agentId: string): string | null {
+	const db = getTmuxAgentsDb();
+	const agent = getAgent(db, agentId);
+	if (!agent) throw new Error(`Unknown parent agent id "${agentId}".`);
+	if (agent.roleKey) return agent.roleKey;
+	const inferredRoleKey = existingRoleKeyForProfile(agent.profile);
+	if (!inferredRoleKey) return null;
+	updateAgent(db, agent.id, { roleKey: inferredRoleKey, updatedAt: Date.now() });
+	return inferredRoleKey;
+}
+
+function assertSpawnEdgePolicy(parentAgentId: string, childRoleKey: string | null): void {
+	const db = getTmuxAgentsDb();
+	const parentRoleKey = ensureAgentRoleKey(parentAgentId);
+	if (!parentRoleKey || !childRoleKey) {
+		throw new Error(
+			`Cannot create hierarchy edge ${parentAgentId} -> child because ${!parentRoleKey ? "parent" : "child"} role is missing from agent_roles.`,
+		);
+	}
+	const row = db
+		.prepare(
+			`SELECT id, allow_spawn
+			 FROM agent_role_edge_policies
+			 WHERE parent_role_key = ?
+				AND child_role_key = ?
+				AND edge_type = 'reports_to'
+			 LIMIT 1`,
+		)
+		.get(parentRoleKey, childRoleKey) as { id: string; allow_spawn: number } | undefined;
+	if (!row) {
+		throw new Error(`No reports_to role edge policy allows ${parentRoleKey} to spawn ${childRoleKey}.`);
+	}
+	if (Number(row.allow_spawn) === 0) {
+		throw new Error(`Role edge policy ${row.id} does not allow spawning ${childRoleKey} under ${parentRoleKey}.`);
+	}
+}
+
 export function spawnSubagent(input: SpawnSubagentInput): SpawnSubagentResult {
 	const now = Date.now();
 	const agentId = input.agentId ?? `sa_${now.toString(36)}_${randomUUID().slice(0, 8)}`;
 	const spawnCwd = resolve(input.spawnCwd);
 	const tools = [...input.tools];
 	const db = getTmuxAgentsDb();
+	const projectKey = getProjectKey(spawnCwd);
+	const childRoleKey = existingRoleKeyForProfile(input.profile.name);
+	if (input.parentAgentId) assertSpawnEdgePolicy(input.parentAgentId, childRoleKey);
+	const orgId = ensureSpawnOrg(input, projectKey, input.parentAgentId);
 	const createRunOptions: CreateRunArtifactsOptions = {
 		agentId,
 		title: input.title,
@@ -376,10 +459,14 @@ export function spawnSubagent(input: SpawnSubagentInput): SpawnSubagentResult {
 	const agentRecord: CreateAgentInput = {
 		id: agentId,
 		parentAgentId: input.parentAgentId,
+		orgId,
+		roleKey: childRoleKey,
+		spawnedByAgentId: input.spawnedByAgentId ?? input.parentAgentId,
+		hierarchyState: "attached",
 		spawnSessionId: input.spawnSessionId,
 		spawnSessionFile: input.spawnSessionFile,
 		spawnCwd,
-		projectKey: getProjectKey(spawnCwd),
+		projectKey,
 		taskId: input.taskId,
 		profile: input.profile.name,
 		title: input.title,
@@ -400,6 +487,37 @@ export function spawnSubagent(input: SpawnSubagentInput): SpawnSubagentResult {
 		updatedAt: now,
 	};
 	createAgent(db, agentRecord);
+	if (input.parentAgentId) {
+		createAgentHierarchyEdge(db, {
+			orgId,
+			parentAgentId: input.parentAgentId,
+			childAgentId: agentId,
+			edgeType: "reports_to",
+			taskId: input.taskId,
+			createdByAgentId: input.spawnedByAgentId ?? null,
+			createdByKind: input.createdByKind ?? (input.spawnedByAgentId ? "agent" : "root"),
+			reason: input.spawnedByAgentId ? "Spawned by child session delegation." : "Spawned by root/main session.",
+			metadata: { source: "spawnSubagent", profile: input.profile.name },
+			createdAt: now,
+			updatedAt: now,
+		});
+	} else {
+		ensureAgentHierarchySelfClosure(db, orgId, agentId, now);
+		const org = getAgentOrg(db, orgId);
+		if (org && !org.rootAgentId) {
+			upsertAgentOrg(db, {
+				id: org.id,
+				projectKey: org.projectKey,
+				rootAgentId: agentId,
+				title: org.title,
+				state: org.state,
+				metadata: org.metadata,
+				createdAt: org.createdAt,
+				updatedAt: now,
+				archivedAt: org.archivedAt,
+			});
+		}
+	}
 	createAgentEvent(db, {
 		id: randomUUID(),
 		agentId,

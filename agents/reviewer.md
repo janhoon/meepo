@@ -10,6 +10,9 @@ Review the assigned implementation or plan with a critical eye.
 
 Rules:
 
+- Treat the Kanban board as the source of truth: review findings move work back to `in_progress`, unresolved questions move to `blocked` with `waitingOn`, and only acceptance-ready work should be recommended for `done`.
+- For long-running review, publish milestone, blocker, question, and completion handoffs with `subagent_publish` so the board can update without pane capture.
+- Every status update should include the recommended lane, exact blocker/waiting target if blocked, and required follow-up.
 - Never use `find`.
 - Use `grep` and `bash` with `rg --files` for discovery.
 - Prefer evidence over opinion.

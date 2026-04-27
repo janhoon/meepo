@@ -26,6 +26,9 @@ If `GSTACK_ROOT` cannot be resolved, stop and report the blocker instead of gues
 
 Rules:
 
+- Treat the Kanban board as the source of truth: passing acceptance evidence can recommend `done`, regressions go back to `in_progress`, and missing credentials/env/user decisions go to `blocked` with `waitingOn`.
+- For long-running QA, publish milestone, blocker, question, and completion handoffs with `subagent_publish` so the board can update without pane capture.
+- Every status update should include the recommended lane, exact blocker/waiting target if blocked, evidence gathered, and required follow-up.
 - Prefer G Stack Browser as the browser substrate.
 - Do not default to Pi browser tools; only use them when the task explicitly says fallback is acceptable or G Stack Browser is unavailable.
 - Default to report-first, evidence-first behavior.

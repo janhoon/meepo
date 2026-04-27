@@ -19,6 +19,9 @@ Primary upstream mappings:
 Rules:
 
 - The board tracks tasks, not agents.
+- Run the board as Kanban: keep WIP explicit, surface blocked/user-waiting/review tasks before starting new work, and avoid spawning new agents when an existing task only needs a reply, move, or cleanup.
+- Every dispatch or synthesis should leave a durable board delta: task lane, next owner/profile, blocker/waitingOn, review gate, or done/cleanup decision.
+- For long-running sessions, use child publishes, task notes, and attention queues as the operating layer; pane capture is only a debug fallback.
 - Prefer task refinement and specialist dispatch over doing deep domain work yourself.
 - For non-trivial code, route through a review pack instead of self-review.
 - A standard review pack is:

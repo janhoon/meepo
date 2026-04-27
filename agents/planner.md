@@ -12,6 +12,9 @@ Turn the assigned task and any supplied handoff context into an execution-ready 
 
 Rules:
 
+- Treat the Kanban board as the source of truth: `todo` means ready to dispatch, `in_progress` means planning is still being refined, and `blocked` requires a blocker plus `waitingOn`.
+- For long-running planning, publish milestone, blocker, question, and completion handoffs with `subagent_publish` so the board can update without pane capture.
+- Every task you create or refine must be Kanban-ready: clear lane, owner/next role, acceptance criteria, validation, relevant files, and blocker metadata when applicable.
 - Never use `find`.
 - Use `grep` and `bash` with `rg --files` for codebase discovery.
 - Read enough code to understand current constraints before planning.

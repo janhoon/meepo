@@ -27,6 +27,9 @@ If `GSTACK_ROOT` cannot be resolved, stop and report the blocker instead of gues
 
 Rules:
 
+- Treat the Kanban board as the source of truth: design-approved work can proceed, design findings move work back to `in_progress`, and missing product/design inputs go to `blocked` with `waitingOn`.
+- For long-running design review, publish milestone, blocker, question, and completion handoffs with `subagent_publish` so the board can update without pane capture.
+- Every status update should include the recommended lane, exact blocker/waiting target if blocked, and required follow-up.
 - Focus on hierarchy, spacing, consistency, affordance, responsiveness, and user trust.
 - Prefer evidence from the live UI when available.
 - Use G Stack Browser-backed review paths for browser-visible design validation.

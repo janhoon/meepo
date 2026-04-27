@@ -12,21 +12,34 @@ import { openAgentsDashboard, type AgentsDashboardData, type AgentsDashboardStat
 import { closeTmuxAgentsDb, getTmuxAgentsDb } from "./db.js";
 import { getRpcBridgeSocketPath, pingRpcBridge, readRpcBridgeStatus, sendRpcBridgeCommand } from "./rpc-client.js";
 import { SESSION_CHILD_LINK_ENTRY_TYPE } from "./paths.js";
-import { getSubagentProfile, listSubagentProfiles, normalizeBuiltinTools } from "./profiles.js";
+import { getAllowedBuiltinToolNames, getSubagentProfile, listSubagentProfiles, normalizeBuiltinTools } from "./profiles.js";
 import { getProjectKey } from "./project.js";
 import {
+	AgentMessagePermissionError,
+	canSendMessage,
 	createAgentEvent,
 	createAgentMessage,
+	createMessageWithRecipients,
+	createRootActorContext,
+	fetchAgentInboxV2,
 	getAgent,
 	getFleetSummary,
+	listAgentAttentionItemsV2,
 	listAgents,
 	listAttentionItems,
+	listDescendantAgentIds,
+	listHierarchyVisibleAgentIds,
 	listInboxMessages,
 	listMessagesForRecipient,
+	markAgentMessageRecipientsByIds,
+	markAgentMessageRecipientsByMessageIds,
 	markAgentMessages,
+	resolveAgentActorContext,
 	updateAgent,
+	updateAgentAttentionItemsV2ForOwner,
 	updateAttentionItemsForAgent,
 } from "./registry.js";
+import type { ListAgentAttentionItemsV2Filters } from "./registry.js";
 import {
 	createTask,
 	createTaskEvent,
@@ -53,7 +66,12 @@ import type {
 	UpdateServiceInput,
 } from "./service-types.js";
 import type {
+	AgentActorContext,
+	AgentAttentionV2Record,
+	AgentInboxMessageV2Record,
 	AgentMessageRecord,
+	AgentRecipientKind,
+	AgentRecipientRef,
 	AgentSummary,
 	AttentionItemRecord,
 	DeliveryMode,
@@ -103,7 +121,7 @@ const SubagentSpawnParams = Type.Object({
 	model: Type.Optional(Type.String({ description: "Optional model override." })),
 	tools: Type.Optional(
 		Type.Array(Type.String({ description: "Child tool name" }), {
-			description: "Optional child tool override. Allowed: read, bash, grep, ls, edit, write, task_create, task_list, task_get, task_update, task_move, task_note, task_attention.",
+			description: `Optional child tool override. Allowed: ${getAllowedBuiltinToolNames().join(", ")}.`,
 			maxItems: 16,
 		}),
 	),
@@ -460,6 +478,11 @@ function formatAgentDetails(agent: AgentSummary): string {
 		`task: ${agent.task}`,
 		`projectKey: ${agent.projectKey}`,
 		`taskId: ${agent.taskId ?? "-"}`,
+		`parentAgentId: ${agent.parentAgentId ?? "-"}`,
+		`orgId: ${agent.orgId ?? "-"}`,
+		`roleKey: ${agent.roleKey ?? "-"}`,
+		`spawnedByAgentId: ${agent.spawnedByAgentId ?? "-"}`,
+		`hierarchyState: ${agent.hierarchyState}`,
 		`spawnCwd: ${agent.spawnCwd}`,
 		`spawnSessionId: ${agent.spawnSessionId ?? "-"}`,
 		`spawnSessionFile: ${agent.spawnSessionFile ?? "-"}`,
@@ -613,6 +636,47 @@ function getLinkedChildIds(ctx: ExtensionContext): string[] {
 	return [...ids];
 }
 
+function resolveToolActorContext(ctx: ExtensionContext): AgentActorContext {
+	const db = getTmuxAgentsDb();
+	if (childRuntimeEnvironment) {
+		return resolveAgentActorContext(db, { currentAgentId: childRuntimeEnvironment.childId });
+	}
+	return createRootActorContext({
+		projectKey: getProjectKey(ctx.cwd),
+		spawnSessionId: ctx.sessionManager.getSessionId(),
+		spawnSessionFile: ctx.sessionManager.getSessionFile(),
+	});
+}
+
+function applyHierarchyVisibilityToAgentFilters(ctx: ExtensionContext, filters: ListAgentsFilters): ListAgentsFilters {
+	if (!childRuntimeEnvironment) return filters;
+	const db = getTmuxAgentsDb();
+	const actor = resolveToolActorContext(ctx);
+	if (actor.kind === "root") return filters;
+	let requestedIds: string[] | undefined = filters.ids;
+	if (filters.descendantOf) {
+		requestedIds = listDescendantAgentIds(db, filters.descendantOf);
+	}
+	const visibleIds = listHierarchyVisibleAgentIds(db, actor, {
+		projectKey: filters.projectKey,
+		spawnSessionId: filters.spawnSessionId,
+		spawnSessionFile: filters.spawnSessionFile,
+	});
+	const visibleSet = new Set(visibleIds);
+	const ids = requestedIds ? requestedIds.filter((id) => visibleSet.has(id)) : visibleIds;
+	return { ...filters, ids, descendantOf: undefined };
+}
+
+function getVisibleAgentIdsForTool(ctx: ExtensionContext, requestedIds?: string[]): string[] | null {
+	if (!childRuntimeEnvironment) return requestedIds ?? null;
+	const actor = resolveToolActorContext(ctx);
+	if (actor.kind === "root") return requestedIds ?? null;
+	const visibleIds = listHierarchyVisibleAgentIds(getTmuxAgentsDb(), actor, { projectKey: getProjectKey(ctx.cwd) });
+	if (!requestedIds) return visibleIds;
+	const visibleSet = new Set(visibleIds);
+	return requestedIds.filter((id) => visibleSet.has(id));
+}
+
 function resolveAgentFilters(
 	ctx: ExtensionContext,
 	scope: "all" | "current_project" | "current_session" | "descendants",
@@ -689,8 +753,9 @@ function formatTaskCounts(summary: TaskSummaryCounts): string | undefined {
 
 function formatFleetSummary(taskSummary: TaskSummaryCounts, agentSummary: FleetSummary): string | undefined {
 	const taskText = formatTaskCounts(taskSummary);
+	const hasAgentSignals = agentSummary.active > 0 || agentSummary.blocked > 0 || agentSummary.attentionOpen > 0 || agentSummary.unread > 0;
 	const agentText =
-		agentSummary.active === 0 && agentSummary.attentionOpen === 0 && agentSummary.unread === 0
+		!taskText && !hasAgentSignals
 			? undefined
 			: `🤖 ${agentSummary.active} active · ${agentSummary.blocked} blocked · ${agentSummary.attentionOpen} open attention · ${agentSummary.unread} unread`;
 	if (!taskText && !agentText) return undefined;
@@ -836,14 +901,29 @@ interface CleanupCandidate {
 	reason: string;
 }
 
-function buildInboxText(messages: AgentMessageRecord[]): string {
+function buildInboxText(messages: AgentMessageRecord[], readReceiptCount = 0): string {
 	if (messages.length === 0) return "No unread child-originated messages.";
-	return messages
+	const body = messages
 		.map((message) => {
 			const payloadText = truncateText(JSON.stringify(message.payload), 160);
-			return `${message.id} · ${message.kind} · ${message.targetKind} · sender=${message.senderAgentId ?? "-"}\n${payloadText}`;
+			return `${message.id} · ${message.kind} · ${message.targetKind} · sender=${message.senderAgentId ?? "-"} · recipient=${message.recipientAgentId ?? "root/user"}\n${payloadText}`;
 		})
 		.join("\n\n");
+	if (readReceiptCount <= 0) return body;
+	return `${body}\n\nRead receipt: marked ${readReceiptCount} message${readReceiptCount === 1 ? "" : "s"} delivered. Future unread inbox reads will omit ${readReceiptCount === 1 ? "it" : "them"}; pass includeDelivered=true for history.`;
+}
+
+function buildInboxV2Text(messages: AgentInboxMessageV2Record[], readReceiptCount = 0): string {
+	if (messages.length === 0) return "No unread hierarchy inbox messages.";
+	const body = messages
+		.map((entry) => {
+			const payloadText = truncateText(JSON.stringify(entry.message.payload), 180);
+			const recipient = entry.recipient.recipientKind === "agent" ? entry.recipient.recipientAgentId : entry.recipient.recipientKind;
+			return `${entry.message.id} · ${entry.message.kind} · sender=${entry.message.senderKind}:${entry.message.senderAgentId ?? "-"} · recipient=${entry.recipient.recipientKind}:${recipient ?? "-"} · recipientRow=${entry.recipient.id} · status=${entry.recipient.status} · route=${entry.recipient.routeId ?? "-"}\n${payloadText}`;
+		})
+		.join("\n\n");
+	if (readReceiptCount <= 0) return body;
+	return `${body}\n\nRead receipt: marked ${readReceiptCount} recipient row${readReceiptCount === 1 ? "" : "s"} read. Future unread inbox reads will omit ${readReceiptCount === 1 ? "it" : "them"}; pass includeDelivered=true for history.`;
 }
 
 function resolveAttentionFilters(
@@ -889,6 +969,89 @@ function buildAttentionText(items: AttentionItemRecord[], agentsById: Map<string
 			return `${formatAttentionItemLine(item, agent)}\nsummary: ${item.summary}\npayload: ${payloadText}`;
 		})
 		.join("\n\n");
+}
+
+function buildAttentionV2Text(items: AgentAttentionV2Record[], agentsById: Map<string, AgentSummary>, includeResolved: boolean): string {
+	if (items.length === 0) return includeResolved ? "No hierarchy attention items matched." : "No open hierarchy attention items.";
+	return items
+		.map((item) => {
+			const subject = item.subjectAgentId ? agentsById.get(item.subjectAgentId) : undefined;
+			const owner = item.ownerKind === "agent" && item.ownerAgentId ? agentsById.get(item.ownerAgentId) : undefined;
+			const payloadText = truncateText(JSON.stringify(item.payload), 180);
+			return `${item.kind} · ${item.state} · owner=${item.ownerKind}:${item.ownerAgentId ?? "-"}${owner ? ` (${owner.profile})` : ""} · subject=${item.subjectAgentId ?? "-"}${subject ? ` (${truncateText(subject.title, 32)})` : ""}\nsummary: ${item.summary}\nmessageId: ${item.messageId ?? "-"}\nrecipientRowId: ${item.recipientRowId ?? "-"}\npayload: ${payloadText}`;
+		})
+		.join("\n\n");
+}
+
+function buildAdminAttentionText(
+	legacyItems: AttentionItemRecord[],
+	v2Items: AgentAttentionV2Record[],
+	agentsById: Map<string, AgentSummary>,
+	includeResolved: boolean,
+): string {
+	if (legacyItems.length === 0 && v2Items.length === 0) return includeResolved ? "No attention items matched." : "No open attention items.";
+	const sections: string[] = [];
+	if (legacyItems.length > 0) sections.push(`Legacy attention\n${buildAttentionText(legacyItems, agentsById, includeResolved)}`);
+	if (v2Items.length > 0) sections.push(`Hierarchy attention\n${buildAttentionV2Text(v2Items, agentsById, includeResolved)}`);
+	return sections.join("\n\n");
+}
+
+function attentionOwnerKindsForAudience(audience?: "all" | "coordinator" | "user"): AgentRecipientKind[] | undefined {
+	if (audience === "user") return ["user"];
+	if (audience === "coordinator") return ["root", "agent"];
+	return undefined;
+}
+
+function resolveAdminAttentionV2Filters(
+	ctx: ExtensionContext,
+	scope: "all" | "current_project" | "current_session" | "descendants",
+	params: { audience?: "all" | "coordinator" | "user"; includeResolved?: boolean; limit?: number },
+	actor: AgentActorContext,
+): ListAgentAttentionItemsV2Filters {
+	const filters: ListAgentAttentionItemsV2Filters = {
+		limit: params.limit,
+		ownerKinds: attentionOwnerKindsForAudience(params.audience),
+		states: params.includeResolved ? undefined : ["open", "acknowledged", "waiting_on_owner"],
+	};
+	switch (scope) {
+		case "current_project":
+			filters.projectKey = getProjectKey(ctx.cwd);
+			break;
+		case "current_session":
+			filters.subjectAgentIds = listHierarchyVisibleAgentIds(getTmuxAgentsDb(), actor, {
+				spawnSessionId: ctx.sessionManager.getSessionId(),
+				spawnSessionFile: ctx.sessionManager.getSessionFile(),
+			});
+			break;
+		case "descendants":
+			filters.subjectAgentIds = getLinkedChildIds(ctx);
+			break;
+		case "all":
+		default:
+			break;
+	}
+	return filters;
+}
+
+function attentionV2MatchesAudience(item: AgentAttentionV2Record, audience?: "all" | "coordinator" | "user"): boolean {
+	if (audience === "user") return item.ownerKind === "user";
+	if (audience === "coordinator") return item.ownerKind !== "user";
+	return true;
+}
+
+function legacyAttentionDuplicatesV2(item: AttentionItemRecord, v2MessageIds: Set<string>, v2RecipientRowIds: Set<string>): boolean {
+	if (item.messageId && v2MessageIds.has(item.messageId)) return true;
+	const payload = item.payload && typeof item.payload === "object" ? (item.payload as Record<string, unknown>) : null;
+	const payloadV2MessageId = typeof payload?.v2MessageId === "string" ? payload.v2MessageId : null;
+	const payloadV2RecipientRowId = typeof payload?.v2RecipientRowId === "string" ? payload.v2RecipientRowId : null;
+	return !!((payloadV2MessageId && v2MessageIds.has(payloadV2MessageId)) || (payloadV2RecipientRowId && v2RecipientRowIds.has(payloadV2RecipientRowId)));
+}
+
+function suppressDuplicateLegacyAttentionItems(legacyItems: AttentionItemRecord[], v2Items: AgentAttentionV2Record[]): AttentionItemRecord[] {
+	const v2MessageIds = new Set(v2Items.map((item) => item.messageId).filter((value): value is string => Boolean(value)));
+	const v2RecipientRowIds = new Set(v2Items.map((item) => item.recipientRowId).filter((value): value is string => Boolean(value)));
+	if (v2MessageIds.size === 0 && v2RecipientRowIds.size === 0) return legacyItems;
+	return legacyItems.filter((item) => !legacyAttentionDuplicatesV2(item, v2MessageIds, v2RecipientRowIds));
 }
 
 function formatTaskAttentionLine(item: TaskAttentionRecord): string {
@@ -1139,7 +1302,9 @@ function expectedDownwardHandlingLines(actionPolicy: DownwardMessageActionPolicy
 function formatDownwardMessageForChild(message: AgentMessageRecord): string {
 	const payload = (message.payload && typeof message.payload === "object" ? message.payload : {}) as DownwardMessagePayload;
 	const actionPolicy = payload.actionPolicy ?? defaultDownwardActionPolicy(message.kind as "answer" | "note" | "redirect" | "cancel" | "priority");
-	const lines = [`[Coordinator ${message.kind} · action ${actionPolicy}]`];
+	const sender = payload.senderAgentId ?? message.senderAgentId ?? "root";
+	const route = payload.routeKind ? ` · route ${payload.routeKind}` : "";
+	const lines = [`[Hierarchy ${message.kind} · from ${sender} · action ${actionPolicy}${route}]`];
 	if (payload.summary) lines.push(payload.summary);
 	if (payload.details) lines.push("", payload.details);
 	if (Array.isArray(payload.files) && payload.files.length > 0) {
@@ -1236,6 +1401,18 @@ async function deliverQueuedMessagesViaBridge(agentId: string): Promise<{ delive
 			}
 			markAgentMessages(db, [message.id], "delivered");
 			markAgentMessages(db, [message.id], "acked");
+			const v2Payload = (message.payload && typeof message.payload === "object" ? message.payload : null) as DownwardMessagePayload | null;
+			if (v2Payload?.v2RecipientRowId) {
+				markAgentMessageRecipientsByIds(db, [v2Payload.v2RecipientRowId], "acked", {
+					recipientAgentId: agent.id,
+					transportKind: "rpc_bridge",
+				});
+			} else if (v2Payload?.v2MessageId) {
+				markAgentMessageRecipientsByMessageIds(db, [v2Payload.v2MessageId], "acked", {
+					recipientAgentId: agent.id,
+					transportKind: "rpc_bridge",
+				});
+			}
 			createAgentEvent(db, {
 				id: randomUUID(),
 				agentId: agent.id,
@@ -1294,17 +1471,20 @@ function queueDownwardMessage(
 	kind: "answer" | "note" | "redirect" | "cancel" | "priority",
 	payload: DownwardMessagePayload,
 	deliveryMode: DeliveryMode,
+	actor: AgentActorContext = createRootActorContext(),
 ): string {
 	const db = getTmuxAgentsDb();
 	const messageId = randomUUID();
 	const fullPayload: DownwardMessagePayload = {
 		...payload,
+		senderKind: actor.kind === "root" ? "root" : "agent",
+		senderAgentId: actor.kind === "agent" ? actor.agentId : null,
 		actionPolicy: payload.actionPolicy ?? defaultDownwardActionPolicy(kind),
 	};
 	createAgentMessage(db, {
 		id: messageId,
 		threadId: agent.id,
-		senderAgentId: null,
+		senderAgentId: actor.kind === "agent" ? actor.agentId : null,
 		recipientAgentId: agent.id,
 		targetKind: "child",
 		kind,
@@ -1345,6 +1525,41 @@ function queueDownwardMessage(
 			{
 				states: ["open", "waiting_on_coordinator", "waiting_on_user"],
 				kinds: ["question", "question_for_user", "blocked"],
+			},
+		);
+	}
+	if (actor.kind === "agent") {
+		updateAgentAttentionItemsV2ForOwner(
+			db,
+			{ kind: "agent", agentId: actor.agentId },
+			{
+				state: kind === "cancel" ? "cancelled" : "acknowledged",
+				updatedAt: Date.now(),
+				resolvedAt: kind === "cancel" ? Date.now() : undefined,
+				resolutionKind: kind,
+				resolutionSummary: fullPayload.summary,
+			},
+			{
+				states: ["open", "waiting_on_owner"],
+				kinds: ["question", "question_for_user", "blocked"],
+				subjectAgentIds: [agent.id],
+			},
+		);
+	} else {
+		updateAgentAttentionItemsV2ForOwner(
+			db,
+			{ kind: "root" },
+			{
+				state: kind === "cancel" ? "cancelled" : "acknowledged",
+				updatedAt: Date.now(),
+				resolvedAt: kind === "cancel" ? Date.now() : undefined,
+				resolutionKind: kind,
+				resolutionSummary: fullPayload.summary,
+			},
+			{
+				states: ["open", "waiting_on_owner"],
+				kinds: ["question", "question_for_user", "blocked"],
+				subjectAgentIds: [agent.id],
 			},
 		);
 	}
@@ -2210,6 +2425,15 @@ function spawnChildFromParams(pi: ExtensionAPI, ctx: ExtensionContext, params: {
 	const profile = requireProfile(params.profile);
 	const spawnCwd = resolveInputPath(ctx.cwd, params.cwd);
 	assertDirectory(spawnCwd);
+	const actor = resolveToolActorContext(ctx);
+	let parentAgentId = params.parentAgentId?.trim() || null;
+	if (actor.kind === "agent") {
+		if (!parentAgentId) {
+			parentAgentId = actor.agentId;
+		} else if (parentAgentId !== actor.agentId && !actor.canAdminOverride) {
+			throw new Error(`Child session ${actor.agentId} may only spawn direct children under itself; requested parentAgentId=${parentAgentId}.`);
+		}
+	}
 	const task = ensureTaskForSpawn(ctx, {
 		title: params.title,
 		task: params.task,
@@ -2228,7 +2452,9 @@ function spawnChildFromParams(pi: ExtensionAPI, ctx: ExtensionContext, params: {
 		tools,
 		priority: params.priority?.trim() || null,
 		taskId: task.id,
-		parentAgentId: params.parentAgentId?.trim() || null,
+		parentAgentId,
+		spawnedByAgentId: actor.kind === "agent" ? actor.agentId : null,
+		createdByKind: actor.kind === "agent" ? "agent" : "root",
 		spawnSessionId: ctx.sessionManager.getSessionId(),
 		spawnSessionFile: ctx.sessionManager.getSessionFile(),
 	});
@@ -2413,7 +2639,13 @@ function buildBoardScopeData(tasks: TaskRecord[], agents: AgentSummary[], attent
 		lanes[laneId].push(ticket);
 	}
 	for (const laneId of Object.keys(lanes) as BoardLaneId[]) {
-		lanes[laneId].sort((left, right) => left.priority - right.priority || right.updatedAt - left.updatedAt);
+		lanes[laneId].sort(
+			(left, right) =>
+				right.openAttentionCount - left.openAttentionCount ||
+				(left.waitingOn === "user" ? -1 : 0) - (right.waitingOn === "user" ? -1 : 0) ||
+				left.priority - right.priority ||
+				right.updatedAt - left.updatedAt,
+		);
 	}
 	return { lanes, tasksById, agentsByTaskId };
 }
@@ -2460,6 +2692,99 @@ function buildBoardData(ctx: ExtensionContext): AgentsBoardData {
 			descendants: buildBoardScopeData(scopeTasks.descendants, scopeAgents.descendants, scopeAttention.descendants),
 		},
 	};
+}
+
+function formatStandupAge(timestamp: number): string {
+	if (!timestamp) return "unknown";
+	const minutes = Math.max(0, Math.floor((Date.now() - timestamp) / 60000));
+	if (minutes < 60) return `${minutes}m`;
+	const hours = Math.floor(minutes / 60);
+	if (hours < 48) return `${hours}h`;
+	return `${Math.floor(hours / 24)}d`;
+}
+
+function standupNextAction(ticket: BoardTicket, linkedAgents: AgentSummary[]): string {
+	if (ticket.openAttentionCount > 0) return ticket.waitingOn === "user" ? "answer user question" : "triage child attention";
+	if (ticket.waitingOn) return `waiting on ${ticket.waitingOn}`;
+	if (ticket.laneId === "blocked") return "add waitingOn or unblock";
+	if (ticket.laneId === "in_review") return "run/synthesize review gate";
+	if (ticket.laneId === "in_progress") return linkedAgents.length > 0 ? "let owner run; inspect only if stale" : "assign owner or move todo";
+	if (ticket.laneId === "todo") return linkedAgents.length > 0 ? "inspect existing agent link" : "spawn next specialist";
+	if (ticket.laneId === "done") return ticket.activeAgentCount > 0 ? "cleanup active links/agents" : "archive context if useful";
+	return "inspect task";
+}
+
+function formatStandupTicketLine(ticket: BoardTicket, linkedAgents: AgentSummary[] = []): string {
+	const flags = [
+		`status=${ticket.laneId}`,
+		`waiting=${ticket.waitingOn ?? "-"}`,
+		`agents=${ticket.activeAgentCount}`,
+		`attention=${ticket.openAttentionCount}`,
+		`p${ticket.priority}`,
+		`updated=${formatStandupAge(ticket.updatedAt)}`,
+	].join(" · ");
+	return `- ${ticket.taskId} · ${truncateText(ticket.title, 64)} · ${flags}\n  next: ${standupNextAction(ticket, linkedAgents)}${ticket.blockedReason ? `\n  blocked: ${truncateText(ticket.blockedReason, 120)}` : ""}`;
+}
+
+function appendStandupSection(lines: string[], title: string, tickets: BoardTicket[], scopeData: AgentsBoardData["scopes"]["all"], limit = 6): void {
+	lines.push("", `## ${title}`);
+	if (tickets.length === 0) {
+		lines.push("- none");
+		return;
+	}
+	for (const ticket of tickets.slice(0, limit)) {
+		lines.push(formatStandupTicketLine(ticket, scopeData.agentsByTaskId.get(ticket.taskId) ?? []));
+	}
+	if (tickets.length > limit) lines.push(`- +${tickets.length - limit} more`);
+}
+
+function formatStandupCleanupLine(candidate: CleanupCandidate): string {
+	const taskText = candidate.agent.taskId ? ` · task=${candidate.agent.taskId}` : "";
+	const attentionText = candidate.attentionItems.length > 0 ? ` · ${candidate.attentionItems.length} attention` : "";
+	return `- ${candidate.agent.id} · ${candidate.agent.profile} · ${candidate.agent.state}${taskText}${attentionText}\n  next: ${candidate.cleanupAllowed ? "cleanup terminal tmux target" : "resolve attention before cleanup"} · ${candidate.reason}`;
+}
+
+function appendStandupCleanupSection(lines: string[], candidates: CleanupCandidate[], limit = 6): void {
+	lines.push("", "## Cleanup candidates");
+	if (candidates.length === 0) {
+		lines.push("- none");
+		return;
+	}
+	for (const candidate of candidates.slice(0, limit)) lines.push(formatStandupCleanupLine(candidate));
+	if (candidates.length > limit) lines.push(`- +${candidates.length - limit} more`);
+}
+
+function buildStandupText(ctx: ExtensionContext, scope: "all" | "current_project" | "current_session" | "descendants" = "current_project"): string {
+	const board = buildBoardData(ctx);
+	const scopeData = board.scopes[scope];
+	const lanes = scopeData.lanes;
+	const allTickets = Object.values(lanes).flat();
+	const blockedUser = lanes.blocked.filter((ticket) => ticket.waitingOn === "user");
+	const blockedCoordinator = lanes.blocked.filter((ticket) => ticket.waitingOn !== "user");
+	const review = lanes.in_review;
+	const activeWip = lanes.in_progress;
+	const ready = lanes.todo;
+	const cleanupCandidates = listCleanupCandidates(ctx, { scope, limit: 200 });
+	const staleCutoffMs = 24 * 60 * 60 * 1000;
+	const stale = allTickets.filter((ticket) => ticket.laneId !== "done" && Date.now() - ticket.updatedAt > staleCutoffMs);
+	const openAttention = allTickets.reduce((count, ticket) => count + ticket.openAttentionCount, 0);
+	const activeAgents = allTickets.reduce((count, ticket) => count + ticket.activeAgentCount, 0);
+	const counts = [`todo ${ready.length}`, `blocked ${lanes.blocked.length}`, `in-progress ${activeWip.length}`, `review ${review.length}`, `done ${lanes.done.length}`].join(" · ");
+	const lines = [
+		`# Standup · ${scope}`,
+		`Generated: ${new Date().toISOString()}`,
+		`Board: ${counts}`,
+		`Signals: ${blockedUser.length} user-wait · ${blockedCoordinator.length} coordinator/blocker · ${review.length} review · ${openAttention} attention · ${activeAgents} active agents · ${stale.length} stale>24h · ${cleanupCandidates.length} cleanup`,
+	];
+	appendStandupSection(lines, "Needs user", blockedUser, scopeData, 5);
+	appendStandupSection(lines, "Needs coordinator / unblock", blockedCoordinator, scopeData, 6);
+	appendStandupSection(lines, "Ready for review / acceptance", review, scopeData, 6);
+	appendStandupSection(lines, "Active WIP", activeWip, scopeData, 8);
+	appendStandupSection(lines, "Stale >24h", stale, scopeData, 6);
+	appendStandupCleanupSection(lines, cleanupCandidates, 6);
+	appendStandupSection(lines, "Ready to start", ready, scopeData, 6);
+	lines.push("", "## Recommended operating order", "1. Answer `Needs user` items or keep them blocked with a clear waiting target.", "2. Unblock coordinator-owned tasks before spawning more WIP.", "3. Synthesize review items and move them to `done` or back to `in_progress`.", "4. Let active owners continue unless their published status is stale.", "5. Spawn from `Ready to start` only after blockers/review/WIP are under control.", "6. Cleanup terminal agents after completion has been synthesized.");
+	return lines.join("\n");
 }
 
 async function runReplyFlow(ctx: ExtensionContext, agentId: string): Promise<void> {
@@ -2874,8 +3199,48 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 		],
 		parameters: SubagentMessageParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const agent = getAgent(getTmuxAgentsDb(), params.id);
+			const db = getTmuxAgentsDb();
+			const actor = resolveToolActorContext(ctx);
+			const agent = getAgent(db, params.id);
 			if (!agent) throw new Error(`Unknown agent id \"${params.id}\".`);
+			const kind = params.kind as "answer" | "note" | "redirect" | "cancel" | "priority";
+			const actionPolicy = params.actionPolicy ?? defaultDownwardActionPolicy(kind);
+			const recipient: AgentRecipientRef = { kind: "agent", agentId: agent.id };
+			const preflight = canSendMessage(db, { actor, recipient, messageKind: kind });
+			if (!preflight.allowed) {
+				try {
+					createMessageWithRecipients(db, {
+						actor,
+						recipients: [{ ...recipient, deliveryMode: params.deliveryMode ?? "immediate" }],
+						projectKey: agent.projectKey,
+						taskId: agent.taskId,
+						subjectAgentId: agent.id,
+						kind,
+						summary: params.summary,
+						bodyMarkdown: params.details ?? null,
+						payload: {
+							summary: params.summary,
+							details: params.details,
+							files: params.files,
+							actionPolicy,
+							inReplyToMessageId: params.inReplyToMessageId,
+						},
+						actionPolicy,
+						thread: { kind: "command", title: params.summary },
+					});
+				} catch (error) {
+					if (error instanceof AgentMessagePermissionError) {
+						const decision = error.decisions[0] ?? preflight;
+						throw new Error(
+							`Denied hierarchy message from ${decision.fromKind}:${decision.fromAgentId ?? "root"} to ${decision.toKind}:${decision.toAgentId ?? "-"} via ${decision.routeKind}: ${decision.decisionReason}`,
+						);
+					}
+					throw error;
+				}
+				throw new Error(
+					`Denied hierarchy message from ${preflight.fromKind}:${preflight.fromAgentId ?? "root"} to ${preflight.toKind}:${preflight.toAgentId ?? "-"} via ${preflight.routeKind}: ${preflight.decisionReason}`,
+				);
+			}
 			if (["done", "error", "stopped", "lost"].includes(agent.state)) {
 				throw new Error(`Cannot message agent ${agent.id} because it is in terminal state ${agent.state}.`);
 			}
@@ -2889,8 +3254,27 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 			) {
 				throw new Error(`Cannot message agent ${agent.id} because its tmux target is missing. Reconcile first.`);
 			}
-			const kind = params.kind as "answer" | "note" | "redirect" | "cancel" | "priority";
-			const actionPolicy = params.actionPolicy ?? defaultDownwardActionPolicy(kind);
+			const messageResult = createMessageWithRecipients(db, {
+				actor,
+				recipients: [{ ...recipient, deliveryMode: params.deliveryMode ?? "immediate", transportKind: "inbox" }],
+				projectKey: agent.projectKey,
+				orgId: agent.orgId,
+				taskId: agent.taskId,
+				subjectAgentId: agent.id,
+				kind,
+				summary: params.summary,
+				bodyMarkdown: params.details ?? null,
+				payload: {
+					summary: params.summary,
+					details: params.details,
+					files: params.files,
+					actionPolicy,
+					inReplyToMessageId: params.inReplyToMessageId,
+				},
+				actionPolicy,
+				thread: { kind: "command", title: params.summary },
+			});
+			const route = messageResult.routes[0] ?? preflight;
 			queueDownwardMessage(
 				agent,
 				kind,
@@ -2900,28 +3284,34 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 					files: params.files,
 					actionPolicy,
 					inReplyToMessageId: params.inReplyToMessageId,
+					v2MessageId: messageResult.message.id,
+					v2RecipientRowId: messageResult.recipients[0]?.id,
+					routeKind: route.routeKind,
 				},
 				params.deliveryMode ?? "immediate",
+				actor,
 			);
 			const liveDelivery = await deliverQueuedMessagesViaBridge(agent.id);
 			updateFleetUi(ctx);
+			const senderText = actor.kind === "agent" ? `agent:${actor.agentId}` : "root";
+			const text = liveDelivery.delivered > 0
+				? `Queued ${kind} message from ${senderText} to agent:${agent.id} via ${route.routeKind} (${actionPolicy}) and delivered ${liveDelivery.delivered} via RPC bridge.`
+				: `Queued ${kind} message from ${senderText} to agent:${agent.id} via ${route.routeKind} (${actionPolicy}).`;
 			return {
-				content: [
-					{
-						type: "text",
-						text:
-							liveDelivery.delivered > 0
-								? `Queued ${kind} message for ${agent.id} (${actionPolicy}) and delivered ${liveDelivery.delivered} via RPC bridge.`
-								: `Queued ${kind} message for ${agent.id} (${actionPolicy}).`,
-					},
-				],
+				content: [{ type: "text", text }],
 				details: {
 					agentId: agent.id,
+					sender: actor,
+					recipient,
 					kind,
 					actionPolicy,
+					message: messageResult.message,
+					recipients: messageResult.recipients,
+					routes: messageResult.routes,
 					inReplyToMessageId: params.inReplyToMessageId ?? null,
 					deliveryMode: params.deliveryMode ?? "immediate",
 					liveDelivery,
+					readReceipt: { status: liveDelivery.delivered > 0 ? "acked" : "queued", recipientRowIds: messageResult.recipients.map((item) => item.id) },
 				},
 			};
 		},
@@ -2978,9 +3368,9 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 		parameters: SubagentListParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const scope = params.scope ?? "current_project";
-			const filters = resolveAgentFilters(ctx, scope, params);
+			const filters = applyHierarchyVisibilityToAgentFilters(ctx, resolveAgentFilters(ctx, scope, params));
 			const agents = listAgents(getTmuxAgentsDb(), filters);
-			const header = `scope=${summarizeFilters(scope, filters)} · ${agents.length} agent${agents.length === 1 ? "" : "s"}`;
+			const header = `scope=${summarizeFilters(scope, filters)}${childRuntimeEnvironment ? " · hierarchy-visible" : ""} · ${agents.length} agent${agents.length === 1 ? "" : "s"}`;
 			const body = agents.length === 0 ? "No agents matched." : agents.map(formatAgentLine).join("\n");
 			updateFleetUi(ctx);
 			return {
@@ -3012,15 +3402,23 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 			return args;
 		},
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const agents = params.ids
+			const visibleIds = getVisibleAgentIdsForTool(ctx, params.ids);
+			const visibleSet = visibleIds ? new Set(visibleIds) : null;
+			const allowedIds = visibleSet ? params.ids.filter((id) => visibleSet.has(id)) : params.ids;
+			const deniedIds = visibleSet ? params.ids.filter((id) => !visibleSet.has(id)) : [];
+			const agents = allowedIds
 				.map((id) => getAgent(getTmuxAgentsDb(), id))
 				.filter((agent): agent is AgentSummary => agent !== null);
 			const text =
-				agents.length === 0 ? "No matching agents found." : agents.map((agent) => formatAgentDetails(agent)).join("\n\n---\n\n");
+				agents.length === 0
+					? deniedIds.length > 0
+						? `No matching visible agents found. Hidden by hierarchy scope: ${deniedIds.join(", ")}`
+						: "No matching agents found."
+					: `${agents.map((agent) => formatAgentDetails(agent)).join("\n\n---\n\n")}${deniedIds.length > 0 ? `\n\nHidden by hierarchy scope: ${deniedIds.join(", ")}` : ""}`;
 			updateFleetUi(ctx);
 			return {
 				content: [{ type: "text", text }],
-				details: { ids: params.ids, agents },
+				details: { ids: params.ids, visibleIds: allowedIds, deniedIds, agents },
 			};
 		},
 	});
@@ -3036,19 +3434,48 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 		parameters: SubagentInboxParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const scope = params.scope ?? "current_project";
-			const agentFilters = resolveAgentFilters(ctx, scope, {});
-			const messages = listInboxMessages(getTmuxAgentsDb(), {
+			const agentFilters = applyHierarchyVisibilityToAgentFilters(ctx, resolveAgentFilters(ctx, scope, {}));
+			const db = getTmuxAgentsDb();
+			const actor = resolveToolActorContext(ctx);
+			const v2Messages = fetchAgentInboxV2(db, {
+				actor,
+				includeRead: params.includeDelivered ?? false,
+				markRead: !(params.includeDelivered ?? false),
+				projectKey: agentFilters.projectKey ?? (actor.kind === "agent" ? actor.projectKey : undefined),
+				limit: params.limit,
+			});
+			const v2ReadReceiptCount = params.includeDelivered ? 0 : v2Messages.length;
+			if (actor.kind === "agent" || v2Messages.length > 0) {
+				updateFleetUi(ctx);
+				return {
+					content: [{ type: "text", text: buildInboxV2Text(v2Messages, v2ReadReceiptCount) }],
+					details: {
+						scope,
+						actor,
+						messages: v2Messages,
+						readReceipt: { status: "read", ids: v2Messages.map((entry) => entry.recipient.id), count: v2ReadReceiptCount },
+						version: "v2",
+					},
+				};
+			}
+			const messages = listInboxMessages(db, {
 				projectKey: agentFilters.projectKey,
 				spawnSessionId: agentFilters.spawnSessionId,
 				spawnSessionFile: agentFilters.spawnSessionFile,
-				agentIds: agentFilters.descendantOf,
+				agentIds: agentFilters.ids ?? agentFilters.descendantOf,
 				includeDelivered: params.includeDelivered,
 				limit: params.limit,
 			});
+			const deliveredIds = params.includeDelivered ? [] : messages.filter((message) => message.status === "queued").map((message) => message.id);
+			const readReceiptCount = markAgentMessages(db, deliveredIds, "delivered");
+			const deliveredIdSet = new Set(deliveredIds);
+			const returnedMessages = messages.map((message) =>
+				deliveredIdSet.has(message.id) ? { ...message, status: "delivered" as const, deliveredAt: Date.now() } : message,
+			);
 			updateFleetUi(ctx);
 			return {
-				content: [{ type: "text", text: buildInboxText(messages) }],
-				details: { scope, messages },
+				content: [{ type: "text", text: buildInboxText(returnedMessages, readReceiptCount) }],
+				details: { scope, actor, messages: returnedMessages, readReceipt: { status: "delivered", ids: deliveredIds, count: readReceiptCount }, version: "legacy" },
 			};
 		},
 	});
@@ -3065,15 +3492,50 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 		parameters: SubagentAttentionParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const scope = params.scope ?? "current_project";
+			const db = getTmuxAgentsDb();
+			const actor = resolveToolActorContext(ctx);
+			if (actor.kind === "agent") {
+				const visibleSubjectAgentIds = params.audience === "user" ? listHierarchyVisibleAgentIds(db, actor, { projectKey: getProjectKey(ctx.cwd) }) : undefined;
+				const v2Filters = {
+					projectKey: getProjectKey(ctx.cwd),
+					ownerKind: params.audience === "user" ? ("user" as const) : ("agent" as const),
+					ownerAgentId: params.audience === "user" ? null : actor.agentId,
+					subjectAgentIds: visibleSubjectAgentIds,
+					states: params.includeResolved ? undefined : (["open", "acknowledged", "waiting_on_owner"] as AgentAttentionV2Record["state"][]),
+					limit: params.limit,
+				};
+				const items = listAgentAttentionItemsV2(db, v2Filters);
+				const agentIds = [...new Set(items.flatMap((item) => [item.subjectAgentId, item.ownerAgentId]).filter((value): value is string => Boolean(value)))];
+				const agentsById = new Map(listAgents(db, { ids: agentIds, limit: 200 }).map((agent) => [agent.id, agent]));
+				updateFleetUi(ctx);
+				return {
+					content: [{ type: "text", text: buildAttentionV2Text(items, agentsById, params.includeResolved ?? false) }],
+					details: { scope, actor, filters: v2Filters, items, version: "v2" },
+				};
+			}
 			const filters = resolveAttentionFilters(ctx, scope, params);
-			const items = listAttentionItems(getTmuxAgentsDb(), filters);
-			const agentsById = new Map(
-				listAgents(getTmuxAgentsDb(), { ids: [...new Set(items.map((item) => item.agentId))], limit: 200 }).map((agent) => [agent.id, agent]),
-			);
+			const rawLegacyItems = listAttentionItems(db, filters);
+			const v2Filters = resolveAdminAttentionV2Filters(ctx, scope, params, actor);
+			const v2Items = listAgentAttentionItemsV2(db, v2Filters);
+			const items = suppressDuplicateLegacyAttentionItems(rawLegacyItems, v2Items);
+			const suppressedLegacyDuplicateCount = rawLegacyItems.length - items.length;
+			const agentIds = [
+				...items.map((item) => item.agentId),
+				...v2Items.flatMap((item) => [item.subjectAgentId, item.ownerAgentId]).filter((value): value is string => Boolean(value)),
+			];
+			const agentsById = new Map(listAgents(db, { ids: [...new Set(agentIds)], limit: 200 }).map((agent) => [agent.id, agent]));
 			updateFleetUi(ctx);
 			return {
-				content: [{ type: "text", text: buildAttentionText(items, agentsById, params.includeResolved ?? false) }],
-				details: { scope, filters, items },
+				content: [{ type: "text", text: buildAdminAttentionText(items, v2Items, agentsById, params.includeResolved ?? false) }],
+				details: {
+					scope,
+					actor,
+					filters: { legacy: filters, v2: v2Filters },
+					items,
+					v2Items,
+					suppressedLegacyDuplicateCount,
+					version: "legacy+v2",
+				},
 			};
 		},
 	});
@@ -3575,6 +4037,22 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 		description: "Open the tracked task Kanban board",
 		handler: async (_args, ctx) => {
 			boardState = await runAgentsBoard(pi, ctx, boardState);
+			updateFleetUi(ctx);
+		},
+	});
+
+	pi.registerCommand("standup", {
+		description: "Show a Kanban standup digest for long-running task sessions",
+		handler: async (args, ctx) => {
+			const scopeArg = args?.trim() || "current_project";
+			const scope = scopeArg as "all" | "current_project" | "current_session" | "descendants";
+			if (!["all", "current_project", "current_session", "descendants"].includes(scope)) {
+				ctx.ui.notify("Usage: /standup [all|current_project|current_session|descendants]", "warning");
+				return;
+			}
+			const text = buildStandupText(ctx, scope);
+			if (ctx.hasUI) await ctx.ui.editor("standup", text);
+			else ctx.ui.notify(text, "info");
 			updateFleetUi(ctx);
 		},
 	});

@@ -38,6 +38,7 @@ Implemented so far:
 - lightweight interactive commands and shortcuts:
   - `/agents`
   - `/task-board`
+  - `/standup [scope]`
   - `/tasks`
   - `/task-new`
   - `/task-open <id>`
@@ -115,6 +116,11 @@ Implemented so far:
 - Pi-native task board behavior:
   - Kanban-style TUI lanes for todo, blocked, in-progress, in-review, and done
   - board cards represent tasks, not agents
+  - attention-first selection and sorting so blocked/review/user-waiting work is surfaced before new dispatch
+  - board hotlist showing blocked tasks, user waits, review queue, open attention, active agents, and soft WIP warnings
+  - card badges for priority, waiting target, linked active agents, linked profiles, and open attention
+  - selected-task next-action guidance for unblock/reply/spawn/review/cleanup decisions
+  - `/standup` digest for user waits, coordinator blockers, review queue, active WIP, stale tasks, ready work, and cleanup candidates
   - linked agents remain available for focus/reply/stop/capture from the selected task
   - keyboard navigation across lanes and tasks
   - per-task inspect/focus/reply/stop/capture/spawn/move/sync actions
@@ -125,6 +131,7 @@ Implemented so far:
 - initial agent profile prompts under `~/.pi/agent/agents/`
 - orchestration skills under `~/.pi/agent/skills/`
 - workflow prompt templates under `~/.pi/agent/prompts/`
+- child profile tool allowlist now includes `web_search` and `code_search` for research-oriented roles when explicitly declared in agent frontmatter
 
 Not implemented yet:
 - richer task decomposition / subtask UX

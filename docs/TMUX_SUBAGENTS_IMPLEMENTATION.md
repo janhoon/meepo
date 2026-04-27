@@ -302,6 +302,63 @@ The primary can inspect the registry and inbox, but should not need to actively 
 
 ---
 
+## Hierarchy-aware communication requirements
+
+`docs/AGENT_HIERARCHY_COMMUNICATION_SCHEMA.md` is the design source for the full hierarchy product. Until the role/edge/recipient-row schema is migrated into runtime code, prompts and operator docs must describe the intended chain without claiming that every ACL, visibility, or read-receipt behavior is enforced by the current compatibility tables.
+
+### Reporting chain
+
+Target hierarchy:
+
+```text
+root / main coordinator
+└── CEO
+    └── CTO
+        ├── engineer
+        ├── reviewer
+        └── qa-lead / specialist
+```
+
+Responsibilities:
+
+- **Root / main coordinator** owns admin/audit/override behavior. Root can inspect or override the hierarchy when the tool implementation exposes an admin scope, but root should not be the normal owner for CTO/developer questions once a CEO/CTO chain exists.
+- **CEO** is the top product manager under root/main. CEO reports upward with `subagent_publish`, reads CTO-originated attention via manager inbox/attention tools, and directs CTO work with `subagent_message` rather than managing developer grandchildren directly.
+- **CTO** reports to CEO, spawns/directs implementation and verification children, reads their proactive reports, and escalates product/user or cross-scope architecture decisions upward with `subagent_publish`.
+- **Developer/reviewer/QA leaf roles** publish upward to their direct manager. They should not expect sibling chat or manager-only tools; cross-child context should be requested through the parent manager.
+
+Sibling communication is denied by the hierarchy design unless an explicit grant is created. In particular, do not seed an `engineer -> engineer` policy edge and do not write prompts that tell developers to message each other directly.
+
+### Manager tool expectations
+
+Manager profiles such as CEO and CTO may be scoped to these orchestration tools:
+
+- `subagent_spawn` to create direct children. Attach or create a task id for each child. Until child-session default parenting and role-edge validation are implemented, pass or confirm `parentAgentId` explicitly so the visible reporting chain is correct.
+- `subagent_list` / `subagent_get` to inspect the manager's visible hierarchy slice. With the current compatibility implementation, project/session scopes are filters rather than final ACLs; the schema-backed implementation must derive the visible agent set from hierarchy edges/grants.
+- `subagent_inbox` / `subagent_attention` to read proactive child reports. The schema-backed implementation should show rows owned by the current manager, plus authorized subtree/admin views.
+- `subagent_message` to answer, redirect, cancel, or reprioritize direct children. Root/main may use admin override where supported; normal manager prompts should not rely on skip-level or sibling messaging.
+
+Developer profiles should stay narrow: code/search/edit tools plus the runtime-injected `subagent_publish`. They should not list, spawn, or message peers as a normal workflow.
+
+### Inbox, visibility, and read receipts
+
+The hierarchy schema replaces global message status with immutable messages plus per-recipient delivery rows:
+
+- Inbox fetches mark only the current recipient row as read; later ACKs also apply only to that recipient row. Message history remains intact for other recipients.
+- Child sessions read rows where `recipient_agent_id` is the current child/manager. Root/main reads `recipient_kind = 'root'` by default and may request an admin view when implemented.
+- List/get/inbox/attention queries should derive the allowed agent-id set from active hierarchy edges, explicit grants, and root/admin override before returning rows.
+- Attention is owned by the actor who must respond. For example, an engineer blocker should be owned by the CTO, and a CTO escalation should be owned by the CEO.
+
+### Operator runbook: CEO -> CTO -> developer tree
+
+1. From root/main, spawn the CEO profile for the product/scope task. Record the returned CEO agent id.
+2. Spawn the CTO as the CEO's direct child, or have the CEO do it if manager tools are enabled. Set `parentAgentId` to the CEO agent id until automatic child-parent defaults are active.
+3. Spawn implementation and verification children (`engineer`, `reviewer`, `qa-lead`, specialists) as CTO direct children. Set `parentAgentId` to the CTO agent id and keep each delegated task narrowly scoped.
+4. CEO supervises CTO through manager inbox/attention and targeted messages. CTO supervises developers/reviewers/QA the same way. Leaf developers publish milestones, blockers, questions, and completions upward with `subagent_publish`.
+5. Escalation path is developer -> CTO -> CEO -> root/user. Use `question_for_user` only when the user truly owns the decision. Use root/admin override only for audit, recovery, or an explicit user/coordinator override.
+6. Validate the visible tree with `subagent_list`/`subagent_get` and the dashboard parent/children fields. The current `parent_agent_id` field is compatibility metadata; the schema-backed implementation should enforce role edges, closure visibility, route audits, and per-recipient read receipts.
+
+---
+
 ## Required child reporting behavior
 
 Every child agent runtime must automatically emit the following:
