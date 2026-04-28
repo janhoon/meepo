@@ -1,4 +1,4 @@
-import type { TaskState, TaskWaitingOn } from "./task-types.js";
+import type { TaskState, TaskWaitingOn, TaskWorkspaceStrategy } from "./task-types.js";
 
 export const AGENT_STATES = [
 	"launching",
@@ -86,6 +86,9 @@ export interface SessionChildLinkEntryData {
 	tmuxWindowId?: string | null;
 	tmuxPaneId?: string | null;
 	taskId?: string | null;
+	workspaceStrategy?: TaskWorkspaceStrategy | null;
+	worktreeId?: string | null;
+	worktreeCwd?: string | null;
 	createdAt: number;
 }
 
@@ -111,6 +114,9 @@ export interface SpawnSubagentInput {
 	parentAgentId: string | null;
 	spawnSessionId: string | null;
 	spawnSessionFile: string | null;
+	workspaceStrategy?: TaskWorkspaceStrategy | null;
+	worktreeId?: string | null;
+	worktreeCwd?: string | null;
 }
 
 export interface SpawnSubagentResult {
@@ -121,6 +127,9 @@ export interface SpawnSubagentResult {
 	runDir: string;
 	sessionFile: string;
 	taskId: string | null;
+	workspaceStrategy: TaskWorkspaceStrategy | null;
+	worktreeId: string | null;
+	worktreeCwd: string | null;
 	transportKind: AgentTransportKind;
 	transportState: AgentTransportState;
 	bridgeSocketPath: string | null;
@@ -142,6 +151,9 @@ export interface ChildRuntimeEnvironment {
 	parentAgentId: string | null;
 	spawnSessionId: string | null;
 	spawnSessionFile: string | null;
+	workspaceStrategy: TaskWorkspaceStrategy | null;
+	worktreeId: string | null;
+	worktreeCwd: string | null;
 	transportKind: AgentTransportKind;
 	bridgeStatusFile: string | null;
 }
@@ -212,6 +224,9 @@ export interface AgentSummary {
 	spawnCwd: string;
 	projectKey: string;
 	taskId: string | null;
+	workspaceStrategy: TaskWorkspaceStrategy | null;
+	worktreeId: string | null;
+	worktreeCwd: string | null;
 	profile: string;
 	title: string;
 	task: string;
@@ -274,6 +289,9 @@ export interface CreateAgentInput {
 	spawnCwd: string;
 	projectKey: string;
 	taskId?: string | null;
+	workspaceStrategy?: TaskWorkspaceStrategy | null;
+	worktreeId?: string | null;
+	worktreeCwd?: string | null;
 	profile: string;
 	title: string;
 	task: string;
@@ -312,6 +330,9 @@ export interface UpdateAgentInput {
 	spawnCwd?: string;
 	projectKey?: string;
 	taskId?: string | null;
+	workspaceStrategy?: TaskWorkspaceStrategy | null;
+	worktreeId?: string | null;
+	worktreeCwd?: string | null;
 	profile?: string;
 	title?: string;
 	task?: string;

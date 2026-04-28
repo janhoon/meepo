@@ -1,7 +1,15 @@
 import { DatabaseSync } from "node:sqlite";
 import { ensureTmuxAgentsRuntimePaths } from "./paths.js";
 import { SERVICE_STATES } from "./service-types.js";
-import { TASK_STATES, TASK_WAITING_ON_VALUES } from "./task-types.js";
+import {
+	TASK_LAUNCH_POLICIES,
+	TASK_NEEDS_HUMAN_CATEGORIES,
+	TASK_NEEDS_HUMAN_KINDS,
+	TASK_NEEDS_HUMAN_STATES,
+	TASK_STATES,
+	TASK_WAITING_ON_VALUES,
+	TASK_WORKSPACE_STRATEGIES,
+} from "./task-types.js";
 import {
 	AGENT_STATES,
 	AGENT_TRANSPORT_KINDS,
@@ -34,6 +42,11 @@ const quotedAttentionItemAudiences = ATTENTION_ITEM_AUDIENCES.map((value) => `'$
 const quotedAttentionItemStates = ATTENTION_ITEM_STATES.map((value) => `'${value}'`).join(", ");
 const quotedTaskStates = TASK_STATES.map((value) => `'${value}'`).join(", ");
 const quotedTaskWaitingOn = TASK_WAITING_ON_VALUES.map((value) => `'${value}'`).join(", ");
+const quotedTaskLaunchPolicies = TASK_LAUNCH_POLICIES.map((value) => `'${value}'`).join(", ");
+const quotedTaskWorkspaceStrategies = TASK_WORKSPACE_STRATEGIES.map((value) => `'${value}'`).join(", ");
+const quotedTaskNeedsHumanKinds = TASK_NEEDS_HUMAN_KINDS.map((value) => `'${value}'`).join(", ");
+const quotedTaskNeedsHumanCategories = TASK_NEEDS_HUMAN_CATEGORIES.map((value) => `'${value}'`).join(", ");
+const quotedTaskNeedsHumanStates = TASK_NEEDS_HUMAN_STATES.map((value) => `'${value}'`).join(", ");
 
 const MIGRATIONS: Migration[] = [
 	{
@@ -291,6 +304,84 @@ ALTER TABLE agents ADD COLUMN bridge_last_error TEXT NULL;
 CREATE INDEX IF NOT EXISTS idx_agents_transport_state_updated ON agents(transport_state, updated_at DESC);
 `,
 	},
+	{
+		version: 8,
+		name: "task-launch-intent",
+		sql: `
+ALTER TABLE tasks ADD COLUMN requested_profile TEXT NULL;
+ALTER TABLE tasks ADD COLUMN assigned_profile TEXT NULL;
+ALTER TABLE tasks ADD COLUMN launch_policy TEXT NOT NULL DEFAULT 'manual' CHECK (launch_policy IN (${quotedTaskLaunchPolicies}));
+ALTER TABLE tasks ADD COLUMN prompt_template TEXT NULL;
+ALTER TABLE tasks ADD COLUMN role_hint TEXT NULL;
+CREATE INDEX IF NOT EXISTS idx_tasks_launch_policy_status_updated
+	ON tasks(launch_policy, status, updated_at DESC);
+`,
+	},
+	{
+		version: 9,
+		name: "task-worktree-metadata",
+		sql: `
+ALTER TABLE tasks ADD COLUMN workspace_strategy TEXT NULL CHECK (workspace_strategy IN (${quotedTaskWorkspaceStrategies}));
+ALTER TABLE tasks ADD COLUMN worktree_id TEXT NULL;
+ALTER TABLE tasks ADD COLUMN worktree_cwd TEXT NULL;
+ALTER TABLE agents ADD COLUMN workspace_strategy TEXT NULL CHECK (workspace_strategy IN (${quotedTaskWorkspaceStrategies}));
+ALTER TABLE agents ADD COLUMN worktree_id TEXT NULL;
+ALTER TABLE agents ADD COLUMN worktree_cwd TEXT NULL;
+CREATE INDEX IF NOT EXISTS idx_tasks_worktree_updated ON tasks(worktree_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agents_worktree_updated ON agents(worktree_id, updated_at DESC);
+`,
+	},
+	{
+		version: 10,
+		name: "task-agent-link-workspace-sync",
+		sql: `
+ALTER TABLE task_agent_links ADD COLUMN sync_task_workspace INTEGER NOT NULL DEFAULT 1;
+`,
+	},
+	{
+		version: 7,
+		name: "task-needs-human-queue",
+		sql: `
+CREATE TABLE IF NOT EXISTS task_needs_human (
+	id TEXT PRIMARY KEY,
+	task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+	agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+	task_agent_link_id TEXT NULL REFERENCES task_agent_links(id) ON DELETE SET NULL,
+	source_message_id TEXT NULL REFERENCES agent_messages(id) ON DELETE SET NULL,
+	legacy_attention_item_id TEXT NULL UNIQUE REFERENCES attention_items(id) ON DELETE SET NULL,
+	project_key TEXT NOT NULL,
+	spawn_session_id TEXT NULL,
+	spawn_session_file TEXT NULL,
+	kind TEXT NOT NULL CHECK (kind IN (${quotedTaskNeedsHumanKinds})),
+	category TEXT NOT NULL CHECK (category IN (${quotedTaskNeedsHumanCategories})),
+	waiting_on TEXT NULL CHECK (waiting_on IN (${quotedTaskWaitingOn})),
+	priority INTEGER NOT NULL,
+	state TEXT NOT NULL CHECK (state IN (${quotedTaskNeedsHumanStates})),
+	summary TEXT NOT NULL,
+	payload_json TEXT NULL,
+	response_required INTEGER NOT NULL DEFAULT 0,
+	response_prompt TEXT NULL,
+	response_schema_json TEXT NULL,
+	created_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL,
+	resolved_at INTEGER NULL,
+	resolved_by TEXT NULL,
+	resolution_kind TEXT NULL,
+	resolution_summary TEXT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_needs_human_project_state_priority
+	ON task_needs_human(project_key, state, priority ASC, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_task_needs_human_task_state_priority
+	ON task_needs_human(task_id, state, priority ASC, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_task_needs_human_agent_state_priority
+	ON task_needs_human(agent_id, state, priority ASC, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_task_needs_human_session_state_priority
+	ON task_needs_human(spawn_session_id, spawn_session_file, state, priority ASC, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_task_needs_human_waiting_state_priority
+	ON task_needs_human(waiting_on, state, priority ASC, updated_at DESC);
+`,
+	},
 ];
 
 let openConnection: { path: string; db: DatabaseSync } | undefined;
@@ -320,11 +411,27 @@ function getAppliedVersions(db: DatabaseSync): Set<number> {
 	return new Set(rows.map((row) => row.version));
 }
 
+function runMigrationSql(db: DatabaseSync, migration: Migration): void {
+	if (migration.name !== "task-launch-intent") {
+		db.exec(migration.sql);
+		return;
+	}
+	for (const statement of migration.sql.split(";").map((part) => part.trim()).filter(Boolean)) {
+		try {
+			db.exec(`${statement};`);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			if (message.includes("duplicate column name")) continue;
+			throw error;
+		}
+	}
+}
+
 function applyMigration(db: DatabaseSync, migration: Migration): void {
 	const now = Date.now();
 	db.exec("BEGIN IMMEDIATE;");
 	try {
-		db.exec(migration.sql);
+		runMigrationSql(db, migration);
 		db.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(
 			migration.version,
 			migration.name,

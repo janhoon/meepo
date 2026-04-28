@@ -8,9 +8,9 @@ This tracker follows `TMUX_SUBAGENTS_IMPLEMENTATION.md`.
 
 **Project:** In progress
 
-**Current state:** The original tmux-backed registry/task-board foundation is landed, and the RPC bridge migration is now actively in progress. New child runs now emit bridge artifacts, launch a tmux-side bridge entrypoint, persist transport metadata in the registry, attempt live downward delivery via the bridge, and surface transport-aware reconcile state. Coordinator wake-up routing from unresolved attention is also partially landed.
+**Current state:** The original tmux-backed registry/task-board foundation is landed, the RPC bridge migration is actively in progress, and task-linked worktree lifecycle UX is now surfaced. New child runs emit bridge artifacts, launch a tmux-side bridge entrypoint, persist transport metadata in the registry, attempt live downward delivery via the bridge, and surface transport-aware reconcile state. Task/agent detail surfaces now include worktree status, and cleanup previews can remove eligible done-task dedicated worktrees without deleting branches.
 
-**Last updated:** 2026-04-21
+**Last updated:** 2026-04-28
 
 ---
 
@@ -131,6 +131,8 @@ This tracker follows `TMUX_SUBAGENTS_IMPLEMENTATION.md`.
 - [x] Show reconciliation results in UI/events
 - [x] Inspect bridge metadata during reconcile
 - [x] Surface transport-aware states across the full vocabulary: `legacy`, `launching`, `listening`, `live`, `fallback`, `disconnected`, `stopped`, `error`, `lost` (healthy launch progresses `launching → listening → live`)
+- [x] Surface task-linked worktree lifecycle status in task/agent details and board panes
+- [x] Add conservative dedicated-worktree cleanup preview/removal flow that never deletes branches
 
 ### 12. Documentation polish
 - [x] Keep implementation doc in sync with reality
@@ -218,6 +220,18 @@ These items are easy to regress and should be verified repeatedly.
 ---
 
 ## Notes / implementation log
+
+### 2026-04-28
+- Added task-linked worktree lifecycle UX:
+  - task/agent CLI details now show effective worktree strategy, id, cwd, path existence, active linked agents, conflicts, and status (`active`, `reusable`, `ready-cleanup`, `stale-*`, `preserved-existing`, `conflict`).
+  - task board detail pane now shows worktree status/id/cwd plus active/conflicting linked worktree agents.
+- Added `task_worktree_cleanup` and `/task-worktree-cleanup`:
+  - previews by default.
+  - only removes eligible `dedicated_worktree` git worktrees for `done` tasks with no active linked agents.
+  - preserves `existing_worktree`, `spawn_cwd`, inherited, active, missing, unregistered, conflicting, and dirty worktrees by default.
+  - `force` is required for dirty eligible worktrees.
+  - branches are never deleted; branch deletion remains a separate manual operator decision.
+- Existing provisioning events remain in place for dedicated worktree create/reuse and existing-worktree metadata recording.
 
 ### 2026-04-21
 - Added RPC bridge migration foundation:

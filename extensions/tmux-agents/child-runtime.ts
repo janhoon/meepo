@@ -189,6 +189,9 @@ export function getChildRuntimeEnvironment(): ChildRuntimeEnvironment | null {
 		parentAgentId: process.env.PI_TMUX_AGENTS_PARENT_AGENT_ID?.trim() || null,
 		spawnSessionId: process.env.PI_TMUX_AGENTS_SPAWN_SESSION_ID?.trim() || null,
 		spawnSessionFile: process.env.PI_TMUX_AGENTS_SPAWN_SESSION_FILE?.trim() || null,
+		workspaceStrategy: (process.env.PI_TMUX_AGENTS_WORKSPACE_STRATEGY?.trim() as ChildRuntimeEnvironment["workspaceStrategy"]) || null,
+		worktreeId: process.env.PI_TMUX_AGENTS_WORKTREE_ID?.trim() || null,
+		worktreeCwd: process.env.PI_TMUX_AGENTS_WORKTREE_CWD?.trim() || null,
 		transportKind: process.env.PI_TMUX_AGENTS_TRANSPORT_KIND?.trim() === "rpc_bridge" ? "rpc_bridge" : "direct",
 		bridgeStatusFile: process.env.PI_TMUX_AGENTS_BRIDGE_STATUS_FILE?.trim() || null,
 	};
@@ -428,6 +431,7 @@ function publishChildUpdate(
 		validationSteps: payload.validationSteps,
 		reviewSummary: payload.reviewSummary,
 		finalSummary: payload.finalSummary,
+		sourceMessageId: messageId,
 	});
 }
 

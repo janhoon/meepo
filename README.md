@@ -90,6 +90,7 @@ pi install /path/to/meepo
 - `task_unlink_agent`
 - `task_attention`
 - `task_reconcile`
+- `task_worktree_cleanup`
 
 ### Subagent tools
 
@@ -129,6 +130,7 @@ pi install /path/to/meepo
 - `/task-unlink-agent <task-id> <agent-id>`
 - `/task-attention [scope]`
 - `/task-sync [scope]`
+- `/task-worktree-cleanup [task-id|scope] [remove] [force]`
 - `/task-spawn [task-id]`
 - `/agents`
 - `/agent-open <id>`
@@ -157,7 +159,8 @@ pi install /path/to/meepo
 5. Open `/task-board` when you want a Pi-native board view of `todo`, `blocked`, `in_progress`, `in_review`, and `done` work.
 6. Spin up a tracked service with `tmux_service_start` if the task needs an app server, watcher, or dev environment.
 7. Run `subagent_cleanup` or `/agent-cleanup` to remove finished tmux child windows once their work has been synthesized.
-8. Focus, capture, reconcile, or stop anything in the pack as needed.
+8. Run `task_worktree_cleanup` or `/task-worktree-cleanup` to preview task-linked worktree cleanup. Add `remove` only when you explicitly want eligible done-task dedicated git worktrees removed; branches are never deleted.
+9. Focus, capture, reconcile, or stop anything in the pack as needed.
 
 In other words: split the work, keep the replicas coordinated, and avoid the classic "which terminal was doing the important thing?" problem.
 
@@ -168,6 +171,8 @@ In other words: split the work, keep the replicas coordinated, and avoid the cla
 - The coordinator can now attempt live downward child delivery through the RPC bridge before falling back to the child-side mailbox poll path.
 - First-wave browser-facing role work prefers G Stack Browser-backed roles such as `qa-lead` and `design-lead`; Pi browser tools remain fallback-only during migration and troubleshooting.
 - The task board is task-first. Agents are linked executors, not the board cards themselves.
+- Task and agent details include effective worktree strategy/id/cwd/status. Worktree status distinguishes active, reusable, conflict, stale/missing, preserved existing worktree, and ready-cleanup states.
+- Worktree cleanup is conservative: only `dedicated_worktree` checkouts for `done` tasks with no active linked agents are removable, cleanup previews by default, dirty worktrees require `force`, `existing_worktree`/`spawn_cwd` metadata is preserved, and git branches are never deleted.
 - Search policy is ripgrep-first. `find` is intentionally excluded from the normal workflow.
 - Agent profiles live in `agents/` because the extension resolves them relative to its package layout.
 - The real superpower here is not just spawning more agents. It is keeping the task graph legible.

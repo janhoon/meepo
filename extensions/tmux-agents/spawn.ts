@@ -40,6 +40,9 @@ interface CreateRunArtifactsOptions {
 	priority: string | null;
 	taskId: string | null;
 	taskRecord?: TaskRecord | null;
+	workspaceStrategy?: TaskRecord["workspaceStrategy"] | null;
+	worktreeId?: string | null;
+	worktreeCwd?: string | null;
 	parentAgentId: string | null;
 	spawnSessionId: string | null;
 	spawnSessionFile: string | null;
@@ -102,6 +105,9 @@ function buildTaskFileContent(options: CreateRunArtifactsOptions): string {
 		options.priority ? `Priority: ${options.priority}` : null,
 		options.taskId ? `Task id: ${options.taskId}` : null,
 		taskRecord ? `Task status: ${taskRecord.status}` : null,
+		options.workspaceStrategy ? `Workspace strategy: ${options.workspaceStrategy}` : null,
+		options.worktreeId ? `Worktree id: ${options.worktreeId}` : null,
+		options.worktreeCwd ? `Worktree cwd: ${options.worktreeCwd}` : null,
 		"",
 		taskRecord ? "## Linked task" : null,
 		taskRecord ? taskRecord.title : null,
@@ -146,6 +152,9 @@ function buildRuntimeAppendixContent(options: CreateRunArtifactsOptions, session
 		`Task id: ${options.taskId ?? "none"}`,
 		`Spawn session id: ${options.spawnSessionId ?? "none"}`,
 		`Spawn session file: ${options.spawnSessionFile ?? "none"}`,
+		`Workspace strategy: ${options.workspaceStrategy ?? "none"}`,
+		`Worktree id: ${options.worktreeId ?? "none"}`,
+		`Worktree cwd: ${options.worktreeCwd ?? "none"}`,
 		"",
 		"Reporting contract:",
 		"- The runtime marks you started automatically when work begins.",
@@ -239,6 +248,9 @@ function buildBridgeConfig(options: CreateRunArtifactsOptions, paths: SubagentRu
 			PI_TMUX_AGENTS_PARENT_AGENT_ID: options.parentAgentId ?? "",
 			PI_TMUX_AGENTS_SPAWN_SESSION_ID: options.spawnSessionId ?? "",
 			PI_TMUX_AGENTS_SPAWN_SESSION_FILE: options.spawnSessionFile ?? "",
+			PI_TMUX_AGENTS_WORKSPACE_STRATEGY: options.workspaceStrategy ?? "",
+			PI_TMUX_AGENTS_WORKTREE_ID: options.worktreeId ?? "",
+			PI_TMUX_AGENTS_WORKTREE_CWD: options.worktreeCwd ?? "",
 			PI_TMUX_AGENTS_TRANSPORT_KIND: "rpc_bridge",
 			PI_TMUX_AGENTS_BRIDGE_STATUS_FILE: paths.bridgeStatusFile,
 		},
@@ -280,6 +292,9 @@ function writeRunArtifacts(options: CreateRunArtifactsOptions): SubagentRunPaths
 				transportKind: "rpc_bridge",
 				transportState: "launching",
 				downwardDeliveryMode: "rpc_bridge",
+				workspaceStrategy: options.workspaceStrategy ?? null,
+				worktreeId: options.worktreeId ?? null,
+				worktreeCwd: options.worktreeCwd ?? null,
 				lastToolName: null,
 				lastAssistantPreview: null,
 				lastError: null,
@@ -368,6 +383,9 @@ export function spawnSubagent(input: SpawnSubagentInput): SpawnSubagentResult {
 		parentAgentId: input.parentAgentId,
 		spawnSessionId: input.spawnSessionId,
 		spawnSessionFile: input.spawnSessionFile,
+		workspaceStrategy: input.workspaceStrategy ?? null,
+		worktreeId: input.worktreeId ?? null,
+		worktreeCwd: input.worktreeCwd ?? null,
 	};
 	if (input.taskId && !createRunOptions.taskRecord) {
 		throw new Error(`Unknown task id \"${input.taskId}\".`);
@@ -381,6 +399,9 @@ export function spawnSubagent(input: SpawnSubagentInput): SpawnSubagentResult {
 		spawnCwd,
 		projectKey: getProjectKey(spawnCwd),
 		taskId: input.taskId,
+		workspaceStrategy: input.workspaceStrategy ?? null,
+		worktreeId: input.worktreeId ?? null,
+		worktreeCwd: input.worktreeCwd ?? null,
 		profile: input.profile.name,
 		title: input.title,
 		task: input.task,
@@ -410,6 +431,9 @@ export function spawnSubagent(input: SpawnSubagentInput): SpawnSubagentResult {
 			task: input.task,
 			spawnCwd,
 			priority: input.priority,
+			workspaceStrategy: input.workspaceStrategy ?? null,
+			worktreeId: input.worktreeId ?? null,
+			worktreeCwd: input.worktreeCwd ?? null,
 		},
 		createdAt: now,
 	});
@@ -440,6 +464,9 @@ export function spawnSubagent(input: SpawnSubagentInput): SpawnSubagentResult {
 		title: input.title,
 		task: input.task,
 		spawnCwd,
+		workspaceStrategy: input.workspaceStrategy ?? null,
+		worktreeId: input.worktreeId ?? null,
+		worktreeCwd: input.worktreeCwd ?? null,
 	});
 	let tmuxTarget: TmuxTarget;
 	try {
@@ -499,6 +526,9 @@ export function spawnSubagent(input: SpawnSubagentInput): SpawnSubagentResult {
 		tmuxWindowId: tmuxTarget.windowId,
 		tmuxPaneId: tmuxTarget.paneId,
 		taskId: input.taskId,
+		workspaceStrategy: input.workspaceStrategy ?? null,
+		worktreeId: input.worktreeId ?? null,
+		worktreeCwd: input.worktreeCwd ?? null,
 		createdAt: now,
 	};
 	return {
@@ -509,6 +539,9 @@ export function spawnSubagent(input: SpawnSubagentInput): SpawnSubagentResult {
 		runDir: runArtifacts.runDir,
 		sessionFile: runArtifacts.sessionFile,
 		taskId: input.taskId,
+		workspaceStrategy: input.workspaceStrategy ?? null,
+		worktreeId: input.worktreeId ?? null,
+		worktreeCwd: input.worktreeCwd ?? null,
 		transportKind: "rpc_bridge",
 		transportState: "launching",
 		bridgeSocketPath: runArtifacts.bridgeSocketPath,

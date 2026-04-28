@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { resolve } from "node:path";
+import { spawnSync } from "node:child_process";
+import { basename, dirname, join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { DynamicBorder } from "@mariozechner/pi-coding-agent";
 import { StringEnum } from "@mariozechner/pi-ai";
@@ -13,6 +14,7 @@ import { closeTmuxAgentsDb, getTmuxAgentsDb } from "./db.js";
 import { getRpcBridgeSocketPath, pingRpcBridge, readRpcBridgeStatus, sendRpcBridgeCommand } from "./rpc-client.js";
 import { SESSION_CHILD_LINK_ENTRY_TYPE } from "./paths.js";
 import { getSubagentProfile, listSubagentProfiles, normalizeBuiltinTools } from "./profiles.js";
+import { resolveTaskLaunchProfile } from "./task-launch.js";
 import { getProjectKey } from "./project.js";
 import {
 	createAgentEvent,
@@ -25,9 +27,11 @@ import {
 	listMessagesForRecipient,
 	markAgentMessages,
 	updateAgent,
+	updateAttentionItem,
 	updateAttentionItemsForAgent,
 } from "./registry.js";
 import {
+	claimTaskNeedsHumanResponse,
 	createTask,
 	createTaskEvent,
 	getTask,
@@ -36,10 +40,13 @@ import {
 	listTaskAgentLinks,
 	listTaskAttention,
 	listTaskEvents,
+	listTaskNeedsHuman,
 	listTasks,
+	OPEN_TASK_NEEDS_HUMAN_STATES,
 	reconcileTasks,
 	unlinkTaskAgent,
 	updateTask,
+	updateTaskNeedsHumanForAgent,
 } from "./task-registry.js";
 import { getService, listServices, updateService } from "./service-registry.js";
 import { readServiceStatus, spawnService, tailFileLines } from "./service-spawn.js";
@@ -73,10 +80,13 @@ import type {
 	ListTasksFilters,
 	TaskAgentLinkRecord,
 	TaskAttentionRecord,
+	TaskLaunchPolicy,
+	TaskNeedsHumanRecord,
 	TaskRecord,
 	TaskState,
 	TaskSummaryCounts,
 	TaskWaitingOn,
+	TaskWorkspaceStrategy,
 	UpdateTaskInput,
 } from "./task-types.js";
 
@@ -88,10 +98,16 @@ const liveBridgeDeliveryInFlight = new Set<string>();
 const scheduledBridgeDeliveryRetries = new Map<string, ReturnType<typeof setTimeout>>();
 const sentCoordinatorAttentionIds = new Set<string>();
 const notifiedUserAttentionIds = new Set<string>();
+const sentCoordinatorNeedsHumanIds = new Set<string>();
+const notifiedUserNeedsHumanIds = new Set<string>();
 
 const LIST_SCOPE = StringEnum(["all", "current_project", "current_session", "descendants"] as const, {
 	description: "Which slice of the global registry to inspect.",
 	default: "current_project",
+});
+
+const TASK_WORKSPACE_STRATEGY = StringEnum(["inherit", "spawn_cwd", "existing_worktree", "dedicated_worktree"] as const, {
+	description: "Workspace/worktree strategy for delegated work. `dedicated_worktree` provisions/reuses a git worktree; `existing_worktree` records an existing cwd as worktree metadata.",
 });
 
 const SubagentSpawnParams = Type.Object({
@@ -99,11 +115,12 @@ const SubagentSpawnParams = Type.Object({
 	task: Type.String({ description: "Task to delegate to the child agent." }),
 	profile: Type.String({ description: "Agent profile name from ~/.pi/agent/agents/*.md." }),
 	taskId: Type.Optional(Type.String({ description: "Optional existing task id to attach this child to. If omitted, a task is auto-created." })),
-	cwd: Type.Optional(Type.String({ description: "Working directory for the child. Defaults to the current cwd." })),
+	cwd: Type.Optional(Type.String({ description: "Explicit working directory for the child. Defaults to the task worktree cwd when present, then the task spawn cwd when attached to a task, then the current cwd." })),
+	workspaceStrategy: Type.Optional(TASK_WORKSPACE_STRATEGY),
 	model: Type.Optional(Type.String({ description: "Optional model override." })),
 	tools: Type.Optional(
 		Type.Array(Type.String({ description: "Child tool name" }), {
-			description: "Optional child tool override. Allowed: read, bash, grep, ls, edit, write, task_create, task_list, task_get, task_update, task_move, task_note, task_attention.",
+			description: "Optional child tool override. Allowed: read, bash, grep, ls, edit, write, task_create, task_list, task_get, task_update, task_move, task_note, task_attention. Unsupported names are ignored; invalid-only overrides grant no built-in tools.",
 			maxItems: 16,
 		}),
 	),
@@ -209,6 +226,11 @@ const TASK_WAITING_ON = StringEnum(["user", "coordinator", "service", "external"
 	description: "Who or what this blocked task is waiting on.",
 });
 
+const TASK_LAUNCH_POLICY = StringEnum(["manual", "autonomous"] as const, {
+	description: "Whether a ready todo task should stay manual or launch an agent automatically.",
+	default: "manual",
+});
+
 const TASK_SORT = StringEnum(["priority", "updated", "created", "title", "status"] as const, {
 	description: "Task list sort order.",
 	default: "priority",
@@ -230,6 +252,15 @@ const TaskCreateParams = Type.Object({
 	status: Type.Optional(TASK_STATE),
 	blockedReason: Type.Optional(Type.String({ description: "Optional reason if creating directly in blocked." })),
 	waitingOn: Type.Optional(TASK_WAITING_ON),
+	requestedProfile: Type.Optional(Type.String({ description: "Explicit preferred subagent profile for task execution intent." })),
+	assignedProfile: Type.Optional(Type.String({ description: "Resolved or manually assigned subagent profile for task execution intent." })),
+	launchPolicy: Type.Optional(TASK_LAUNCH_POLICY),
+	autonomousStart: Type.Optional(Type.Boolean({ description: "Shortcut for launchPolicy=autonomous; ready todo tasks spawn immediately after creation.", default: false })),
+	promptTemplate: Type.Optional(Type.String({ description: "Optional prompt template or template id hint for the launched child." })),
+	roleHint: Type.Optional(Type.String({ description: "Optional role/type hint used by autonomous profile selection." })),
+	workspaceStrategy: Type.Optional(TASK_WORKSPACE_STRATEGY),
+	worktreeId: Type.Optional(Type.String({ description: "Optional stable worktree identity for this task." })),
+	worktreeCwd: Type.Optional(Type.String({ description: "Optional resolved worktree cwd for delegated agents to inherit. Metadata only; no worktree is provisioned." })),
 });
 
 const TaskListParams = Type.Object({
@@ -264,6 +295,14 @@ const TaskUpdateParams = Type.Object({
 	files: Type.Optional(Type.Array(Type.String(), { maxItems: 200 })),
 	blockedReason: Type.Optional(Type.String()),
 	waitingOn: Type.Optional(TASK_WAITING_ON),
+	requestedProfile: Type.Optional(Type.String()),
+	assignedProfile: Type.Optional(Type.String()),
+	launchPolicy: Type.Optional(TASK_LAUNCH_POLICY),
+	promptTemplate: Type.Optional(Type.String()),
+	roleHint: Type.Optional(Type.String()),
+	workspaceStrategy: Type.Optional(Type.Union([TASK_WORKSPACE_STRATEGY, Type.Null()], { description: "Workspace/worktree strategy metadata; null clears it." })),
+	worktreeId: Type.Optional(Type.Union([Type.String(), Type.Null()], { description: "Stable worktree identity; null clears it. Empty strings are normalized to null." })),
+	worktreeCwd: Type.Optional(Type.Union([Type.String(), Type.Null()], { description: "Resolved worktree cwd metadata; null clears it. Empty strings are normalized to null; no worktree is provisioned." })),
 	reviewSummary: Type.Optional(Type.String()),
 	finalSummary: Type.Optional(Type.String()),
 });
@@ -304,9 +343,79 @@ const TaskAttentionParams = Type.Object({
 	limit: Type.Optional(Type.Integer({ description: "Maximum number of task attention items.", minimum: 1, maximum: 500, default: 100 })),
 });
 
+const TASK_RESPONSE_MODE = StringEnum(["task_patch", "child_message", "combined"] as const, {
+	description: "Route for a needs-human response: patch task only, message child only, or patch then message child.",
+	default: "child_message",
+});
+
+const TASK_RESPONSE_RESOLUTION = StringEnum(["acknowledged", "resolved", "cancelled", "superseded"] as const, {
+	description: "How to mark the needs-human queue item after responding. Use acknowledged only with mode=task_patch; child_message and combined must use terminal resolved/cancelled/superseded semantics before queueing a child message.",
+	default: "resolved",
+});
+
+const NullableString = (description?: string) => Type.Union([Type.String(description ? { description } : {}), Type.Null()]);
+const NullableTaskWaitingOn = Type.Union([TASK_WAITING_ON, Type.Null()]);
+const NullableTaskLaunchPolicy = Type.Union([TASK_LAUNCH_POLICY, Type.Null()]);
+const NullableTaskWorkspaceStrategy = Type.Union([TASK_WORKSPACE_STRATEGY, Type.Null()]);
+
+const TaskResponsePatchParams = Type.Object({
+	title: Type.Optional(Type.String({ description: "Short task title." })),
+	summary: Type.Optional(NullableString("Short task summary; null clears it.")),
+	description: Type.Optional(NullableString("Longer task description; null clears it.")),
+	parentTaskId: Type.Optional(NullableString("Optional parent task id; null clears it.")),
+	priority: Type.Optional(Type.Integer({ minimum: 0, maximum: 9 })),
+	priorityLabel: Type.Optional(NullableString("Priority label; null clears it.")),
+	acceptanceCriteria: Type.Optional(Type.Array(Type.String(), { maxItems: 100 })),
+	planSteps: Type.Optional(Type.Array(Type.String(), { maxItems: 100 })),
+	validationSteps: Type.Optional(Type.Array(Type.String(), { maxItems: 100 })),
+	labels: Type.Optional(Type.Array(Type.String(), { maxItems: 100 })),
+	files: Type.Optional(Type.Array(Type.String(), { maxItems: 200 })),
+	status: Type.Optional(TASK_STATE),
+	blockedReason: Type.Optional(NullableString("Blocked reason; null clears it.")),
+	waitingOn: Type.Optional(NullableTaskWaitingOn),
+	requestedProfile: Type.Optional(NullableString("Requested profile; null clears it.")),
+	assignedProfile: Type.Optional(NullableString("Assigned profile; null clears it.")),
+	launchPolicy: Type.Optional(NullableTaskLaunchPolicy),
+	promptTemplate: Type.Optional(NullableString("Prompt template; null clears it.")),
+	roleHint: Type.Optional(NullableString("Role hint; null clears it.")),
+	workspaceStrategy: Type.Optional(NullableTaskWorkspaceStrategy),
+	worktreeId: Type.Optional(NullableString("Stable worktree identity; null clears it.")),
+	worktreeCwd: Type.Optional(NullableString("Resolved worktree cwd; null clears it.")),
+	reviewSummary: Type.Optional(NullableString("Review summary; null clears it.")),
+	finalSummary: Type.Optional(NullableString("Final summary; null clears it.")),
+});
+
+const TaskRespondParams = Type.Object({
+	needsHumanId: Type.String({ description: "task_needs_human queue id from task_attention." }),
+	mode: Type.Optional(TASK_RESPONSE_MODE),
+	patch: Type.Optional(TaskResponsePatchParams),
+	kind: Type.Optional(DOWNWARD_MESSAGE_KIND),
+	summary: Type.Optional(Type.String({ description: "Short child message or response summary." })),
+	details: Type.Optional(Type.String({ description: "Additional context for the child." })),
+	files: Type.Optional(Type.Array(Type.String({ description: "Relevant file path" }), { maxItems: 100 })),
+	actionPolicy: Type.Optional(DOWNWARD_ACTION_POLICY),
+	deliveryMode: Type.Optional(DELIVERY_MODE),
+	resolution: Type.Optional(TASK_RESPONSE_RESOLUTION),
+	resolutionSummary: Type.Optional(Type.String({ description: "Queue resolution summary. Defaults to summary or patch description. resolution=acknowledged is allowed only for mode=task_patch; child_message/combined require resolved, cancelled, or superseded to prevent duplicate child replies." })),
+});
+
+const TaskOpenResponseParams = Type.Object({
+	needsHumanId: Type.String({ description: "task_needs_human queue id to inspect/open." }),
+	acknowledge: Type.Optional(Type.Boolean({ description: "Mark the queue item acknowledged without resolving it.", default: true })),
+});
+
 const TaskReconcileParams = Type.Object({
 	scope: Type.Optional(LIST_SCOPE),
 	limit: Type.Optional(Type.Integer({ description: "Maximum number of items to reconcile.", minimum: 1, maximum: 500, default: 200 })),
+});
+
+const TaskWorktreeCleanupParams = Type.Object({
+	scope: Type.Optional(LIST_SCOPE),
+	ids: Type.Optional(Type.Array(Type.String({ description: "Task id" }), { minItems: 1, maxItems: 100 })),
+	dryRun: Type.Optional(Type.Boolean({ description: "Preview cleanup candidates without removing git worktrees.", default: true })),
+	remove: Type.Optional(Type.Boolean({ description: "Explicitly remove eligible dedicated git worktrees. Branches are never deleted.", default: false })),
+	force: Type.Optional(Type.Boolean({ description: "Allow removing dirty eligible dedicated worktrees. Still never removes existing_worktree or active-agent worktrees.", default: false })),
+	limit: Type.Optional(Type.Integer({ description: "Maximum number of tasks to inspect.", minimum: 1, maximum: 500, default: 200 })),
 });
 
 const SERVICE_SCOPE = StringEnum(["all", "current_project", "current_session"] as const, {
@@ -383,6 +492,17 @@ function resolveInputPath(baseDir: string, rawPath: string | undefined): string 
 	return resolve(baseDir, normalized);
 }
 
+function normalizeNullableMetadataString(rawValue: string | null | undefined): string | null | undefined {
+	if (rawValue === undefined || rawValue === null) return rawValue;
+	return rawValue.trim() || null;
+}
+
+function resolveNullableInputPath(baseDir: string, rawPath: string | null | undefined): string | null | undefined {
+	const normalized = normalizeNullableMetadataString(rawPath);
+	if (normalized === undefined || normalized === null) return normalized;
+	return resolveInputPath(baseDir, normalized);
+}
+
 function assertDirectory(path: string): void {
 	let stats;
 	try {
@@ -393,6 +513,97 @@ function assertDirectory(path: string): void {
 	if (!stats.isDirectory()) {
 		throw new Error(`Working directory is not a directory: ${path}`);
 	}
+}
+
+function runGit(args: string[], cwd: string): string {
+	const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+	if (result.status !== 0) {
+		throw new Error(result.stderr?.trim() || result.stdout?.trim() || `git ${args.join(" ")} failed`);
+	}
+	return result.stdout?.trim() ?? "";
+}
+
+function tryRunGit(args: string[], cwd: string): { ok: boolean; stdout: string } {
+	const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+	return { ok: result.status === 0, stdout: result.stdout?.trim() ?? "" };
+}
+
+function sanitizeWorktreeSegment(value: string): string {
+	const sanitized = value.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+	return sanitized || "task";
+}
+
+function parseWorktreeList(output: string): Array<{ path: string; branch: string | null; head: string | null }> {
+	return output.split(/\n\s*\n/).map((block) => {
+		let path = "";
+		let branch: string | null = null;
+		let head: string | null = null;
+		for (const line of block.split("\n")) {
+			if (line.startsWith("worktree ")) path = line.slice("worktree ".length).trim();
+			if (line.startsWith("branch ")) branch = line.slice("branch ".length).trim();
+			if (line.startsWith("HEAD ")) head = line.slice("HEAD ".length).trim();
+		}
+		return { path, branch, head };
+	}).filter((item) => item.path);
+}
+
+function assertExpectedWorktreeHead(task: TaskRecord, worktreeCwd: string, branchName: string, branchRef: string): void {
+	const actualBranch = tryRunGit(["symbolic-ref", "--short", "HEAD"], worktreeCwd).stdout;
+	if (actualBranch !== branchName) {
+		throw new Error(`Dedicated worktree path ${worktreeCwd} for task ${task.id} is checked out on ${actualBranch || "detached HEAD"}, expected ${branchName}. Resolve the mismatch or choose a different task/worktree before spawning.`);
+	}
+	const worktreeHead = runGit(["rev-parse", "HEAD"], worktreeCwd);
+	const branchHead = runGit(["rev-parse", branchRef], worktreeCwd);
+	if (worktreeHead !== branchHead) {
+		throw new Error(`Dedicated worktree path ${worktreeCwd} for task ${task.id} has HEAD ${worktreeHead}, but ${branchName} resolves to ${branchHead}. Resolve the mismatch before spawning.`);
+	}
+}
+
+function assertExistingWorktreeCwd(worktreeCwd: string): void {
+	assertDirectory(worktreeCwd);
+	const insideWorktree = runGit(["rev-parse", "--is-inside-work-tree"], worktreeCwd);
+	if (insideWorktree !== "true") {
+		throw new Error(`workspaceStrategy=existing_worktree requires a cwd inside a git worktree: ${worktreeCwd}`);
+	}
+	runGit(["rev-parse", "--show-toplevel"], worktreeCwd);
+}
+
+function provisionTaskWorktree(task: TaskRecord, baseCwd: string): { worktreeId: string; worktreeCwd: string; branchName: string; reused: boolean; repoRoot: string } {
+	const repoRoot = runGit(["rev-parse", "--show-toplevel"], baseCwd);
+	assertDirectory(repoRoot);
+	const worktreeId = sanitizeWorktreeSegment(task.id);
+	const branchName = `pi/task/${worktreeId}`;
+	const worktreeCwd = join(dirname(repoRoot), `${basename(repoRoot)}.pi-worktrees`, worktreeId);
+	const resolvedWorktreeCwd = resolve(worktreeCwd);
+	const branchRef = `refs/heads/${branchName}`;
+	const worktrees = parseWorktreeList(runGit(["worktree", "list", "--porcelain"], repoRoot));
+	const worktreeAtPath = worktrees.find((item) => resolve(item.path) === resolvedWorktreeCwd) ?? null;
+	const worktreeForBranch = worktrees.find((item) => item.branch === branchRef) ?? null;
+	if (worktreeForBranch && resolve(worktreeForBranch.path) !== resolvedWorktreeCwd) {
+		throw new Error(`Branch ${branchName} for task ${task.id} is already checked out at ${resolve(worktreeForBranch.path)}, not deterministic path ${resolvedWorktreeCwd}. Use that worktree explicitly or clean up the conflicting worktree before spawning.`);
+	}
+	if (worktreeAtPath && worktreeAtPath.branch !== branchRef) {
+		throw new Error(`Deterministic worktree path ${resolvedWorktreeCwd} for task ${task.id} is registered for ${worktreeAtPath.branch ?? "detached HEAD"}, expected ${branchName}. Resolve the mismatch before spawning.`);
+	}
+	if (worktreeAtPath) {
+		assertDirectory(resolvedWorktreeCwd);
+		assertExpectedWorktreeHead(task, resolvedWorktreeCwd, branchName, branchRef);
+		return { worktreeId, worktreeCwd: resolvedWorktreeCwd, branchName, reused: true, repoRoot };
+	}
+	if (existsSync(resolvedWorktreeCwd)) {
+		throw new Error(`Deterministic worktree path ${resolvedWorktreeCwd} for task ${task.id} already exists but is not a registered git worktree for ${branchName}. Move or inspect it before spawning.`);
+	}
+	const branchExists = tryRunGit(["show-ref", "--verify", "--quiet", branchRef], repoRoot).ok;
+	const addArgs = branchExists ? ["worktree", "add", resolvedWorktreeCwd, branchName] : ["worktree", "add", "-b", branchName, resolvedWorktreeCwd, "HEAD"];
+	try {
+		runGit(addArgs, repoRoot);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		throw new Error(`Unable to provision dedicated worktree for task ${task.id} from ${baseCwd}: ${message}`);
+	}
+	assertDirectory(resolvedWorktreeCwd);
+	assertExpectedWorktreeHead(task, resolvedWorktreeCwd, branchName, branchRef);
+	return { worktreeId, worktreeCwd: resolvedWorktreeCwd, branchName, reused: false, repoRoot };
 }
 
 function stateIcon(state: AgentSummary["state"]): string {
@@ -436,9 +647,58 @@ function messageKindLabel(message: AgentMessageRecord | null): string {
 	}
 }
 
+function formatWorktreeLifecycle(task: Pick<TaskRecord, "id" | "status" | "workspaceStrategy" | "worktreeId" | "worktreeCwd">, linkedAgents: AgentSummary[] = []): { label: string; status: string; details: string[]; conflictCount: number; activeAgentCount: number } {
+	if (!task.workspaceStrategy && !task.worktreeId && !task.worktreeCwd) {
+		return { label: "none", status: "none", details: ["worktree: none"], conflictCount: 0, activeAgentCount: 0 };
+	}
+	const activeAgentCount = linkedAgents.filter((agent) => ["launching", "running", "idle", "waiting", "blocked"].includes(agent.state)).length;
+	const conflicts = linkedAgents.filter((agent) => {
+		if (agent.worktreeCwd && task.worktreeCwd && resolve(agent.worktreeCwd) !== resolve(task.worktreeCwd)) return true;
+		if (agent.worktreeId && task.worktreeId && agent.worktreeId !== task.worktreeId) return true;
+		return false;
+	});
+	const pathExists = task.worktreeCwd ? existsSync(task.worktreeCwd) : false;
+	let status = "metadata-only";
+	if (conflicts.length > 0) status = "conflict";
+	else if (activeAgentCount > 0) status = "active";
+	else if (task.workspaceStrategy === "dedicated_worktree" && !task.worktreeCwd) status = "stale-missing";
+	else if (task.worktreeCwd && !pathExists) status = "stale-missing";
+	else if (task.workspaceStrategy === "dedicated_worktree" && task.status === "done") status = "ready-cleanup";
+	else if (task.workspaceStrategy === "dedicated_worktree") status = "reusable";
+	else if (task.workspaceStrategy === "existing_worktree") status = "preserved-existing";
+	else if (task.workspaceStrategy === "spawn_cwd") status = "opt-out-spawn-cwd";
+	else if (task.workspaceStrategy === "inherit") status = "inherit";
+	const name = task.worktreeId ?? "-";
+	const cwd = task.worktreeCwd ?? "-";
+	const label = `${status}${task.worktreeId ? `:${task.worktreeId}` : ""}`;
+	const details = [
+		`worktree: ${status}`,
+		`worktreeStrategy: ${task.workspaceStrategy ?? "-"}`,
+		`worktreeId: ${name}`,
+		`worktreeCwd: ${cwd}`,
+		`worktreePathExists: ${task.worktreeCwd ? (pathExists ? "yes" : "no") : "-"}`,
+		`worktreeActiveAgents: ${activeAgentCount}`,
+		`worktreeConflicts: ${conflicts.length > 0 ? conflicts.map((agent) => `${agent.id}:${agent.worktreeId ?? "-"}:${agent.worktreeCwd ?? "-"}`).join(", ") : "none"}`,
+	];
+	return { label, status, details, conflictCount: conflicts.length, activeAgentCount };
+}
+
+function formatAgentWorktreeStatus(agent: AgentSummary): string {
+	if (!agent.workspaceStrategy && !agent.worktreeId && !agent.worktreeCwd) return "none";
+	const pathExists = agent.worktreeCwd ? existsSync(agent.worktreeCwd) : false;
+	const active = ["launching", "running", "idle", "waiting", "blocked"].includes(agent.state);
+	if (active) return "active";
+	if (agent.worktreeCwd && !pathExists) return "stale-missing";
+	if (agent.workspaceStrategy === "dedicated_worktree" && ["done", "error", "stopped", "lost"].includes(agent.state)) return "terminal-reusable-or-cleanup";
+	if (agent.workspaceStrategy === "existing_worktree") return "preserved-existing";
+	return agent.workspaceStrategy ?? "metadata-only";
+}
+
 function formatAgentLine(agent: AgentSummary): string {
 	const parts = [`${stateIcon(agent.state)} ${agent.id}`, `${agent.profile}`, truncateText(agent.title, 40)];
 	if (agent.taskId) parts.push(`task=${agent.taskId}`);
+	if (agent.workspaceStrategy) parts.push(`workspace=${agent.workspaceStrategy}`);
+	if (agent.worktreeId || agent.worktreeCwd) parts.push(`worktree=${agent.worktreeId ?? agent.worktreeCwd}(${formatAgentWorktreeStatus(agent)})`);
 	if (agent.transportKind === "rpc_bridge") {
 		parts.push(`transport=${agent.transportState}`);
 	}
@@ -460,6 +720,11 @@ function formatAgentDetails(agent: AgentSummary): string {
 		`task: ${agent.task}`,
 		`projectKey: ${agent.projectKey}`,
 		`taskId: ${agent.taskId ?? "-"}`,
+		`workspaceStrategy: ${agent.workspaceStrategy ?? "-"}`,
+		`worktreeId: ${agent.worktreeId ?? "-"}`,
+		`worktreeCwd: ${agent.worktreeCwd ?? "-"}`,
+		`worktreeStatus: ${formatAgentWorktreeStatus(agent)}`,
+		`worktreePathExists: ${agent.worktreeCwd ? (existsSync(agent.worktreeCwd) ? "yes" : "no") : "-"}`,
 		`spawnCwd: ${agent.spawnCwd}`,
 		`spawnSessionId: ${agent.spawnSessionId ?? "-"}`,
 		`spawnSessionFile: ${agent.spawnSessionFile ?? "-"}`,
@@ -503,10 +768,13 @@ function formatAgentDetails(agent: AgentSummary): string {
 }
 
 function formatTaskLine(task: TaskRecord, linkedAgents: AgentSummary[] = []): string {
+	const worktree = formatWorktreeLifecycle(task, linkedAgents);
 	const flags = [
 		`status=${task.status}`,
 		task.waitingOn ? `waiting=${task.waitingOn}` : null,
 		`p${task.priority}`,
+		task.workspaceStrategy ? `workspace=${task.workspaceStrategy}` : null,
+		worktree.status !== "none" ? `worktree=${worktree.label}` : null,
 		linkedAgents.length > 0 ? `${linkedAgents.length} agent${linkedAgents.length === 1 ? "" : "s"}` : null,
 	]
 		.filter((value): value is string => Boolean(value))
@@ -524,6 +792,12 @@ function formatTaskDetails(task: TaskRecord, linkedAgents: AgentSummary[] = [], 
 		`priority: ${task.priority}${task.priorityLabel ? ` (${task.priorityLabel})` : ""}`,
 		`waitingOn: ${task.waitingOn ?? "-"}`,
 		`blockedReason: ${task.blockedReason ?? "-"}`,
+		`launchPolicy: ${task.launchPolicy}`,
+		`requestedProfile: ${task.requestedProfile ?? "-"}`,
+		`assignedProfile: ${task.assignedProfile ?? "-"}`,
+		`promptTemplate: ${task.promptTemplate ?? "-"}`,
+		`roleHint: ${task.roleHint ?? "-"}`,
+		...formatWorktreeLifecycle(task, linkedAgents).details,
 		`projectKey: ${task.projectKey}`,
 		`spawnCwd: ${task.spawnCwd}`,
 		`spawnSessionId: ${task.spawnSessionId ?? "-"}`,
@@ -553,7 +827,7 @@ function formatTaskDetails(task: TaskRecord, linkedAgents: AgentSummary[] = [], 
 		`finalSummary: ${task.finalSummary ?? "-"}`,
 		"",
 		"linkedAgents:",
-		...(linkedAgents.length > 0 ? linkedAgents.map((agent) => `- ${agent.id} · ${agent.profile} · ${agent.state}`) : ["- none"]),
+		...(linkedAgents.length > 0 ? linkedAgents.map((agent) => `- ${agent.id} · ${agent.profile} · ${agent.state}${agent.worktreeCwd ? ` · worktree=${agent.worktreeCwd}` : ""} · worktreeStatus=${formatAgentWorktreeStatus(agent)}`) : ["- none"]),
 	];
 	if (events.length > 0) {
 		lines.push("", "recentEvents:");
@@ -687,14 +961,15 @@ function formatTaskCounts(summary: TaskSummaryCounts): string | undefined {
 	return `🗂 ${summary.todo} todo · ${summary.blocked} blocked · ${summary.inProgress} in-progress · ${summary.inReview} review · ${summary.done} done`;
 }
 
-function formatFleetSummary(taskSummary: TaskSummaryCounts, agentSummary: FleetSummary): string | undefined {
+function formatFleetSummary(taskSummary: TaskSummaryCounts, agentSummary: FleetSummary, needsHumanCount = 0): string | undefined {
 	const taskText = formatTaskCounts(taskSummary);
 	const agentText =
 		agentSummary.active === 0 && agentSummary.attentionOpen === 0 && agentSummary.unread === 0
 			? undefined
 			: `🤖 ${agentSummary.active} active · ${agentSummary.blocked} blocked · ${agentSummary.attentionOpen} open attention · ${agentSummary.unread} unread`;
-	if (!taskText && !agentText) return undefined;
-	return [taskText, agentText].filter((value): value is string => Boolean(value)).join(" · ");
+	const needsHumanText = needsHumanCount > 0 ? `🚦 ${needsHumanCount} needs-human` : undefined;
+	if (!taskText && !agentText && !needsHumanText) return undefined;
+	return [taskText, needsHumanText, agentText].filter((value): value is string => Boolean(value)).join(" · ");
 }
 
 function attentionItemLabel(item: AttentionItemRecord): string {
@@ -727,6 +1002,27 @@ function attentionItemIcon(item: AttentionItemRecord): string {
 	}
 }
 
+function formatTaskNeedsHumanWakeup(item: TaskAttentionRecord, agent: AgentSummary | undefined): string {
+	const payload = (item.payload && typeof item.payload === "object" ? item.payload : {}) as {
+		details?: string;
+		answerNeeded?: string;
+		recommendedNextAction?: string;
+		files?: string[];
+	};
+	return [
+		`Task ${item.taskId} needs human attention (${item.kind}/${item.category}).`,
+		`Title: ${item.title}`,
+		`Agent: ${item.agentId}${agent?.profile ? ` (${agent.profile})` : ""}`,
+		`Waiting on: ${item.waitingOn ?? "coordinator"}`,
+		`Summary: ${item.summary}`,
+		payload.answerNeeded ? `Answer needed: ${payload.answerNeeded}` : null,
+		payload.recommendedNextAction ? `Recommended next action: ${payload.recommendedNextAction}` : null,
+		payload.details ? `Details: ${payload.details}` : null,
+		Array.isArray(payload.files) && payload.files.length > 0 ? `Files: ${payload.files.join(", ")}` : null,
+		`Open with /needs-human or /task-response-open ${item.id}; respond with /task-respond ${item.id}.`,
+	].filter((line): line is string => Boolean(line)).join("\n");
+}
+
 function formatAttentionWakeup(item: AttentionItemRecord, agent: AgentSummary | undefined): string {
 	const payload = (item.payload && typeof item.payload === "object" ? item.payload : {}) as {
 		details?: string;
@@ -755,13 +1051,40 @@ async function wakeCoordinatorFromAttention(pi: ExtensionAPI, ctx: ExtensionCont
 	if (childRuntimeEnvironment) return;
 	const db = getTmuxAgentsDb();
 	const projectKey = getProjectKey(ctx.cwd);
+	const taskItems = listTaskAttention(db, { projectKey, limit: 25 });
+	const agents = new Map(listAgents(db, { projectKey, limit: 200 }).map((agent) => [agent.id, agent]));
+
+	for (const item of taskItems) {
+		const agent = agents.get(item.agentId);
+		if (item.waitingOn === "user") {
+			if (notifiedUserNeedsHumanIds.has(item.id)) continue;
+			try {
+				ctx.ui.notify(`🗂 ${item.title} · ${item.kind} · ${item.summary}`, "warning");
+				notifiedUserNeedsHumanIds.add(item.id);
+			} catch (error) {
+				notifiedUserNeedsHumanIds.delete(item.id);
+				throw error;
+			}
+			continue;
+		}
+		if (sentCoordinatorNeedsHumanIds.has(item.id)) continue;
+		sentCoordinatorNeedsHumanIds.add(item.id);
+		try {
+			await pi.sendUserMessage(formatTaskNeedsHumanWakeup(item, agent), { deliverAs: item.kind === "review_gate" || item.kind === "complete" ? "followUp" : "steer" });
+		} catch (error) {
+			sentCoordinatorNeedsHumanIds.delete(item.id);
+			throw error;
+		}
+		return;
+	}
+	if (taskItems.length > 0) return;
+
 	const items = listAttentionItems(db, {
 		projectKey,
 		states: ["open", "waiting_on_coordinator", "waiting_on_user"],
 		limit: 25,
 	});
 	if (items.length === 0) return;
-	const agents = new Map(listAgents(db, { projectKey, limit: 200 }).map((agent) => [agent.id, agent]));
 
 	for (const item of items) {
 		const agent = agents.get(item.agentId);
@@ -798,12 +1121,13 @@ function updateFleetUi(ctx: ExtensionContext): void {
 	const projectKey = getProjectKey(ctx.cwd);
 	const taskSummary = getTaskSummary(db, { projectKey });
 	const agentSummary = getFleetSummary(db, { projectKey });
-	ctx.ui.setStatus("tmux-agents", formatFleetSummary(taskSummary, agentSummary));
-	const taskItems = listTaskAttention(db, { projectKey, limit: 4 });
-	if (taskItems.length > 0) {
+	const taskItems = listTaskAttention(db, { projectKey, limit: 100 });
+	ctx.ui.setStatus("tmux-agents", formatFleetSummary(taskSummary, agentSummary, taskItems.length));
+	const visibleTaskItems = taskItems.slice(0, 4);
+	if (visibleTaskItems.length > 0) {
 		ctx.ui.setWidget(
 			"tmux-agents",
-			taskItems.map((item) => `${item.status === "blocked" ? "⛔" : "◍"} ${truncateText(item.title, 32)} · ${item.status}${item.waitingOn ? ` · ${item.waitingOn}` : ""}`),
+			visibleTaskItems.map((item) => `${item.status === "blocked" ? "⛔" : "◍"} ${truncateText(item.title, 28)} · ${item.kind} · ${item.agentId}${item.waitingOn ? ` · ${item.waitingOn}` : ""}`),
 		);
 		return;
 	}
@@ -831,6 +1155,7 @@ const TERMINAL_AGENT_STATES: AgentSummary["state"][] = ["done", "error", "stoppe
 interface CleanupCandidate {
 	agent: AgentSummary;
 	attentionItems: AttentionItemRecord[];
+	needsHumanItems: TaskNeedsHumanRecord[];
 	targetExists: boolean;
 	cleanupAllowed: boolean;
 	reason: string;
@@ -892,17 +1217,30 @@ function buildAttentionText(items: AttentionItemRecord[], agentsById: Map<string
 }
 
 function formatTaskAttentionLine(item: TaskAttentionRecord): string {
-	const bits = [item.status, item.waitingOn ? `waiting=${item.waitingOn}` : null, `${item.activeAgentCount} active-agent`, `${item.openAttentionCount} attention`]
+	const bits = [item.status, item.kind, item.category, item.waitingOn ? `waiting=${item.waitingOn}` : null, `${item.activeAgentCount} active-agent`, `${item.openAttentionCount} attention`]
 		.filter((value): value is string => Boolean(value))
 		.join(" · ");
-	return `${item.taskId} · ${truncateText(item.title, 42)} · ${bits}`;
+	return `${item.id} · ${item.taskId} · ${truncateText(item.title, 42)} · ${bits}`;
 }
 
-function buildTaskAttentionText(items: TaskAttentionRecord[]): string {
+function buildTaskAttentionText(items: TaskAttentionRecord[], agentsById = new Map<string, AgentSummary>()): string {
 	if (items.length === 0) return "No task attention items.";
 	return items
-		.map((item) => `${formatTaskAttentionLine(item)}\nsummary: ${item.summary}\nblocked: ${item.blockedReason ?? "-"}\nreview: ${item.reviewSummary ?? "-"}`)
+		.map((item) => {
+			const agent = agentsById.get(item.agentId);
+			const agentText = agent ? `${agent.id} (${agent.profile}, ${agent.state})` : item.agentId;
+			return `${formatTaskAttentionLine(item)}\nagent: ${agentText}\nsourceMessage: ${item.sourceMessageId ?? "-"}\nsummary: ${item.summary}\nblocked: ${item.blockedReason ?? "-"}\nreview: ${item.reviewSummary ?? "-"}\nresponseRequired: ${item.responseRequired ? "yes" : "no"}`;
+		})
 		.join("\n\n");
+}
+
+function buildNeedsHumanFallbackText(ctx: ExtensionContext, scope: "all" | "current_project" | "current_session" | "descendants" = "current_project"): string {
+	const filters = resolveTaskFilters(ctx, scope, { includeDone: true, limit: 200 });
+	const db = getTmuxAgentsDb();
+	const items = listTaskAttention(db, { ids: filters.ids, projectKey: filters.projectKey, spawnSessionId: filters.spawnSessionId, spawnSessionFile: filters.spawnSessionFile, limit: 200 });
+	const agentsById = new Map(listAgents(db, { limit: 500 }).map((agent) => [agent.id, agent]));
+	const body = buildTaskAttentionText(items, agentsById);
+	return [`Needs-human queue (${scope})`, body, "Actions: /task-response-open <needs-human-id>; /task-respond <needs-human-id> <summary or JSON>; use /task-board in a UI session for open/respond/defer/approve/reject flows."].join("\n\n");
 }
 
 function formatAttentionGateWarning(items: AttentionItemRecord[], agentsById: Map<string, AgentSummary>): string {
@@ -920,9 +1258,10 @@ function listCleanupCandidates(
 	const agents = params.ids && params.ids.length > 0
 		? listAgents(db, { ids: params.ids, limit: params.limit ?? params.ids.length })
 		: listAgents(db, resolveAgentFilters(ctx, params.scope ?? "current_project", { limit: params.limit }));
+	const agentIds = agents.map((agent) => agent.id);
 	const attentionByAgent = new Map<string, AttentionItemRecord[]>();
 	const attentionItems = listAttentionItems(db, {
-		agentIds: agents.map((agent) => agent.id),
+		agentIds,
 		states: OPEN_ATTENTION_STATES,
 		limit: 500,
 	});
@@ -931,10 +1270,22 @@ function listCleanupCandidates(
 		items.push(item);
 		attentionByAgent.set(item.agentId, items);
 	}
+	const needsHumanByAgent = new Map<string, TaskNeedsHumanRecord[]>();
+	const needsHumanItems = listTaskNeedsHuman(db, {
+		agentIds,
+		states: OPEN_TASK_NEEDS_HUMAN_STATES,
+		limit: 500,
+	});
+	for (const item of needsHumanItems) {
+		const items = needsHumanByAgent.get(item.agentId) ?? [];
+		items.push(item);
+		needsHumanByAgent.set(item.agentId, items);
+	}
 	return agents
 		.filter((agent) => TERMINAL_AGENT_STATES.includes(agent.state))
 		.map((agent) => {
 			const items = (attentionByAgent.get(agent.id) ?? []).sort((left, right) => left.priority - right.priority || right.updatedAt - left.updatedAt);
+			const needsHuman = (needsHumanByAgent.get(agent.id) ?? []).sort((left, right) => left.priority - right.priority || right.updatedAt - left.updatedAt);
 			const targetExists = tmuxTargetExists(
 				{
 					sessionId: agent.tmuxSessionId,
@@ -944,9 +1295,10 @@ function listCleanupCandidates(
 				},
 				inventory,
 			);
-			const blockingItems = items.filter((item) => item.kind !== "complete");
+			const blockingItems = [...items.filter((item) => item.kind !== "complete"), ...needsHuman.filter((item) => item.kind !== "complete" && item.kind !== "review_gate")];
+			const unresolvedCount = items.length + needsHuman.length;
 			let cleanupAllowed = targetExists;
-			let reason = !targetExists ? "tmux target already gone" : items.length === 0 ? "no unresolved attention items" : "completion attention can be resolved during cleanup";
+			let reason = !targetExists ? "tmux target already gone" : unresolvedCount === 0 ? "no unresolved attention items" : "completion attention can be resolved during cleanup";
 			if (blockingItems.length > 0 && !(params.force ?? false)) {
 				cleanupAllowed = false;
 				reason = `blocked by unresolved ${blockingItems[0]!.kind}`;
@@ -954,7 +1306,7 @@ function listCleanupCandidates(
 			if (blockingItems.length > 0 && (params.force ?? false)) {
 				reason = `force cleanup despite unresolved ${blockingItems[0]!.kind}`;
 			}
-			return { agent, attentionItems: items, targetExists, cleanupAllowed, reason };
+			return { agent, attentionItems: items, needsHumanItems: needsHuman, targetExists, cleanupAllowed, reason };
 		})
 		.filter((candidate) => candidate.targetExists || params.ids?.includes(candidate.agent.id));
 }
@@ -974,7 +1326,8 @@ function cleanupAgentTarget(candidate: CleanupCandidate, force = false): { agent
 	const result = stopTmuxTarget(target, true);
 	const now = Date.now();
 	const completionItems = candidate.attentionItems.filter((item) => item.kind === "complete");
-	if (completionItems.length > 0) {
+	const completionNeedsHumanItems = candidate.needsHumanItems.filter((item) => item.kind === "complete" || item.kind === "review_gate");
+	if (completionItems.length > 0 || completionNeedsHumanItems.length > 0) {
 		updateAttentionItemsForAgent(
 			db,
 			agent.id,
@@ -987,9 +1340,27 @@ function cleanupAgentTarget(candidate: CleanupCandidate, force = false): { agent
 			},
 			{ states: OPEN_ATTENTION_STATES, kinds: ["complete"] },
 		);
+		updateTaskNeedsHumanForAgent(
+			db,
+			agent.id,
+			{
+				state: "resolved",
+				waitingOn: null,
+				responseRequired: false,
+				updatedAt: now,
+				resolvedAt: now,
+				resolvedBy: "coordinator",
+				resolutionKind: "cleanup",
+				resolutionSummary: "Agent tmux target cleaned up after completion.",
+			},
+			{ states: ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user", "waiting_on_service", "waiting_on_external"], kinds: ["complete", "review_gate"] },
+		);
 	}
 	if (force) {
-		const blockingKinds = candidate.attentionItems.filter((item) => item.kind !== "complete").map((item) => item.kind);
+		const blockingKinds = [
+			...candidate.attentionItems.filter((item) => item.kind !== "complete").map((item) => item.kind),
+			...candidate.needsHumanItems.filter((item) => item.kind !== "complete" && item.kind !== "review_gate").map((item) => item.kind),
+		];
 		if (blockingKinds.length > 0) {
 			updateAttentionItemsForAgent(
 				db,
@@ -1002,6 +1373,21 @@ function cleanupAgentTarget(candidate: CleanupCandidate, force = false): { agent
 					resolutionSummary: "Agent tmux target force-cleaned while unresolved attention remained.",
 				},
 				{ states: OPEN_ATTENTION_STATES, kinds: ["question", "question_for_user", "blocked"] },
+			);
+			updateTaskNeedsHumanForAgent(
+				db,
+				agent.id,
+				{
+					state: "cancelled",
+					waitingOn: null,
+					responseRequired: false,
+					updatedAt: now,
+					resolvedAt: now,
+					resolvedBy: "coordinator",
+					resolutionKind: "cleanup_force",
+					resolutionSummary: "Agent tmux target force-cleaned while unresolved attention remained.",
+				},
+				{ states: ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user", "waiting_on_service", "waiting_on_external"], kinds: ["question", "question_for_user", "blocked"] },
 			);
 		}
 	}
@@ -1024,7 +1410,8 @@ function formatCleanupCandidates(candidates: CleanupCandidate[], dryRun: boolean
 	const body = candidates
 		.map((candidate) => {
 			const attention = candidate.attentionItems.length > 0 ? candidate.attentionItems.map((item) => item.kind).join(",") : "none";
-			return `${candidate.cleanupAllowed ? "✓" : "-"} ${candidate.agent.id} · ${candidate.agent.state} · ${candidate.reason} · attention=${attention}`;
+			const needsHuman = candidate.needsHumanItems.length > 0 ? candidate.needsHumanItems.map((item) => item.kind).join(",") : "none";
+			return `${candidate.cleanupAllowed ? "✓" : "-"} ${candidate.agent.id} · ${candidate.agent.state} · ${candidate.reason} · attention=${attention} · needsHuman=${needsHuman}`;
 		})
 		.join("\n");
 	return `${header}\n\n${body}`;
@@ -1042,6 +1429,140 @@ function formatCleanupResults(
 		...skipped.map((candidate) => `- ${candidate.agent.id} · ${candidate.reason}`),
 	];
 	return lines.join("\n");
+}
+
+interface TaskWorktreeCleanupCandidate {
+	task: TaskRecord;
+	linkedAgents: AgentSummary[];
+	status: string;
+	eligible: boolean;
+	reason: string;
+	branchName: string | null;
+	registered: boolean;
+	dirty: boolean;
+}
+
+function expectedDedicatedWorktreeBranch(task: TaskRecord): string | null {
+	const id = task.worktreeId?.trim() || (task.workspaceStrategy === "dedicated_worktree" ? sanitizeWorktreeSegment(task.id) : null);
+	return id ? `pi/task/${id}` : null;
+}
+
+function inspectTaskWorktree(task: TaskRecord, linkedAgents: AgentSummary[], force = false): TaskWorktreeCleanupCandidate {
+	const lifecycle = formatWorktreeLifecycle(task, linkedAgents);
+	const branchName = expectedDedicatedWorktreeBranch(task);
+	const activeAgents = lifecycle.activeAgentCount;
+	let registered = false;
+	let dirty = false;
+	let eligible = false;
+	let reason = lifecycle.status;
+	if (task.workspaceStrategy !== "dedicated_worktree") {
+		reason = task.workspaceStrategy === "existing_worktree" ? "preserved existing_worktree metadata" : `not a dedicated worktree (${task.workspaceStrategy ?? "none"})`;
+		return { task, linkedAgents, status: lifecycle.status, eligible: false, reason, branchName, registered, dirty };
+	}
+	if (!task.worktreeCwd) {
+		return { task, linkedAgents, status: "stale-missing", eligible: false, reason: "dedicated worktree has no cwd metadata", branchName, registered, dirty };
+	}
+	if (task.status !== "done") {
+		return { task, linkedAgents, status: lifecycle.status, eligible: false, reason: `task is ${task.status}; cleanup waits for done`, branchName, registered, dirty };
+	}
+	if (activeAgents > 0) {
+		return { task, linkedAgents, status: "active", eligible: false, reason: `${activeAgents} active linked agent(s) still use this task`, branchName, registered, dirty };
+	}
+	if (!existsSync(task.worktreeCwd)) {
+		return { task, linkedAgents, status: "stale-missing", eligible: false, reason: "worktree path is already missing; reconcile metadata instead of removing", branchName, registered, dirty };
+	}
+	try {
+		const repoRoot = runGit(["rev-parse", "--show-toplevel"], task.spawnCwd);
+		const worktrees = parseWorktreeList(runGit(["worktree", "list", "--porcelain"], repoRoot));
+		registered = worktrees.some((item) => resolve(item.path) === resolve(task.worktreeCwd!));
+		if (!registered) {
+			return { task, linkedAgents, status: "stale-unregistered", eligible: false, reason: "path exists but is not a registered git worktree", branchName, registered, dirty };
+		}
+		const actualBranch = tryRunGit(["symbolic-ref", "--short", "HEAD"], task.worktreeCwd).stdout;
+		if (branchName && actualBranch !== branchName) {
+			return { task, linkedAgents, status: "conflict", eligible: false, reason: `registered worktree is on ${actualBranch || "detached HEAD"}, expected ${branchName}`, branchName, registered, dirty };
+		}
+		dirty = runGit(["status", "--porcelain"], task.worktreeCwd).length > 0;
+		if (dirty && !force) {
+			return { task, linkedAgents, status: "ready-cleanup-dirty", eligible: false, reason: "worktree has uncommitted changes; pass force only after review", branchName, registered, dirty };
+		}
+		eligible = true;
+		reason = dirty ? "eligible with force; dirty worktree" : "eligible dedicated done-task worktree";
+		return { task, linkedAgents, status: "ready-cleanup", eligible, reason, branchName, registered, dirty };
+	} catch (error) {
+		return { task, linkedAgents, status: "stale-error", eligible: false, reason: error instanceof Error ? error.message : String(error), branchName, registered, dirty };
+	}
+}
+
+function listTaskWorktreeCleanupCandidates(ctx: ExtensionContext, params: { scope?: "all" | "current_project" | "current_session" | "descendants"; ids?: string[]; force?: boolean; limit?: number }): TaskWorktreeCleanupCandidate[] {
+	const db = getTmuxAgentsDb();
+	const filters = params.ids && params.ids.length > 0 ? { ids: params.ids, includeDone: true, limit: params.limit ?? params.ids.length } : resolveTaskFilters(ctx, params.scope ?? "current_project", { includeDone: true, limit: params.limit });
+	const tasks = listTasks(db, filters).filter((task) => task.workspaceStrategy || task.worktreeId || task.worktreeCwd);
+	const links = listTaskAgentLinks(db, { taskIds: tasks.map((task) => task.id), activeOnly: true, limit: 1000 });
+	const agents = listAgents(db, { ids: [...new Set(links.map((link) => link.agentId))], limit: 1000 });
+	const agentsById = new Map(agents.map((agent) => [agent.id, agent]));
+	const agentsByTask = new Map<string, AgentSummary[]>();
+	for (const link of links) {
+		const agent = agentsById.get(link.agentId);
+		if (!agent) continue;
+		const existing = agentsByTask.get(link.taskId) ?? [];
+		existing.push(agent);
+		agentsByTask.set(link.taskId, existing);
+	}
+	return tasks.map((task) => inspectTaskWorktree(task, agentsByTask.get(task.id) ?? [], params.force ?? false));
+}
+
+function formatTaskWorktreeCleanupCandidates(candidates: TaskWorktreeCleanupCandidate[], dryRun: boolean): string {
+	if (candidates.length === 0) return dryRun ? "No task worktree metadata matched for cleanup preview." : "No task worktree metadata matched for cleanup.";
+	return [
+		dryRun ? `Task worktree cleanup preview · ${candidates.length} candidate(s)` : `Task worktree cleanup candidates · ${candidates.length}`,
+		"",
+		...candidates.map((candidate) => {
+			const task = candidate.task;
+			const marker = candidate.eligible ? "✓" : "-";
+			return `${marker} ${task.id} · ${task.status} · ${candidate.status} · strategy=${task.workspaceStrategy ?? "-"} · worktree=${task.worktreeId ?? "-"} · cwd=${task.worktreeCwd ?? "-"} · branch=${candidate.branchName ?? "-"} · dirty=${candidate.dirty ? "yes" : "no"} · ${candidate.reason}`;
+		}),
+		"",
+		"Cleanup policy: only dedicated_worktree entries for done tasks with no active linked agents are removable. existing_worktree and spawn_cwd metadata is preserved. git branches are never deleted.",
+	].join("\n");
+}
+
+function cleanupTaskWorktree(candidate: TaskWorktreeCleanupCandidate, force = false): { taskId: string; removed: boolean; reason: string; command: string } {
+	if (!candidate.eligible || !candidate.task.worktreeCwd) {
+		return { taskId: candidate.task.id, removed: false, reason: candidate.reason, command: "(skipped)" };
+	}
+	const db = getTmuxAgentsDb();
+	const repoRoot = runGit(["rev-parse", "--show-toplevel"], candidate.task.spawnCwd);
+	const args = ["worktree", "remove", ...(force ? ["--force"] : []), candidate.task.worktreeCwd];
+	runGit(args, repoRoot);
+	const now = Date.now();
+	createTaskEvent(db, {
+		id: randomUUID(),
+		taskId: candidate.task.id,
+		eventType: "worktree_cleaned_up",
+		summary: `Removed dedicated worktree ${candidate.task.worktreeId ?? candidate.task.worktreeCwd}`,
+		payload: { worktreeId: candidate.task.worktreeId, worktreeCwd: candidate.task.worktreeCwd, branchName: candidate.branchName, command: `git ${args.join(" ")}`, branchDeleted: false, force },
+		createdAt: now,
+	});
+	updateTask(db, candidate.task.id, {
+		workspaceStrategy: null,
+		worktreeId: null,
+		worktreeCwd: null,
+		updatedAt: now,
+	});
+	return { taskId: candidate.task.id, removed: true, reason: force ? "removed with force" : "removed", command: `git ${args.join(" ")}` };
+}
+
+function formatTaskWorktreeCleanupResults(results: Array<{ taskId: string; removed: boolean; reason: string; command: string }>, skipped: TaskWorktreeCleanupCandidate[]): string {
+	const removed = results.filter((result) => result.removed);
+	return [
+		`Task worktree cleanup finished · ${removed.length} removed · ${skipped.length} skipped`,
+		"",
+		...removed.map((result) => `✓ ${result.taskId} · ${result.reason} · ${result.command}`),
+		...skipped.map((candidate) => `- ${candidate.task.id} · ${candidate.reason}`),
+		"",
+		"Branches were not deleted. Remove branches manually after review if desired.",
+	].join("\n");
 }
 
 function formatSpawnSuccess(result: SpawnSubagentResult): string {
@@ -1294,6 +1815,7 @@ function queueDownwardMessage(
 	kind: "answer" | "note" | "redirect" | "cancel" | "priority",
 	payload: DownwardMessagePayload,
 	deliveryMode: DeliveryMode,
+	options: { resolveNeedsHumanId?: string; resolveTaskNeedsHuman?: boolean; legacyAttentionItemId?: string | null } = {},
 ): string {
 	const db = getTmuxAgentsDb();
 	const messageId = randomUUID();
@@ -1319,37 +1841,351 @@ function queueDownwardMessage(
 		summary: fullPayload.summary,
 		payload: { messageId, deliveryMode, ...fullPayload },
 	});
+	const now = Date.now();
+	const inReplyToMessageId = fullPayload.inReplyToMessageId ?? null;
+	const shouldResolveTaskNeedsHuman = options.resolveTaskNeedsHuman !== false && (Boolean(options.resolveNeedsHumanId) || Boolean(inReplyToMessageId));
+	const taskNeedsHumanFilter = options.resolveNeedsHumanId
+		? { ids: [options.resolveNeedsHumanId] }
+		: inReplyToMessageId
+			? { sourceMessageId: inReplyToMessageId }
+			: undefined;
+	const openNeedsHumanStates = ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user", "waiting_on_service", "waiting_on_external"] as const;
 	if (kind === "cancel") {
-		updateAttentionItemsForAgent(
-			db,
-			agent.id,
-			{
+		if (options.resolveTaskNeedsHuman === false) {
+			// The selected task_needs_human row and any linked legacy attention were claimed by the caller.
+		} else if (options.legacyAttentionItemId) {
+			updateAttentionItem(db, options.legacyAttentionItemId, {
 				state: "cancelled",
-				updatedAt: Date.now(),
-				resolvedAt: Date.now(),
+				updatedAt: now,
+				resolvedAt: now,
 				resolutionKind: kind,
 				resolutionSummary: fullPayload.summary,
-			},
-			{ states: ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user"] },
-		);
+			});
+		} else if (inReplyToMessageId) {
+			const attention = db.prepare("SELECT id FROM attention_items WHERE agent_id = ? AND message_id = ? LIMIT 1").get(agent.id, inReplyToMessageId) as { id?: string } | undefined;
+			if (attention?.id) {
+				updateAttentionItem(db, attention.id, {
+					state: "cancelled",
+					updatedAt: now,
+					resolvedAt: now,
+					resolutionKind: kind,
+					resolutionSummary: fullPayload.summary,
+				});
+			}
+		} else {
+			updateAttentionItemsForAgent(
+				db,
+				agent.id,
+				{
+					state: "cancelled",
+					updatedAt: now,
+					resolvedAt: now,
+					resolutionKind: kind,
+					resolutionSummary: fullPayload.summary,
+				},
+				{ states: ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user"] },
+			);
+		}
+		if (shouldResolveTaskNeedsHuman && taskNeedsHumanFilter) {
+			updateTaskNeedsHumanForAgent(
+				db,
+				agent.id,
+				{
+					state: "cancelled",
+					waitingOn: null,
+					responseRequired: false,
+					updatedAt: now,
+					resolvedAt: now,
+					resolvedBy: "coordinator",
+					resolutionKind: kind,
+					resolutionSummary: fullPayload.summary,
+				},
+				{ states: [...openNeedsHumanStates], ...taskNeedsHumanFilter },
+			);
+		}
 	} else if (["answer", "redirect", "priority"].includes(kind)) {
-		updateAttentionItemsForAgent(
-			db,
-			agent.id,
-			{
+		if (options.resolveTaskNeedsHuman === false) {
+			// The selected task_needs_human row and any linked legacy attention were claimed by the caller.
+		} else if (options.legacyAttentionItemId) {
+			updateAttentionItem(db, options.legacyAttentionItemId, {
 				state: "acknowledged",
-				updatedAt: Date.now(),
+				updatedAt: now,
 				resolutionKind: kind,
 				resolutionSummary: fullPayload.summary,
-			},
-			{
-				states: ["open", "waiting_on_coordinator", "waiting_on_user"],
-				kinds: ["question", "question_for_user", "blocked"],
-			},
-		);
+			});
+		} else if (inReplyToMessageId) {
+			const attention = db.prepare("SELECT id FROM attention_items WHERE agent_id = ? AND message_id = ? LIMIT 1").get(agent.id, inReplyToMessageId) as { id?: string } | undefined;
+			if (attention?.id) {
+				updateAttentionItem(db, attention.id, {
+					state: "acknowledged",
+					updatedAt: now,
+					resolutionKind: kind,
+					resolutionSummary: fullPayload.summary,
+				});
+			}
+		} else if (!options.resolveNeedsHumanId) {
+			updateAttentionItemsForAgent(
+				db,
+				agent.id,
+				{
+					state: "acknowledged",
+					updatedAt: now,
+					resolutionKind: kind,
+					resolutionSummary: fullPayload.summary,
+				},
+				{
+					states: ["open", "waiting_on_coordinator", "waiting_on_user"],
+					kinds: ["question", "question_for_user", "blocked"],
+				},
+			);
+		}
+		if (shouldResolveTaskNeedsHuman && taskNeedsHumanFilter) {
+			updateTaskNeedsHumanForAgent(
+				db,
+				agent.id,
+				{
+					state: "resolved",
+					waitingOn: null,
+					responseRequired: false,
+					updatedAt: now,
+					resolvedAt: now,
+					resolvedBy: "coordinator",
+					resolutionKind: kind,
+					resolutionSummary: fullPayload.summary,
+				},
+				{ states: [...openNeedsHumanStates], kinds: ["question", "question_for_user", "blocked", "complete"], ...taskNeedsHumanFilter },
+			);
+		}
 	}
 	updateAgent(db, agent.id, { updatedAt: Date.now() });
 	return messageId;
+}
+
+function assertCanMessageAgent(agent: AgentSummary): void {
+	if (["done", "error", "stopped", "lost"].includes(agent.state)) {
+		throw new Error(`Cannot message agent ${agent.id} because it is in terminal state ${agent.state}.`);
+	}
+	if (
+		!tmuxTargetExists({
+			sessionId: agent.tmuxSessionId,
+			sessionName: agent.tmuxSessionName,
+			windowId: agent.tmuxWindowId,
+			paneId: agent.tmuxPaneId,
+		}, getTmuxInventory())
+	) {
+		throw new Error(`Cannot message agent ${agent.id} because its tmux target is missing. Reconcile first.`);
+	}
+}
+
+function defaultTaskResponseKind(item: TaskNeedsHumanRecord): "answer" | "note" | "redirect" | "cancel" | "priority" {
+	if (item.state === "cancelled") return "cancel";
+	if (item.kind === "blocked" || item.kind === "question" || item.kind === "question_for_user") return "answer";
+	return "note";
+}
+
+function defaultTaskResponseActionPolicy(kind: "answer" | "note" | "redirect" | "cancel" | "priority", item: TaskNeedsHumanRecord): DownwardMessageActionPolicy {
+	if (kind === "answer" && ["blocked", "question", "question_for_user"].includes(item.kind)) return "resume_if_blocked";
+	return defaultDownwardActionPolicy(kind);
+}
+
+function inferTaskResponseMode(item: TaskNeedsHumanRecord, params: { mode?: "task_patch" | "child_message" | "combined"; patch?: unknown; summary?: string }): "task_patch" | "child_message" | "combined" {
+	if (params.mode) return params.mode;
+	if (params.patch) return params.summary ? "combined" : "task_patch";
+	if (item.category === "review_gate" || item.kind === "complete") return "task_patch";
+	return "child_message";
+}
+
+function deriveTaskPatchForResponse(item: TaskNeedsHumanRecord, responseKind: "answer" | "note" | "redirect" | "cancel" | "priority", patch: UpdateTaskInput | undefined): UpdateTaskInput | undefined {
+	const next: UpdateTaskInput = { ...(patch ?? {}) };
+	if (next.status === undefined) {
+		if (item.category === "review_gate" || item.kind === "complete") {
+			next.status = "done";
+			next.finishedAt = Date.now();
+		} else if (responseKind === "answer" && item.kind === "blocked") {
+			next.status = "in_progress";
+		}
+	}
+	if (responseKind === "answer" && item.kind === "blocked") {
+		if (next.waitingOn === undefined) next.waitingOn = null;
+		if (next.blockedReason === undefined) next.blockedReason = null;
+	}
+	return Object.keys(next).length > 0 ? next : undefined;
+}
+
+function taskPatchSummary(patch: UpdateTaskInput | undefined): string {
+	if (!patch) return "No task fields changed.";
+	const fields = Object.keys(patch).filter((key) => key !== "updatedAt");
+	return fields.length > 0 ? `Updated task fields: ${fields.join(", ")}.` : "Updated task metadata.";
+}
+
+function buildTaskResponsePatch(raw: Partial<UpdateTaskInput> | undefined): UpdateTaskInput | undefined {
+	if (!raw) return undefined;
+	const patch: UpdateTaskInput = {};
+	for (const key of Object.keys(raw) as Array<keyof UpdateTaskInput>) {
+		const value = raw[key];
+		if (value !== undefined) {
+			(patch as Record<string, unknown>)[key] = value;
+		}
+	}
+	return Object.keys(patch).length > 0 ? patch : undefined;
+}
+
+function assertTaskNeedsHumanRespondable(item: TaskNeedsHumanRecord): void {
+	if (["resolved", "cancelled", "superseded"].includes(item.state)) {
+		throw new Error(`Needs-human row ${item.id} is already ${item.state}; refusing to reopen or double-respond.`);
+	}
+}
+
+function assertTaskNeedsHumanOpenable(item: TaskNeedsHumanRecord): void {
+	if (["resolved", "cancelled", "superseded"].includes(item.state)) {
+		throw new Error(`Needs-human row ${item.id} is already ${item.state}; refusing to acknowledge stale row.`);
+	}
+}
+
+function assertTaskResponseResolutionAllowed(
+	mode: "task_patch" | "child_message" | "combined",
+	resolution: "acknowledged" | "resolved" | "cancelled" | "superseded",
+): void {
+	if (resolution === "acknowledged" && mode !== "task_patch") {
+		throw new Error(`task_respond resolution=acknowledged is only allowed with mode=task_patch; mode=${mode} must use resolved, cancelled, or superseded before queueing a child message.`);
+	}
+}
+
+function markTaskNeedsHumanResponse(
+	item: TaskNeedsHumanRecord,
+	resolution: "acknowledged" | "resolved" | "cancelled" | "superseded",
+	resolutionKind: string,
+	resolutionSummary: string,
+): TaskNeedsHumanRecord {
+	const db = getTmuxAgentsDb();
+	const now = Date.now();
+	const terminal = resolution !== "acknowledged";
+	const claimed = claimTaskNeedsHumanResponse(db, item.id, {
+		state: resolution,
+		waitingOn: terminal ? null : item.waitingOn,
+		responseRequired: !terminal,
+		updatedAt: now,
+		resolvedAt: terminal ? now : null,
+		resolvedBy: terminal ? "coordinator" : null,
+		resolutionKind,
+		resolutionSummary,
+	});
+	if (!claimed) {
+		const latest = listTaskNeedsHuman(db, { ids: [item.id], limit: 1 })[0];
+		throw new Error(`Needs-human row ${item.id} is already ${latest?.state ?? "missing"}; refusing to reopen or double-respond.`);
+	}
+	const attentionItemId = item.legacyAttentionItemId ?? item.sourceMessageId;
+	if (attentionItemId) {
+		updateAttentionItem(db, attentionItemId, {
+			state: resolution === "acknowledged" ? "acknowledged" : resolution,
+			updatedAt: now,
+			resolvedAt: terminal ? now : null,
+			resolutionKind,
+			resolutionSummary,
+		});
+	}
+	return claimed;
+}
+
+async function respondToTaskNeedsHuman(params: {
+	needsHumanId: string;
+	mode?: "task_patch" | "child_message" | "combined";
+	patch?: Partial<UpdateTaskInput>;
+	kind?: "answer" | "note" | "redirect" | "cancel" | "priority";
+	summary?: string;
+	details?: string;
+	files?: string[];
+	actionPolicy?: DownwardMessageActionPolicy;
+	deliveryMode?: DeliveryMode;
+	resolution?: "acknowledged" | "resolved" | "cancelled" | "superseded";
+	resolutionSummary?: string;
+}): Promise<{ task: TaskRecord; item: TaskNeedsHumanRecord; patched: boolean; messageId: string | null; liveDelivery: Awaited<ReturnType<typeof deliverQueuedMessagesViaBridge>> | null; resolution: string }> {
+	const db = getTmuxAgentsDb();
+	const item = listTaskNeedsHuman(db, { ids: [params.needsHumanId], limit: 1 })[0];
+	if (!item) throw new Error(`Unknown task needs-human id "${params.needsHumanId}".`);
+	const task = getTask(db, item.taskId);
+	if (!task) throw new Error(`Task ${item.taskId} for needs-human row ${item.id} is missing.`);
+	assertTaskNeedsHumanRespondable(item);
+	const mode = inferTaskResponseMode(item, params);
+	const kind = params.kind ?? defaultTaskResponseKind(item);
+	const resolution = params.resolution ?? (kind === "cancel" ? "cancelled" : "resolved");
+	assertTaskResponseResolutionAllowed(mode, resolution);
+	const patch = mode === "task_patch" || mode === "combined" || (mode === "child_message" && kind === "answer" && item.kind === "blocked")
+		? deriveTaskPatchForResponse(item, kind, buildTaskResponsePatch(params.patch))
+		: undefined;
+	const responseSummary = params.resolutionSummary?.trim() || params.summary?.trim() || taskPatchSummary(patch);
+	let agentForMessage: AgentSummary | null = null;
+	if (mode !== "task_patch") {
+		agentForMessage = getAgent(db, item.agentId);
+		if (!agentForMessage) throw new Error(`Unknown linked agent id "${item.agentId}".`);
+		assertCanMessageAgent(agentForMessage);
+	}
+	let messageId: string | null = null;
+	let liveDelivery: Awaited<ReturnType<typeof deliverQueuedMessagesViaBridge>> | null = null;
+	const claimedItem = markTaskNeedsHumanResponse(item, resolution, kind, responseSummary);
+	let patched = false;
+	let updatedTask = task;
+	if (patch) {
+		updateTask(db, task.id, { ...patch, updatedAt: Date.now() });
+		createTaskEvent(db, {
+			id: randomUUID(),
+			taskId: task.id,
+			agentId: item.agentId,
+			eventType: "needs_human_task_patch",
+			summary: responseSummary,
+			payload: { needsHumanId: item.id, route: mode, patch },
+		});
+		updatedTask = getTask(db, task.id) ?? task;
+		patched = true;
+	}
+	if (mode !== "task_patch") {
+		const agent = agentForMessage;
+		if (!agent) throw new Error(`Unknown linked agent id "${item.agentId}".`);
+		const summary = params.summary?.trim() || (patched ? taskPatchSummary(patch) : responseSummary);
+		try {
+			messageId = queueDownwardMessage(
+				agent,
+				kind,
+				{
+					summary,
+					details: params.details,
+					files: params.files,
+					actionPolicy: params.actionPolicy ?? defaultTaskResponseActionPolicy(kind, item),
+					inReplyToMessageId: item.sourceMessageId ?? undefined,
+				},
+				params.deliveryMode ?? "immediate",
+				{ resolveNeedsHumanId: item.id, resolveTaskNeedsHuman: false },
+			);
+		} catch (error) {
+			createTaskEvent(db, {
+				id: randomUUID(),
+				taskId: task.id,
+				agentId: item.agentId,
+				eventType: "needs_human_child_message_failed",
+				summary: error instanceof Error ? error.message : String(error),
+				payload: { needsHumanId: item.id, route: mode, patched, kind },
+			});
+			throw error;
+		}
+		liveDelivery = await deliverQueuedMessagesViaBridge(agent.id);
+		createTaskEvent(db, {
+			id: randomUUID(),
+			taskId: task.id,
+			agentId: item.agentId,
+			eventType: "needs_human_child_message",
+			summary,
+			payload: { needsHumanId: item.id, messageId, kind, inReplyToMessageId: item.sourceMessageId ?? null, deliveryMode: params.deliveryMode ?? "immediate", liveDelivery },
+		});
+	}
+	createTaskEvent(db, {
+		id: randomUUID(),
+		taskId: task.id,
+		agentId: item.agentId,
+		eventType: "needs_human_response",
+		summary: responseSummary,
+		payload: { needsHumanId: item.id, route: mode, resolution, messageId, patched },
+	});
+	return { task: updatedTask, item: claimedItem, patched, messageId, liveDelivery, resolution };
 }
 
 function formatStopResult(
@@ -1386,23 +2222,41 @@ async function stopAgentById(id: string, force: boolean, reason?: string): Promi
 	};
 	const targetExists = tmuxTargetExists(target, getTmuxInventory());
 	if (!targetExists && force) {
-		updateAgent(getTmuxAgentsDb(), agent.id, {
+		const db = getTmuxAgentsDb();
+		const now = Date.now();
+		const resolutionSummary = reason?.trim() || "tmux target missing; registry marked stopped.";
+		updateAgent(db, agent.id, {
 			state: "stopped",
-			updatedAt: Date.now(),
-			finishedAt: Date.now(),
+			updatedAt: now,
+			finishedAt: now,
 			lastError: reason?.trim() || agent.lastError,
 		});
 		updateAttentionItemsForAgent(
-			getTmuxAgentsDb(),
+			db,
 			agent.id,
 			{
 				state: "cancelled",
-				updatedAt: Date.now(),
-				resolvedAt: Date.now(),
+				updatedAt: now,
+				resolvedAt: now,
 				resolutionKind: "force_stop",
-				resolutionSummary: reason?.trim() || "tmux target missing; registry marked stopped.",
+				resolutionSummary,
 			},
 			{ states: ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user"] },
+		);
+		updateTaskNeedsHumanForAgent(
+			db,
+			agent.id,
+			{
+				state: "cancelled",
+				waitingOn: null,
+				responseRequired: false,
+				updatedAt: now,
+				resolvedAt: now,
+				resolvedBy: "coordinator",
+				resolutionKind: "force_stop",
+				resolutionSummary,
+			},
+			{ states: ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user", "waiting_on_service", "waiting_on_external"] },
 		);
 		createAgentEvent(getTmuxAgentsDb(), {
 			id: randomUUID(),
@@ -1462,23 +2316,41 @@ async function stopAgentById(id: string, force: boolean, reason?: string): Promi
 	}
 	const result = stopTmuxTarget(target, force);
 	if (force) {
-		updateAgent(getTmuxAgentsDb(), agent.id, {
+		const db = getTmuxAgentsDb();
+		const now = Date.now();
+		const resolutionSummary = reason?.trim() || "Force stop issued by coordinator.";
+		updateAgent(db, agent.id, {
 			state: "stopped",
-			updatedAt: Date.now(),
-			finishedAt: Date.now(),
+			updatedAt: now,
+			finishedAt: now,
 			lastError: reason?.trim() || agent.lastError,
 		});
 		updateAttentionItemsForAgent(
-			getTmuxAgentsDb(),
+			db,
 			agent.id,
 			{
 				state: "cancelled",
-				updatedAt: Date.now(),
-				resolvedAt: Date.now(),
+				updatedAt: now,
+				resolvedAt: now,
 				resolutionKind: "force_stop",
-				resolutionSummary: reason?.trim() || "Force stop issued by coordinator.",
+				resolutionSummary,
 			},
 			{ states: ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user"] },
+		);
+		updateTaskNeedsHumanForAgent(
+			db,
+			agent.id,
+			{
+				state: "cancelled",
+				waitingOn: null,
+				responseRequired: false,
+				updatedAt: now,
+				resolvedAt: now,
+				resolvedBy: "coordinator",
+				resolutionKind: "force_stop",
+				resolutionSummary,
+			},
+			{ states: ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user", "waiting_on_service", "waiting_on_external"] },
 		);
 		createAgentEvent(getTmuxAgentsDb(), {
 			id: randomUUID(),
@@ -2086,6 +2958,15 @@ function createTaskFromParams(ctx: ExtensionContext, params: {
 	status?: TaskState;
 	blockedReason?: string;
 	waitingOn?: TaskWaitingOn;
+	requestedProfile?: string;
+	assignedProfile?: string;
+	launchPolicy?: TaskLaunchPolicy;
+	autonomousStart?: boolean;
+	promptTemplate?: string;
+	roleHint?: string;
+	workspaceStrategy?: TaskWorkspaceStrategy;
+	worktreeId?: string;
+	worktreeCwd?: string;
 }): TaskRecord {
 	const db = getTmuxAgentsDb();
 	const now = Date.now();
@@ -2107,6 +2988,14 @@ function createTaskFromParams(ctx: ExtensionContext, params: {
 		priorityLabel: params.priorityLabel?.trim() || null,
 		waitingOn: params.waitingOn,
 		blockedReason: params.blockedReason?.trim() || null,
+		requestedProfile: params.requestedProfile?.trim() || null,
+		assignedProfile: params.assignedProfile?.trim() || null,
+		launchPolicy: params.autonomousStart ? "autonomous" : params.launchPolicy ?? "manual",
+		promptTemplate: params.promptTemplate?.trim() || null,
+		roleHint: params.roleHint?.trim() || null,
+		workspaceStrategy: params.workspaceStrategy ?? null,
+		worktreeId: params.worktreeId?.trim() || null,
+		worktreeCwd: resolveNullableInputPath(spawnCwd, params.worktreeCwd) ?? null,
 		acceptanceCriteria: params.acceptanceCriteria,
 		planSteps: params.planSteps,
 		validationSteps: params.validationSteps,
@@ -2128,6 +3017,14 @@ function createTaskFromParams(ctx: ExtensionContext, params: {
 			summary: input.summary,
 			status: input.status,
 			priority: input.priority,
+			requestedProfile: input.requestedProfile,
+			assignedProfile: input.assignedProfile,
+			launchPolicy: input.launchPolicy,
+			promptTemplate: input.promptTemplate,
+			roleHint: input.roleHint,
+			workspaceStrategy: input.workspaceStrategy,
+			worktreeId: input.worktreeId,
+			worktreeCwd: input.worktreeCwd,
 		},
 		createdAt: now,
 	});
@@ -2141,6 +3038,7 @@ function ensureTaskForSpawn(ctx: ExtensionContext, params: {
 	cwd?: string;
 	taskId?: string;
 	priority?: string;
+	profileSelectionReason?: string;
 }): TaskRecord {
 	const db = getTmuxAgentsDb();
 	const existingTaskId = params.taskId?.trim() || null;
@@ -2152,6 +3050,7 @@ function ensureTaskForSpawn(ctx: ExtensionContext, params: {
 			status: "in_progress",
 			waitingOn: null,
 			blockedReason: null,
+			assignedProfile: params.profile,
 			updatedAt: now,
 			startedAt: task.startedAt ?? now,
 		});
@@ -2160,7 +3059,7 @@ function ensureTaskForSpawn(ctx: ExtensionContext, params: {
 			taskId: existingTaskId,
 			eventType: "spawn_requested",
 			summary: `Spawn requested for ${params.profile}`,
-			payload: { title: params.title, task: params.task },
+			payload: { title: params.title, task: params.task, profileSelectionReason: params.profileSelectionReason ?? null },
 			createdAt: now,
 		});
 		return getTask(db, existingTaskId)!;
@@ -2172,6 +3071,43 @@ function ensureTaskForSpawn(ctx: ExtensionContext, params: {
 		cwd: params.cwd,
 		priorityLabel: params.priority,
 		status: "in_progress",
+		assignedProfile: params.profile,
+	});
+}
+
+function maybeAutonomousLaunchTask(pi: ExtensionAPI, ctx: ExtensionContext, task: TaskRecord): SpawnSubagentResult | null {
+	if (task.launchPolicy !== "autonomous" || task.status !== "todo") return null;
+	const activeLinks = listTaskAgentLinks(getTmuxAgentsDb(), { taskIds: [task.id], activeOnly: true, limit: 1 });
+	if (activeLinks.length > 0) return null;
+	const resolution = resolveTaskLaunchProfile(task);
+	const db = getTmuxAgentsDb();
+	createTaskEvent(db, {
+		id: randomUUID(),
+		taskId: task.id,
+		eventType: "launch_profile_resolved",
+		summary: `Autonomous launch selected ${resolution.profile.name}`,
+		payload: {
+			profile: resolution.profile.name,
+			source: resolution.source,
+			reason: resolution.reason,
+			requestedProfile: task.requestedProfile,
+			assignedProfile: task.assignedProfile,
+			roleHint: task.roleHint,
+			promptTemplate: task.promptTemplate,
+		},
+	});
+	const taskPrompt = [
+		task.promptTemplate ? `Prompt template: ${task.promptTemplate}` : null,
+		task.roleHint ? `Role hint: ${task.roleHint}` : null,
+		task.description ?? task.summary ?? task.title,
+	].filter((value): value is string => Boolean(value)).join("\n\n");
+	return spawnChildFromParams(pi, ctx, {
+		title: task.title,
+		task: taskPrompt,
+		profile: resolution.profile.name,
+		taskId: task.id,
+		priority: task.priorityLabel ?? undefined,
+		profileSelectionReason: resolution.reason,
 	});
 }
 
@@ -2202,22 +3138,96 @@ function spawnChildFromParams(pi: ExtensionAPI, ctx: ExtensionContext, params: {
 	profile: string;
 	taskId?: string;
 	cwd?: string;
+	workspaceStrategy?: TaskWorkspaceStrategy;
 	model?: string;
 	tools?: string[];
 	parentAgentId?: string;
 	priority?: string;
+	profileSelectionReason?: string;
 }): SpawnSubagentResult {
 	const profile = requireProfile(params.profile);
-	const spawnCwd = resolveInputPath(ctx.cwd, params.cwd);
-	assertDirectory(spawnCwd);
-	const task = ensureTaskForSpawn(ctx, {
+	const db = getTmuxAgentsDb();
+	const explicitCwd = params.cwd?.trim() ? resolveInputPath(ctx.cwd, params.cwd) : null;
+	if (explicitCwd && params.workspaceStrategy === "dedicated_worktree") {
+		throw new Error("workspaceStrategy=dedicated_worktree provisions and spawns in the deterministic task worktree; omit cwd. Explicit cwd is only valid with workspaceStrategy=spawn_cwd, existing_worktree, or inherited task workspace metadata.");
+	}
+	const existingTaskId = params.taskId?.trim() || null;
+	const existingTask = existingTaskId ? getTask(db, existingTaskId) : null;
+	if (existingTaskId && !existingTask) throw new Error(`Unknown task id \"${existingTaskId}\".`);
+	const shouldInheritTaskWorktree = !explicitCwd && params.workspaceStrategy !== "spawn_cwd";
+	const initialSpawnCwd = explicitCwd ?? (shouldInheritTaskWorktree ? existingTask?.worktreeCwd : null) ?? existingTask?.spawnCwd ?? ctx.cwd;
+	assertDirectory(initialSpawnCwd);
+	let task = ensureTaskForSpawn(ctx, {
 		title: params.title,
 		task: params.task,
 		profile: params.profile,
-		cwd: spawnCwd,
+		cwd: initialSpawnCwd,
 		taskId: params.taskId,
 		priority: params.priority,
+		profileSelectionReason: params.profileSelectionReason,
 	});
+	let spawnCwd = explicitCwd ?? (shouldInheritTaskWorktree ? task.worktreeCwd : null) ?? task.spawnCwd ?? ctx.cwd;
+	let workspaceStrategy = params.workspaceStrategy ?? (shouldInheritTaskWorktree ? task.workspaceStrategy : null);
+	let worktreeId = shouldInheritTaskWorktree ? task.worktreeId : null;
+	let worktreeCwd = shouldInheritTaskWorktree ? task.worktreeCwd : null;
+	if (params.workspaceStrategy === "dedicated_worktree") {
+		const provisioned = provisionTaskWorktree(task, task.spawnCwd ?? ctx.cwd);
+		const now = Date.now();
+		updateTask(db, task.id, {
+			workspaceStrategy: "dedicated_worktree",
+			worktreeId: provisioned.worktreeId,
+			worktreeCwd: provisioned.worktreeCwd,
+			updatedAt: now,
+		});
+		createTaskEvent(db, {
+			id: randomUUID(),
+			taskId: task.id,
+			eventType: "worktree_provisioned",
+			summary: `${provisioned.reused ? "Reused" : "Created"} dedicated worktree ${provisioned.worktreeId}`,
+			payload: {
+				workspaceStrategy: "dedicated_worktree",
+				worktreeId: provisioned.worktreeId,
+				worktreeCwd: provisioned.worktreeCwd,
+				branchName: provisioned.branchName,
+				repoRoot: provisioned.repoRoot,
+				reused: provisioned.reused,
+			},
+			createdAt: now,
+		});
+		task = getTask(db, task.id)!;
+		workspaceStrategy = task.workspaceStrategy;
+		worktreeId = task.worktreeId;
+		worktreeCwd = task.worktreeCwd;
+		spawnCwd = task.worktreeCwd ?? task.spawnCwd;
+	} else if (params.workspaceStrategy === "spawn_cwd") {
+		workspaceStrategy = "spawn_cwd";
+		worktreeId = null;
+		worktreeCwd = null;
+		spawnCwd = explicitCwd ?? task.spawnCwd ?? ctx.cwd;
+	} else if (params.workspaceStrategy === "existing_worktree") {
+		assertExistingWorktreeCwd(spawnCwd);
+		const existingWorktreeId = sanitizeWorktreeSegment(task.id);
+		const now = Date.now();
+		updateTask(db, task.id, {
+			workspaceStrategy: "existing_worktree",
+			worktreeId: existingWorktreeId,
+			worktreeCwd: spawnCwd,
+			updatedAt: now,
+		});
+		createTaskEvent(db, {
+			id: randomUUID(),
+			taskId: task.id,
+			eventType: "worktree_recorded",
+			summary: `Recorded existing worktree cwd for ${task.id}`,
+			payload: { workspaceStrategy: "existing_worktree", worktreeId: existingWorktreeId, worktreeCwd: spawnCwd },
+			createdAt: now,
+		});
+		task = getTask(db, task.id)!;
+		workspaceStrategy = task.workspaceStrategy;
+		worktreeId = task.worktreeId;
+		worktreeCwd = task.worktreeCwd;
+	}
+	assertDirectory(spawnCwd);
 	const tools = normalizeBuiltinTools(params.tools ?? profile.tools);
 	const result = spawnSubagent({
 		title: params.title,
@@ -2231,13 +3241,31 @@ function spawnChildFromParams(pi: ExtensionAPI, ctx: ExtensionContext, params: {
 		parentAgentId: params.parentAgentId?.trim() || null,
 		spawnSessionId: ctx.sessionManager.getSessionId(),
 		spawnSessionFile: ctx.sessionManager.getSessionFile(),
+		workspaceStrategy,
+		worktreeId,
+		worktreeCwd,
 	});
-	linkTaskAgent(getTmuxAgentsDb(), {
+	linkTaskAgent(db, {
 		taskId: task.id,
 		agentId: result.agentId,
 		role: profile.name,
 		isActive: true,
-		summary: params.title,
+		summary: params.profileSelectionReason ? `${params.title} · ${params.profileSelectionReason}` : params.title,
+		syncTaskWorkspace: params.workspaceStrategy === "spawn_cwd" ? false : !(explicitCwd && params.workspaceStrategy == null),
+	});
+	createTaskEvent(db, {
+		id: randomUUID(),
+		taskId: task.id,
+		agentId: result.agentId,
+		eventType: "child_spawned",
+		summary: `Spawned ${profile.name} in ${result.spawnCwd}`,
+		payload: {
+			spawnCwd: result.spawnCwd,
+			workspaceStrategy: result.workspaceStrategy,
+			worktreeId: result.worktreeId,
+			worktreeCwd: result.worktreeCwd,
+			explicitCwd: Boolean(explicitCwd),
+		},
 	});
 	pi.appendEntry(SESSION_CHILD_LINK_ENTRY_TYPE, result.sessionLinkData);
 	updateFleetUi(ctx);
@@ -2339,6 +3367,16 @@ function buildDashboardData(ctx: ExtensionContext): AgentsDashboardData {
 		limit: 200,
 	});
 	const descendants = listAgents(db, { descendantOf: getLinkedChildIds(ctx), limit: 200 });
+	const needsHumanByScope = {
+		all: listTaskAttention(db, { limit: 100 }),
+		current_project: listTaskAttention(db, { projectKey: getProjectKey(ctx.cwd), limit: 100 }),
+		current_session: listTaskAttention(db, {
+			spawnSessionId: ctx.sessionManager.getSessionId(),
+			spawnSessionFile: ctx.sessionManager.getSessionFile(),
+			limit: 100,
+		}),
+		descendants: listTaskAttention(db, { ids: listAgents(db, { descendantOf: getLinkedChildIds(ctx), limit: 200 }).map((agent) => agent.taskId).filter((id): id is string => Boolean(id)), limit: 100 }),
+	};
 	const childrenByParent = new Map<string, string[]>();
 	for (const agent of all) {
 		if (!agent.parentAgentId) continue;
@@ -2356,6 +3394,7 @@ function buildDashboardData(ctx: ExtensionContext): AgentsDashboardData {
 			current_session: currentSession,
 			descendants,
 		},
+		needsHumanByScope,
 		childrenByParent,
 	};
 }
@@ -2366,7 +3405,8 @@ function boardLaneForTask(task: TaskRecord): BoardLaneId {
 
 function buildBoardScopeData(tasks: TaskRecord[], agents: AgentSummary[], attentionItems: AttentionItemRecord[]): AgentsBoardData["scopes"]["all"] {
 	const taskIds = tasks.map((task) => task.id);
-	const links = listTaskAgentLinks(getTmuxAgentsDb(), { taskIds, limit: 500 });
+	const needsHumanQueue = listTaskAttention(getTmuxAgentsDb(), { ids: taskIds, limit: 100 });
+	const links = listTaskAgentLinks(getTmuxAgentsDb(), { taskIds, activeOnly: true, limit: 500 });
 	const agentsById = new Map(agents.map((agent) => [agent.id, agent]));
 	const agentsByTaskId = new Map<string, AgentSummary[]>();
 	for (const link of links) {
@@ -2415,7 +3455,7 @@ function buildBoardScopeData(tasks: TaskRecord[], agents: AgentSummary[], attent
 	for (const laneId of Object.keys(lanes) as BoardLaneId[]) {
 		lanes[laneId].sort((left, right) => left.priority - right.priority || right.updatedAt - left.updatedAt);
 	}
-	return { lanes, tasksById, agentsByTaskId };
+	return { lanes, tasksById, agentsByTaskId, needsHumanQueue };
 }
 
 function buildBoardData(ctx: ExtensionContext): AgentsBoardData {
@@ -2538,7 +3578,7 @@ function moveTaskById(taskId: string, params: { status: TaskState; reason?: stri
 	return getTask(db, taskId)!;
 }
 
-async function runTaskCreateWizard(ctx: ExtensionContext): Promise<TaskRecord | null> {
+async function runTaskCreateWizard(pi: ExtensionAPI, ctx: ExtensionContext): Promise<TaskRecord | null> {
 	if (!ctx.hasUI) return null;
 	const title = await ctx.ui.input("Task title:", "new task");
 	if (!title?.trim()) return null;
@@ -2548,15 +3588,92 @@ async function runTaskCreateWizard(ctx: ExtensionContext): Promise<TaskRecord | 
 	if (!cwd?.trim()) return null;
 	const status = (await ctx.ui.select("Initial task status:", ["todo", "blocked", "in_progress", "in_review", "done"])) as TaskState | null;
 	if (!status) return null;
+	const autonomousStart = status === "todo" ? await ctx.ui.confirm("Autonomous start", "Launch an appropriate child agent for this ready todo task now?") : false;
+	const requestedProfile = autonomousStart ? (await ctx.ui.input("Requested profile override (optional):", ""))?.trim() || undefined : undefined;
+	const roleHint = autonomousStart ? (await ctx.ui.input("Role hint (optional: planning, implementation, review):", ""))?.trim() || undefined : undefined;
 	const created = createTaskFromParams(ctx, {
 		title: title.trim(),
 		summary: summary?.trim() || undefined,
 		description: description?.trim() || undefined,
 		cwd: cwd.trim(),
 		status,
+		autonomousStart,
+		requestedProfile,
+		roleHint,
 	});
-	ctx.ui.notify(`Created task ${created.id}.`, "info");
-	return created;
+	let launched: SpawnSubagentResult | null = null;
+	if (autonomousStart) launched = maybeAutonomousLaunchTask(pi, ctx, created);
+	ctx.ui.notify(launched ? `Created task ${created.id} and spawned ${launched.agentId}.` : `Created task ${created.id}.`, "info");
+	return launched ? getTask(getTmuxAgentsDb(), created.id) ?? created : created;
+}
+
+async function runNeedsHumanOpenFlow(ctx: ExtensionContext, needsHumanId: string): Promise<void> {
+	const db = getTmuxAgentsDb();
+	const item = listTaskNeedsHuman(db, { ids: [needsHumanId], limit: 1 })[0];
+	if (!item) throw new Error(`Unknown task needs-human id \"${needsHumanId}\".`);
+	const task = getTask(db, item.taskId);
+	if (!task) throw new Error(`Task ${item.taskId} for needs-human row ${item.id} is missing.`);
+	assertTaskNeedsHumanOpenable(item);
+	if (item.state !== "acknowledged") {
+		markTaskNeedsHumanResponse(item, "acknowledged", "opened", "Needs-human item opened from board queue.");
+		createTaskEvent(db, { id: randomUUID(), taskId: task.id, agentId: item.agentId, eventType: "needs_human_opened", summary: "Needs-human item opened from board queue.", payload: { needsHumanId: item.id, sourceMessageId: item.sourceMessageId ?? null } });
+	}
+	const agent = getAgent(db, item.agentId);
+	const latest = listMessagesForRecipient(db, item.agentId, { includeDelivered: true, limit: 1 })[0];
+	await ctx.ui.editor(`Needs-human ${item.id}`, [
+		`Needs-human: ${item.id}`,
+		`Task: ${task.id} · ${task.title}`,
+		`Status: ${task.status} · waiting: ${task.waitingOn ?? "-"} · priority: ${task.priority}`,
+		`Agent: ${item.agentId}${agent ? ` · ${agent.profile} · ${agent.state}` : ""}`,
+		`Kind: ${item.kind}/${item.category} · state: ${item.state} · waiting: ${item.waitingOn ?? "-"}`,
+		`Summary: ${item.summary}`,
+		`Prompt: ${item.responsePrompt ?? "-"}`,
+		`Blocked: ${task.blockedReason ?? "-"}`,
+		`Review: ${task.reviewSummary ?? "-"}`,
+		`Latest message: ${latest ? `${latest.kind} · ${JSON.stringify(latest.payload).slice(0, 1200)}` : "-"}`,
+		"",
+		"Routes: R respond, d defer, A approve review, J reject review, o focus, c capture.",
+	].join("\n"));
+}
+
+async function runNeedsHumanRespondFlow(ctx: ExtensionContext, needsHumanId: string): Promise<void> {
+	const mode = await ctx.ui.select("Response route:", ["combined", "task_patch", "child_message"]);
+	if (!mode) return;
+	const summary = await ctx.ui.input("Response summary:", "");
+	if (!summary?.trim()) return;
+	const result = await respondToTaskNeedsHuman({ needsHumanId, mode: mode as "combined" | "task_patch" | "child_message", summary: summary.trim() });
+	ctx.ui.notify(`Responded to ${needsHumanId}; patched=${result.patched}; message=${result.messageId ?? "none"}.`, "info");
+}
+
+async function runNeedsHumanDeferFlow(ctx: ExtensionContext, needsHumanId: string): Promise<void> {
+	const item = listTaskNeedsHuman(getTmuxAgentsDb(), { ids: [needsHumanId], limit: 1 })[0];
+	if (!item) throw new Error(`Unknown task needs-human id \"${needsHumanId}\".`);
+	assertTaskNeedsHumanOpenable(item);
+	const reason = await ctx.ui.input("Defer note (optional):", "Deferred from board queue.");
+	markTaskNeedsHumanResponse(item, "acknowledged", "deferred", reason?.trim() || "Deferred from board queue.");
+	ctx.ui.notify(`Deferred ${needsHumanId}.`, "info");
+}
+
+function assertNeedsHumanReviewActionAllowed(item: TaskNeedsHumanRecord, action: "approve" | "reject"): void {
+	if (item.category !== "review_gate" && item.kind !== "complete") {
+		throw new Error(`Cannot ${action} needs-human row ${item.id} because it is ${item.kind}/${item.category}; use respond or defer instead.`);
+	}
+}
+
+async function runNeedsHumanReviewFlow(ctx: ExtensionContext, needsHumanId: string, approved: boolean): Promise<void> {
+	const item = listTaskNeedsHuman(getTmuxAgentsDb(), { ids: [needsHumanId], limit: 1 })[0];
+	if (!item) throw new Error(`Unknown task needs-human id \"${needsHumanId}\".`);
+	assertNeedsHumanReviewActionAllowed(item, approved ? "approve" : "reject");
+	const summary = approved ? "Review approved from needs-human queue." : ((await ctx.ui.input("Reject reason:", "Changes requested."))?.trim() || "Changes requested.");
+	await respondToTaskNeedsHuman({
+		needsHumanId,
+		mode: "task_patch",
+		kind: approved ? "answer" : "redirect",
+		summary,
+		patch: approved ? { status: "done", finalSummary: summary } : { status: "in_progress", reviewSummary: summary },
+		resolution: approved ? "resolved" : "superseded",
+	});
+	ctx.ui.notify(`${approved ? "Approved" : "Rejected"} ${needsHumanId}.`, approved ? "info" : "warning");
 }
 
 async function runTaskMoveFlow(ctx: ExtensionContext, taskId: string): Promise<void> {
@@ -2676,6 +3793,21 @@ async function runAgentsBoard(pi: ExtensionAPI, ctx: ExtensionContext, initialSt
 		if (!selectedId && !["spawn", "sync", "create"].includes(action.type)) continue;
 		try {
 			switch (action.type) {
+				case "attention_open":
+					await runNeedsHumanOpenFlow(ctx, selectedId!);
+					break;
+				case "attention_respond":
+					await runNeedsHumanRespondFlow(ctx, selectedId!);
+					break;
+				case "attention_defer":
+					await runNeedsHumanDeferFlow(ctx, selectedId!);
+					break;
+				case "attention_approve":
+					await runNeedsHumanReviewFlow(ctx, selectedId!, true);
+					break;
+				case "attention_reject":
+					await runNeedsHumanReviewFlow(ctx, selectedId!, false);
+					break;
 				case "inspect": {
 					const task = getTask(getTmuxAgentsDb(), selectedId!);
 					if (task) await ctx.ui.editor(`Task ${task.id}`, formatTaskDetails(task, getTaskLinkedAgents(task.id), listTaskEvents(getTmuxAgentsDb(), { taskIds: [task.id], limit: 20 })));
@@ -2715,12 +3847,12 @@ async function runAgentsBoard(pi: ExtensionAPI, ctx: ExtensionContext, initialSt
 					await runTaskMoveFlow(ctx, selectedId!);
 					break;
 				case "create":
-					await runTaskCreateWizard(ctx);
+					await runTaskCreateWizard(pi, ctx);
 					break;
 				case "sync": {
 					const taskResult = reconcileTasks(getTmuxAgentsDb(), resolveTaskFilters(ctx, state.scope, { includeDone: true, limit: 200 }));
 					const agentResult = await reconcileAgents(ctx, { scope: state.scope, activeOnly: false, limit: 200 });
-					ctx.ui.notify(`Tasks: ${taskResult.backfilled} backfilled, ${taskResult.deactivatedLinks} links deactivated.\n${formatReconcileResult(agentResult)}`, "info");
+					ctx.ui.notify(`Tasks: ${taskResult.backfilled} backfilled, ${taskResult.needsHumanBackfilled} needs-human backfilled, ${taskResult.linkPointersRepaired + taskResult.agentTaskPointersRepaired} pointers repaired, ${taskResult.deactivatedLinks} links deactivated.\n${formatReconcileResult(agentResult)}`, "info");
 					break;
 				}
 				default:
@@ -2775,6 +3907,7 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 	};
 	let boardState: AgentsBoardState = {
 		scope: "current_project",
+		mode: "tasks",
 	};
 
 	function cycleActiveAgent(ctx: ExtensionContext, direction: 1 | -1): void {
@@ -2805,6 +3938,7 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 			"Prefer attaching the child to an existing taskId. If taskId is omitted, a new task is auto-created.",
 			"Before spawning more work, inspect unresolved attention with subagent_attention and handle blockers/questions first when appropriate.",
 			"Pick the most appropriate profile and keep the delegated task narrowly scoped.",
+			"For writing implementation agents, pass workspaceStrategy=dedicated_worktree and omit cwd; dedicated worktree spawns reject explicit cwd and run in the deterministic task worktree. Pass workspaceStrategy=spawn_cwd to intentionally opt out of task worktree inheritance.",
 			"Do not pass `find` in tool overrides. Use `grep` and `bash` with `rg --files` instead.",
 		],
 		parameters: SubagentSpawnParams,
@@ -3130,10 +4264,12 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 		parameters: TaskCreateParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const task = createTaskFromParams(ctx, params);
+			const launched = params.autonomousStart || params.launchPolicy === "autonomous" ? maybeAutonomousLaunchTask(pi, ctx, task) : null;
+			const currentTask = getTask(getTmuxAgentsDb(), task.id) ?? task;
 			updateFleetUi(ctx);
 			return {
-				content: [{ type: "text", text: formatTaskDetails(task) }],
-				details: { task },
+				content: [{ type: "text", text: launched ? `${formatTaskDetails(currentTask)}\n\nspawnedAgent: ${launched.agentId}` : formatTaskDetails(currentTask) }],
+				details: { task: currentTask, launched },
 			};
 		},
 	});
@@ -3167,7 +4303,7 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 			});
 			if (params.ids && params.ids.length > 0) filters.ids = params.ids;
 			const tasks = sortTasksForList(listTasks(getTmuxAgentsDb(), filters), (params.sort ?? "priority") as "priority" | "updated" | "created" | "title" | "status");
-			const links = listTaskAgentLinks(getTmuxAgentsDb(), { taskIds: tasks.map((task) => task.id), limit: 500 });
+			const links = listTaskAgentLinks(getTmuxAgentsDb(), { taskIds: tasks.map((task) => task.id), activeOnly: true, limit: 500 });
 			const agents = listAgents(getTmuxAgentsDb(), { ids: [...new Set(links.map((link) => link.agentId))], limit: 500 });
 			const agentsByTask = new Map<string, AgentSummary[]>();
 			const agentsById = new Map(agents.map((agent) => [agent.id, agent]));
@@ -3207,7 +4343,7 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 		},
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const tasks = params.ids.map((id) => getTask(getTmuxAgentsDb(), id)).filter((task): task is TaskRecord => task !== null);
-			const links = listTaskAgentLinks(getTmuxAgentsDb(), { taskIds: tasks.map((task) => task.id), limit: 500 });
+			const links = listTaskAgentLinks(getTmuxAgentsDb(), { taskIds: tasks.map((task) => task.id), activeOnly: true, limit: 500 });
 			const agents = listAgents(getTmuxAgentsDb(), { ids: [...new Set(links.map((link) => link.agentId))], limit: 500 });
 			const agentsById = new Map(agents.map((agent) => [agent.id, agent]));
 			const agentsByTask = new Map<string, AgentSummary[]>();
@@ -3259,6 +4395,14 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 				files: params.files,
 				blockedReason: params.blockedReason,
 				waitingOn: params.waitingOn as TaskWaitingOn | undefined,
+				requestedProfile: params.requestedProfile,
+				assignedProfile: params.assignedProfile,
+				launchPolicy: params.launchPolicy as TaskLaunchPolicy | undefined,
+				promptTemplate: params.promptTemplate,
+				roleHint: params.roleHint,
+				workspaceStrategy: params.workspaceStrategy === undefined ? undefined : params.workspaceStrategy as TaskWorkspaceStrategy | null,
+				worktreeId: normalizeNullableMetadataString(params.worktreeId),
+				worktreeCwd: resolveNullableInputPath(task.spawnCwd, params.worktreeCwd),
 				reviewSummary: params.reviewSummary,
 				finalSummary: params.finalSummary,
 				updatedAt: Date.now(),
@@ -3376,20 +4520,86 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "task_attention",
 		label: "Task Attention",
-		description: "List blocked and in-review tasks that need coordinator or user attention.",
-		promptSnippet: "List task-level unresolved work such as blocked tasks and tasks waiting for review.",
+		description: "List per task/agent needs-human queue rows that need coordinator, user, service, external, or review attention.",
+		promptSnippet: "List task-agent unresolved needs-human rows with payload needed to respond or open the source message.",
 		promptGuidelines: [
 			"Use task_attention as the task-first unresolved queue.",
+			"Use task_response_open to acknowledge and inspect one row before responding when needed.",
+			"Use task_respond to route a response as task_patch, child_message, or combined without relying on pane capture.",
 		],
 		parameters: TaskAttentionParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const scope = params.scope ?? "current_project";
 			const filters = resolveTaskFilters(ctx, scope, { includeDone: true, limit: params.limit });
-			const items = listTaskAttention(getTmuxAgentsDb(), { ids: filters.ids, projectKey: filters.projectKey, spawnSessionId: filters.spawnSessionId, spawnSessionFile: filters.spawnSessionFile, limit: params.limit });
+			const db = getTmuxAgentsDb();
+			const items = listTaskAttention(db, { ids: filters.ids, projectKey: filters.projectKey, spawnSessionId: filters.spawnSessionId, spawnSessionFile: filters.spawnSessionFile, limit: params.limit });
+			const agentsById = new Map(listAgents(db, { limit: 500 }).map((agent) => [agent.id, agent]));
 			updateFleetUi(ctx);
 			return {
-				content: [{ type: "text", text: buildTaskAttentionText(items) }],
+				content: [{ type: "text", text: buildTaskAttentionText(items, agentsById) }],
 				details: { scope, items },
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "task_response_open",
+		label: "Task Response Open",
+		description: "Open and optionally acknowledge a task needs-human queue item before responding.",
+		promptSnippet: "Inspect a task_needs_human row by id and optionally mark it acknowledged.",
+		promptGuidelines: [
+			"Use needsHumanId from task_attention.",
+			"Set acknowledge=false when you only want a read-only lookup.",
+		],
+		parameters: TaskOpenResponseParams,
+		execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const db = getTmuxAgentsDb();
+			const item = listTaskNeedsHuman(db, { ids: [params.needsHumanId], limit: 1 })[0];
+			if (!item) throw new Error(`Unknown task needs-human id "${params.needsHumanId}".`);
+			const task = getTask(db, item.taskId);
+			if (!task) throw new Error(`Task ${item.taskId} for needs-human row ${item.id} is missing.`);
+			assertTaskNeedsHumanOpenable(item);
+			if ((params.acknowledge ?? true) && item.state !== "acknowledged") {
+				markTaskNeedsHumanResponse(item, "acknowledged", "opened", "Needs-human item opened for response.");
+				createTaskEvent(db, {
+					id: randomUUID(),
+					taskId: task.id,
+					agentId: item.agentId,
+					eventType: "needs_human_opened",
+					summary: "Needs-human item opened for response.",
+					payload: { needsHumanId: item.id, sourceMessageId: item.sourceMessageId ?? null },
+				});
+			}
+			updateFleetUi(ctx);
+			return {
+				content: [{ type: "text", text: `${params.acknowledge ?? true ? "Acknowledged" : "Opened"} ${item.id} for task ${task.id}: ${item.summary}` }],
+				details: { item: listTaskNeedsHuman(db, { ids: [item.id], limit: 1 })[0] ?? item, task },
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "task_respond",
+		label: "Task Respond",
+		description: "Respond to a task needs-human row by patching task metadata, messaging the child, or doing both in order.",
+		promptSnippet: "Route a needs-human response as task_patch, child_message, or combined. Combined applies patch first then queues a concise child message.",
+		promptGuidelines: [
+			"Use mode=task_patch to update acceptanceCriteria, planSteps, files, priority, status, waitingOn, etc. without sending a child message.",
+			"Use mode=child_message to send answer/note/redirect/cancel/priority to the linked child with inReplyToMessageId inferred from the queue row.",
+			"Use mode=combined to patch the task first, then send a concise child message telling the child what changed.",
+			"Use resolution=acknowledged only with mode=task_patch; child_message and combined require resolved/cancelled/superseded so duplicates cannot queue another child message.",
+			"For blockers, answer defaults to resume_if_blocked and can move the task back to in_progress.",
+			"For completion/review gates, a patch-less response defaults to marking the task done.",
+		],
+		parameters: TaskRespondParams,
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const result = await respondToTaskNeedsHuman(params);
+			updateFleetUi(ctx);
+			const route = inferTaskResponseMode(result.item, params);
+			const delivered = result.liveDelivery ? ` · delivered=${result.liveDelivery.delivered}` : "";
+			return {
+				content: [{ type: "text", text: `Responded to ${params.needsHumanId} via ${route}; resolution=${result.resolution}; patched=${result.patched}; message=${result.messageId ?? "none"}${delivered}.` }],
+				details: result,
 			};
 		},
 	});
@@ -3406,8 +4616,40 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 			const result = reconcileTasks(getTmuxAgentsDb(), { ids: filters.ids, projectKey: filters.projectKey, spawnSessionId: filters.spawnSessionId, spawnSessionFile: filters.spawnSessionFile, limit: params.limit });
 			updateFleetUi(ctx);
 			return {
-				content: [{ type: "text", text: `Reconciled tasks · ${result.backfilled} backfilled · ${result.deactivatedLinks} links deactivated.` }],
+				content: [{ type: "text", text: `Reconciled tasks · ${result.backfilled} tasks backfilled · ${result.needsHumanBackfilled} needs-human rows backfilled · ${result.needsHumanResolved} needs-human rows resolved · ${result.linkPointersRepaired + result.agentTaskPointersRepaired} link pointers repaired · ${result.deactivatedLinks} links deactivated.` }],
 				details: { scope, result },
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "task_worktree_cleanup",
+		label: "Task Worktree Cleanup",
+		description: "Preview or explicitly remove eligible dedicated task git worktrees after tasks are done. Branches are never deleted.",
+		promptSnippet: "Preview task-linked worktree cleanup, then pass remove=true and dryRun=false to remove eligible dedicated done-task worktrees only.",
+		promptGuidelines: [
+			"Prefer dryRun=true first to show active/reusable/stale/ready-cleanup status.",
+			"Cleanup only removes dedicated_worktree git worktree checkouts for done tasks with no active linked agents.",
+			"existing_worktree, spawn_cwd, inherited, dirty, missing, conflicting, and active worktrees are preserved/skipped by default.",
+			"This tool never deletes git branches; branch deletion is a separate manual operator decision after review.",
+		],
+		parameters: TaskWorktreeCleanupParams,
+		execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const candidates = listTaskWorktreeCleanupCandidates(ctx, params);
+			const dryRun = params.dryRun ?? true;
+			if (dryRun || !params.remove) {
+				return {
+					content: [{ type: "text", text: formatTaskWorktreeCleanupCandidates(candidates, true) }],
+					details: { candidates, dryRun: true, remove: params.remove ?? false },
+				};
+			}
+			const ready = candidates.filter((candidate) => candidate.eligible);
+			const skipped = candidates.filter((candidate) => !candidate.eligible);
+			const results = ready.map((candidate) => cleanupTaskWorktree(candidate, params.force ?? false));
+			updateFleetUi(ctx);
+			return {
+				content: [{ type: "text", text: formatTaskWorktreeCleanupResults(results, skipped) }],
+				details: { candidates, results, skipped, dryRun: false, remove: true },
 			};
 		},
 	});
@@ -3579,6 +4821,24 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 		},
 	});
 
+	pi.registerCommand("needs-human", {
+		description: "Open the task-first needs-human queue on the task board",
+		handler: async (args, ctx) => {
+			const scope = (args?.trim() as "all" | "current_project" | "current_session" | "descendants" | undefined) || boardState.scope || "current_project";
+			if (!["all", "current_project", "current_session", "descendants"].includes(scope)) {
+				ctx.ui.notify("Usage: /needs-human [all|current_project|current_session|descendants]", "warning");
+				return;
+			}
+			if (!ctx.hasUI) {
+				ctx.ui.notify(buildNeedsHumanFallbackText(ctx, scope), "info");
+				updateFleetUi(ctx);
+				return;
+			}
+			boardState = await runAgentsBoard(pi, ctx, { ...boardState, scope, mode: "queue" });
+			updateFleetUi(ctx);
+		},
+	});
+
 	pi.registerCommand("tasks", {
 		description: "List tracked tasks",
 		handler: async (args, ctx) => {
@@ -3599,7 +4859,7 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 	pi.registerCommand("task-new", {
 		description: "Create a tracked task",
 		handler: async (_args, ctx) => {
-			const created = await runTaskCreateWizard(ctx);
+			const created = await runTaskCreateWizard(pi, ctx);
 			if (created && ctx.hasUI) await ctx.ui.editor(`Task ${created.id}`, formatTaskDetails(created));
 			updateFleetUi(ctx);
 		},
@@ -3701,18 +4961,67 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("task-attention", {
-		description: "List blocked and in-review tasks",
+		description: "List task-first needs-human queue rows",
 		handler: async (args, ctx) => {
 			const scope = (args?.trim() as "all" | "current_project" | "current_session" | "descendants" | undefined) ?? "current_project";
 			if (!["all", "current_project", "current_session", "descendants"].includes(scope)) {
 				ctx.ui.notify("Usage: /task-attention [all|current_project|current_session|descendants]", "warning");
 				return;
 			}
-			const filters = resolveTaskFilters(ctx, scope, { includeDone: true, limit: 200 });
-			const items = listTaskAttention(getTmuxAgentsDb(), { ids: filters.ids, projectKey: filters.projectKey, spawnSessionId: filters.spawnSessionId, spawnSessionFile: filters.spawnSessionFile, limit: 200 });
-			const text = buildTaskAttentionText(items);
+			const text = buildNeedsHumanFallbackText(ctx, scope);
 			if (ctx.hasUI) await ctx.ui.editor("task attention", text);
 			else ctx.ui.notify(text, "info");
+			updateFleetUi(ctx);
+		},
+	});
+
+	pi.registerCommand("task-response-open", {
+		description: "Open and acknowledge a task needs-human queue row",
+		handler: async (args, ctx) => {
+			const id = args?.trim();
+			if (!id) {
+				ctx.ui.notify("Usage: /task-response-open <needs-human-id>", "warning");
+				return;
+			}
+			const item = listTaskNeedsHuman(getTmuxAgentsDb(), { ids: [id], limit: 1 })[0];
+			if (!item) {
+				ctx.ui.notify(`Unknown task needs-human id "${id}".`, "error");
+				return;
+			}
+			try {
+				assertTaskNeedsHumanOpenable(item);
+			} catch (error) {
+				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+				return;
+			}
+			if (item.state !== "acknowledged") markTaskNeedsHumanResponse(item, "acknowledged", "opened", "Needs-human item opened for response.");
+			const task = getTask(getTmuxAgentsDb(), item.taskId);
+			if (task && item.state !== "acknowledged") {
+				createTaskEvent(getTmuxAgentsDb(), { id: randomUUID(), taskId: task.id, agentId: item.agentId, eventType: "needs_human_opened", summary: "Needs-human item opened for response.", payload: { needsHumanId: item.id, sourceMessageId: item.sourceMessageId ?? null } });
+			}
+			ctx.ui.notify(`${item.state === "acknowledged" ? "Already acknowledged" : "Acknowledged"} ${item.id} for task ${item.taskId}.`, "info");
+			updateFleetUi(ctx);
+		},
+	});
+
+	pi.registerCommand("task-respond", {
+		description: "Respond to a task needs-human row; JSON supports mode, patch, kind, summary, details, resolution",
+		handler: async (args, ctx) => {
+			const raw = args?.trim() ?? "";
+			const [id, ...rest] = raw.split(/\s+/);
+			if (!id) {
+				ctx.ui.notify("Usage: /task-respond <needs-human-id> [summary text | JSON object with mode/patch/kind/summary/resolution]; resolution=acknowledged only with mode=task_patch", "warning");
+				return;
+			}
+			const body = rest.join(" ").trim();
+			let params: Parameters<typeof respondToTaskNeedsHuman>[0] = { needsHumanId: id };
+			if (body.startsWith("{")) {
+				params = { needsHumanId: id, ...(JSON.parse(body) as Omit<Parameters<typeof respondToTaskNeedsHuman>[0], "needsHumanId">) };
+			} else if (body) {
+				params.summary = body;
+			}
+			const result = await respondToTaskNeedsHuman(params);
+			ctx.ui.notify(`Responded to ${id}; resolution=${result.resolution}; message=${result.messageId ?? "none"}.`, "info");
 			updateFleetUi(ctx);
 		},
 	});
@@ -3727,7 +5036,37 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 			}
 			const filters = resolveTaskFilters(ctx, scope, { includeDone: true, limit: 200 });
 			const result = reconcileTasks(getTmuxAgentsDb(), { ids: filters.ids, projectKey: filters.projectKey, spawnSessionId: filters.spawnSessionId, spawnSessionFile: filters.spawnSessionFile, limit: 200 });
-			ctx.ui.notify(`Reconciled tasks · ${result.backfilled} backfilled · ${result.deactivatedLinks} links deactivated.`, "info");
+			ctx.ui.notify(`Reconciled tasks · ${result.backfilled} backfilled · ${result.needsHumanBackfilled} needs-human backfilled · ${result.linkPointersRepaired + result.agentTaskPointersRepaired} pointers repaired · ${result.deactivatedLinks} links deactivated.`, "info");
+			updateFleetUi(ctx);
+		},
+	});
+
+	pi.registerCommand("task-worktree-cleanup", {
+		description: "Preview or explicitly remove eligible done-task dedicated git worktrees",
+		handler: async (args, ctx) => {
+			const parts = args?.trim().split(/\s+/).filter(Boolean) ?? [];
+			const remove = parts.includes("remove") || parts.includes("--remove");
+			const dryRun = !remove || parts.includes("dry-run") || parts.includes("--dry-run");
+			const force = parts.includes("force") || parts.includes("--force");
+			const scope = parts.find((part) => ["all", "current_project", "current_session", "descendants"].includes(part)) as "all" | "current_project" | "current_session" | "descendants" | undefined;
+			const id = parts.find((part) => !["all", "current_project", "current_session", "descendants", "remove", "--remove", "dry-run", "--dry-run", "force", "--force"].includes(part));
+			const candidates = listTaskWorktreeCleanupCandidates(ctx, { scope: scope ?? "current_project", ids: id ? [id] : undefined, force, limit: 200 });
+			if (dryRun) {
+				const text = formatTaskWorktreeCleanupCandidates(candidates, true);
+				if (ctx.hasUI) await ctx.ui.editor("task worktree cleanup preview", text);
+				else ctx.ui.notify(text, "info");
+				return;
+			}
+			if (ctx.hasUI) {
+				const ok = await ctx.ui.confirm("Remove eligible task worktrees", `${formatTaskWorktreeCleanupCandidates(candidates, true)}\n\nProceed? Branches will not be deleted.`);
+				if (!ok) return;
+			}
+			const ready = candidates.filter((candidate) => candidate.eligible);
+			const skipped = candidates.filter((candidate) => !candidate.eligible);
+			const results = ready.map((candidate) => cleanupTaskWorktree(candidate, force));
+			const text = formatTaskWorktreeCleanupResults(results, skipped);
+			if (ctx.hasUI) await ctx.ui.editor("task worktree cleanup", text);
+			else ctx.ui.notify(text, "info");
 			updateFleetUi(ctx);
 		},
 	});

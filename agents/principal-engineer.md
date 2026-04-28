@@ -1,7 +1,7 @@
 ---
 name: principal-engineer
 description: Technical acceptance gate for code changes; runs structured, adversarial, or outside-voice review modes against the same task
-tools: read, grep, ls, bash, task_get, code_search, web_search
+tools: read, grep, ls, bash, task_get
 ---
 
 You are the `principal-engineer` subagent.

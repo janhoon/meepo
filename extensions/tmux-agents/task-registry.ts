@@ -4,22 +4,43 @@ import type { AgentState, AttentionItemKind, AttentionItemState } from "./types.
 import type {
 	CreateTaskEventInput,
 	CreateTaskInput,
+	CreateTaskNeedsHumanInput,
 	LinkTaskAgentInput,
 	ListTaskAgentLinksFilters,
 	ListTaskEventsFilters,
+	ListTaskNeedsHumanFilters,
 	ListTasksFilters,
 	TaskAgentLinkRecord,
 	TaskAttentionRecord,
 	TaskEventRecord,
+	TaskNeedsHumanCategory,
+	TaskNeedsHumanKind,
+	TaskNeedsHumanRecord,
+	TaskNeedsHumanState,
 	TaskRecord,
 	TaskState,
 	TaskSummaryCounts,
 	TaskWaitingOn,
 	UpdateTaskInput,
+	UpdateTaskNeedsHumanInput,
 } from "./task-types.js";
 
 const ACTIVE_AGENT_STATES: AgentState[] = ["launching", "running", "idle", "waiting", "blocked"];
 const OPEN_ATTENTION_STATES: AttentionItemState[] = ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user"];
+export const OPEN_TASK_NEEDS_HUMAN_STATES: TaskNeedsHumanState[] = ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user", "waiting_on_service", "waiting_on_external"];
+const OPEN_NEEDS_HUMAN_STATES = OPEN_TASK_NEEDS_HUMAN_STATES;
+
+export const TASK_LIFECYCLE_TRANSITION_MATRIX = [
+	{ transition: "start", taskStatus: "in_progress", agentState: "running", needsHuman: "none", link: "active" },
+	{ transition: "milestone/note", taskStatus: "in_progress", agentState: "running", needsHuman: "unchanged", link: "active" },
+	{ transition: "blocker/question", taskStatus: "blocked", agentState: "blocked|waiting", needsHuman: "open/waiting", link: "active" },
+	{ transition: "answer/task_patch", taskStatus: "patch-defined; blocker defaults to in_progress", agentState: "unchanged until child resumes", needsHuman: "acknowledged or resolved", link: "active" },
+	{ transition: "answer/child_message", taskStatus: "patch-defined; blocker defaults to in_progress", agentState: "queued child message", needsHuman: "terminal-claimed before delivery", link: "active" },
+	{ transition: "complete/review_gate", taskStatus: "in_review by worker, done by reviewer/default override", agentState: "done", needsHuman: "review_gate open when in_review", link: "inactive" },
+	{ transition: "review approval", taskStatus: "done", agentState: "terminal", needsHuman: "resolved", link: "inactive" },
+	{ transition: "cancel/error/lost", taskStatus: "not regressed by reconcile", agentState: "terminal", needsHuman: "preserved unless force cleanup", link: "inactive" },
+	{ transition: "cleanup", taskStatus: "unchanged", agentState: "terminal record retained", needsHuman: "completion resolved; blockers/questions require force", link: "inactive" },
+] as const;
 
 const TASK_FIELD_TO_COLUMN: Record<keyof UpdateTaskInput, string> = {
 	parentTaskId: "parent_task_id",
@@ -35,6 +56,14 @@ const TASK_FIELD_TO_COLUMN: Record<keyof UpdateTaskInput, string> = {
 	priorityLabel: "priority_label",
 	waitingOn: "waiting_on",
 	blockedReason: "blocked_reason",
+	requestedProfile: "requested_profile",
+	assignedProfile: "assigned_profile",
+	launchPolicy: "launch_policy",
+	promptTemplate: "prompt_template",
+	roleHint: "role_hint",
+	workspaceStrategy: "workspace_strategy",
+	worktreeId: "worktree_id",
+	worktreeCwd: "worktree_cwd",
 	acceptanceCriteria: "acceptance_criteria_json",
 	planSteps: "plan_steps_json",
 	validationSteps: "validation_steps_json",
@@ -67,6 +96,11 @@ function normalizeStringArray(values: string[] | null | undefined): string[] {
 		normalized.push(trimmed);
 	}
 	return normalized;
+}
+
+function normalizeNullableString(value: string | null | undefined): string | null | undefined {
+	if (value === undefined || value === null) return value;
+	return value.trim() || null;
 }
 
 function mergeStringArrays(...parts: Array<string[] | null | undefined>): string[] {
@@ -116,6 +150,14 @@ function toTaskRecord(row: Record<string, unknown>): TaskRecord {
 		priorityLabel: (row.priority_label as string | null) ?? null,
 		waitingOn: (row.waiting_on as TaskWaitingOn | null) ?? null,
 		blockedReason: (row.blocked_reason as string | null) ?? null,
+		requestedProfile: (row.requested_profile as string | null) ?? null,
+		assignedProfile: (row.assigned_profile as string | null) ?? null,
+		launchPolicy: row.launch_policy === "autonomous" ? "autonomous" : "manual",
+		promptTemplate: (row.prompt_template as string | null) ?? null,
+		roleHint: (row.role_hint as string | null) ?? null,
+		workspaceStrategy: (row.workspace_strategy as TaskRecord["workspaceStrategy"] | null) ?? null,
+		worktreeId: (row.worktree_id as string | null) ?? null,
+		worktreeCwd: (row.worktree_cwd as string | null) ?? null,
 		acceptanceCriteria: normalizeStringArray(safeJsonParse(row.acceptance_criteria_json as string | null, [])),
 		planSteps: normalizeStringArray(safeJsonParse(row.plan_steps_json as string | null, [])),
 		validationSteps: normalizeStringArray(safeJsonParse(row.validation_steps_json as string | null, [])),
@@ -153,11 +195,42 @@ function toTaskAgentLinkRecord(row: Record<string, unknown>): TaskAgentLinkRecor
 		linkedAt: Number(row.linked_at ?? 0),
 		unlinkedAt: (row.unlinked_at as number | null) ?? null,
 		summary: (row.summary as string | null) ?? null,
+		syncTaskWorkspace: Number(row.sync_task_workspace ?? 1) === 1,
 	};
 }
 
 function taskStatusOrderSql(column = "t.status"): string {
 	return `CASE ${column} WHEN 'blocked' THEN 0 WHEN 'in_review' THEN 1 WHEN 'in_progress' THEN 2 WHEN 'todo' THEN 3 WHEN 'done' THEN 4 ELSE 5 END`;
+}
+
+function toTaskNeedsHumanRecord(row: Record<string, unknown>): TaskNeedsHumanRecord {
+	return {
+		id: row.id as string,
+		taskId: row.task_id as string,
+		agentId: row.agent_id as string,
+		taskAgentLinkId: (row.task_agent_link_id as string | null) ?? null,
+		sourceMessageId: (row.source_message_id as string | null) ?? null,
+		legacyAttentionItemId: (row.legacy_attention_item_id as string | null) ?? null,
+		projectKey: row.project_key as string,
+		spawnSessionId: (row.spawn_session_id as string | null) ?? null,
+		spawnSessionFile: (row.spawn_session_file as string | null) ?? null,
+		kind: row.kind as TaskNeedsHumanKind,
+		category: row.category as TaskNeedsHumanCategory,
+		waitingOn: (row.waiting_on as TaskWaitingOn | null) ?? null,
+		priority: Number(row.priority ?? 0),
+		state: row.state as TaskNeedsHumanState,
+		summary: row.summary as string,
+		payload: safeJsonParse(row.payload_json as string | null, null),
+		responseRequired: Number(row.response_required ?? 0) === 1,
+		responsePrompt: (row.response_prompt as string | null) ?? null,
+		responseSchema: safeJsonParse(row.response_schema_json as string | null, null),
+		createdAt: Number(row.created_at ?? 0),
+		updatedAt: Number(row.updated_at ?? 0),
+		resolvedAt: (row.resolved_at as number | null) ?? null,
+		resolvedBy: (row.resolved_by as string | null) ?? null,
+		resolutionKind: (row.resolution_kind as string | null) ?? null,
+		resolutionSummary: (row.resolution_summary as string | null) ?? null,
+	};
 }
 
 function deriveDefaultTaskStatus(profile: string, kind: "milestone" | "blocked" | "question" | "question_for_user" | "note" | "complete"): TaskState | null {
@@ -181,6 +254,26 @@ function nowOr(value: number | null | undefined, fallback: number): number | nul
 	return value ?? fallback;
 }
 
+function needsHumanCategoryForPublish(kind: "blocked" | "question" | "question_for_user" | "complete"): TaskNeedsHumanCategory {
+	if (kind === "blocked") return "blocker";
+	if (kind === "complete") return "completion";
+	return "question";
+}
+
+function needsHumanStateForWaitingOn(waitingOn: TaskWaitingOn | null): TaskNeedsHumanState {
+	if (waitingOn === "user") return "waiting_on_user";
+	if (waitingOn === "service") return "waiting_on_service";
+	if (waitingOn === "external") return "waiting_on_external";
+	return "waiting_on_coordinator";
+}
+
+function defaultWaitingOnForNeedsHuman(kind: "blocked" | "question" | "question_for_user" | "complete", explicit: TaskWaitingOn | null | undefined): TaskWaitingOn | null {
+	if (explicit) return explicit;
+	if (kind === "question_for_user") return "user";
+	if (kind === "question" || kind === "blocked" || kind === "complete") return "coordinator";
+	return null;
+}
+
 export function createTask(db: DatabaseSync, input: CreateTaskInput): void {
 	const createdAt = input.createdAt ?? Date.now();
 	const updatedAt = input.updatedAt ?? createdAt;
@@ -200,6 +293,14 @@ export function createTask(db: DatabaseSync, input: CreateTaskInput): void {
 			priority_label,
 			waiting_on,
 			blocked_reason,
+			requested_profile,
+			assigned_profile,
+			launch_policy,
+			prompt_template,
+			role_hint,
+			workspace_strategy,
+			worktree_id,
+			worktree_cwd,
 			acceptance_criteria_json,
 			plan_steps_json,
 			validation_steps_json,
@@ -212,7 +313,7 @@ export function createTask(db: DatabaseSync, input: CreateTaskInput): void {
 			started_at,
 			review_requested_at,
 			finished_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	).run(
 		input.id,
 		input.parentTaskId ?? null,
@@ -228,6 +329,14 @@ export function createTask(db: DatabaseSync, input: CreateTaskInput): void {
 		input.priorityLabel ?? null,
 		input.waitingOn ?? null,
 		input.blockedReason ?? null,
+		input.requestedProfile?.trim() || null,
+		input.assignedProfile?.trim() || null,
+		input.launchPolicy ?? "manual",
+		input.promptTemplate?.trim() || null,
+		input.roleHint?.trim() || null,
+		input.workspaceStrategy ?? null,
+		normalizeNullableString(input.worktreeId) ?? null,
+		normalizeNullableString(input.worktreeCwd) ?? null,
 		JSON.stringify(normalizeStringArray(input.acceptanceCriteria)),
 		JSON.stringify(normalizeStringArray(input.planSteps)),
 		JSON.stringify(normalizeStringArray(input.validationSteps)),
@@ -253,6 +362,8 @@ export function updateTask(db: DatabaseSync, id: string, patch: UpdateTaskInput)
 		assignments.push(`${column} = ?`);
 		if (["acceptanceCriteria", "planSteps", "validationSteps", "labels", "files"].includes(field)) {
 			params.push(JSON.stringify(normalizeStringArray(value as string[] | undefined)));
+		} else if (["worktreeId", "worktreeCwd"].includes(field)) {
+			params.push(normalizeNullableString(value as string | null | undefined));
 		} else {
 			params.push(value);
 		}
@@ -381,6 +492,34 @@ export function listTaskAgentLinks(db: DatabaseSync, filters: ListTaskAgentLinks
 	return rows.map(toTaskAgentLinkRecord);
 }
 
+function syncAgentTaskWorktreeForActiveLink(db: DatabaseSync, task: TaskRecord, agentId: string): number {
+	const result = db.prepare(`UPDATE agents
+		SET task_id = ?,
+			workspace_strategy = CASE WHEN workspace_strategy IS NULL THEN ? ELSE workspace_strategy END,
+			worktree_id = CASE WHEN workspace_strategy IS NULL THEN ? ELSE worktree_id END,
+			worktree_cwd = CASE WHEN workspace_strategy IS NULL THEN ? ELSE worktree_cwd END
+		WHERE id = ?
+			AND state IN (${makePlaceholders(ACTIVE_AGENT_STATES.length)})
+			AND EXISTS (
+				SELECT 1
+				FROM task_agent_links tal
+				WHERE tal.task_id = ?
+					AND tal.agent_id = agents.id
+					AND tal.is_active = 1
+					AND tal.sync_task_workspace = 1
+			)
+	`).run(
+		task.id,
+		task.workspaceStrategy,
+		task.worktreeId,
+		task.worktreeCwd,
+		agentId,
+		...ACTIVE_AGENT_STATES,
+		task.id,
+	) as { changes?: number };
+	return Number(result.changes ?? 0);
+}
+
 function deactivateActiveLinksForAgent(db: DatabaseSync, agentId: string, exceptTaskId: string | null, reason: string, now: number): string[] {
 	const rows = db
 		.prepare(
@@ -411,21 +550,25 @@ export function linkTaskAgent(db: DatabaseSync, input: LinkTaskAgentInput): Task
 	const now = input.linkedAt ?? Date.now();
 	const task = getTask(db, input.taskId);
 	if (!task) throw new Error(`Unknown task id \"${input.taskId}\".`);
-	const agentRow = db.prepare("SELECT profile FROM agents WHERE id = ?").get(input.agentId) as { profile?: string } | undefined;
+	const agentRow = db.prepare("SELECT profile, state FROM agents WHERE id = ?").get(input.agentId) as { profile?: string; state?: AgentState } | undefined;
 	if (!agentRow) throw new Error(`Unknown agent id \"${input.agentId}\".`);
 	deactivateActiveLinksForAgent(db, input.agentId, input.taskId, "linked_to_new_task", now);
 	const existing = db
 		.prepare("SELECT * FROM task_agent_links WHERE task_id = ? AND agent_id = ? AND is_active = 1 LIMIT 1")
 		.get(input.taskId, input.agentId) as Record<string, unknown> | undefined;
 	if (existing) {
-		db.prepare("UPDATE task_agent_links SET role = ?, summary = ? WHERE id = ?").run(
+		const syncTaskWorkspace = input.syncTaskWorkspace ?? (Number(existing.sync_task_workspace ?? 1) === 1);
+		db.prepare("UPDATE task_agent_links SET role = ?, summary = ?, sync_task_workspace = ? WHERE id = ?").run(
 			input.role?.trim() || (existing.role as string | null) || agentRow.profile || "contributor",
 			input.summary?.trim() || (existing.summary as string | null) || null,
+			syncTaskWorkspace ? 1 : 0,
 			existing.id,
 		);
 		updateTask(db, input.taskId, { updatedAt: now });
-		db.prepare("UPDATE agents SET task_id = ? WHERE id = ?").run(input.taskId, input.agentId);
-		return toTaskAgentLinkRecord({ ...existing, role: input.role ?? existing.role, summary: input.summary ?? existing.summary });
+		if (syncTaskWorkspace) {
+			syncAgentTaskWorktreeForActiveLink(db, task, input.agentId);
+		}
+		return toTaskAgentLinkRecord({ ...existing, role: input.role ?? existing.role, summary: input.summary ?? existing.summary, sync_task_workspace: syncTaskWorkspace ? 1 : 0 });
 	}
 	const record: TaskAgentLinkRecord = {
 		id: input.id ?? randomUUID(),
@@ -436,12 +579,15 @@ export function linkTaskAgent(db: DatabaseSync, input: LinkTaskAgentInput): Task
 		linkedAt: now,
 		unlinkedAt: null,
 		summary: input.summary?.trim() || null,
+		syncTaskWorkspace: input.syncTaskWorkspace !== false,
 	};
 	db.prepare(
-		`INSERT INTO task_agent_links (id, task_id, agent_id, role, is_active, linked_at, unlinked_at, summary)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-	).run(record.id, record.taskId, record.agentId, record.role, record.isActive ? 1 : 0, record.linkedAt, record.unlinkedAt, record.summary);
-	db.prepare("UPDATE agents SET task_id = ? WHERE id = ?").run(record.taskId, record.agentId);
+		`INSERT INTO task_agent_links (id, task_id, agent_id, role, is_active, linked_at, unlinked_at, summary, sync_task_workspace)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	).run(record.id, record.taskId, record.agentId, record.role, record.isActive ? 1 : 0, record.linkedAt, record.unlinkedAt, record.summary, record.syncTaskWorkspace ? 1 : 0);
+	if (input.syncTaskWorkspace !== false) {
+		syncAgentTaskWorktreeForActiveLink(db, task, record.agentId);
+	}
 	updateTask(db, record.taskId, { updatedAt: now });
 	createTaskEvent(db, {
 		id: randomUUID(),
@@ -457,6 +603,10 @@ export function linkTaskAgent(db: DatabaseSync, input: LinkTaskAgentInput): Task
 
 export function unlinkTaskAgent(db: DatabaseSync, taskId: string, agentId: string, reason?: string): number {
 	const now = Date.now();
+	return deactivateTaskAgentLink(db, taskId, agentId, reason, now);
+}
+
+function deactivateTaskAgentLink(db: DatabaseSync, taskId: string, agentId: string, reason: string | undefined, now: number): number {
 	const result = db
 		.prepare(
 			`UPDATE task_agent_links
@@ -469,7 +619,7 @@ export function unlinkTaskAgent(db: DatabaseSync, taskId: string, agentId: strin
 		.run(now, taskId, agentId) as { changes?: number };
 	const changes = Number(result.changes ?? 0);
 	if (changes > 0) {
-		db.prepare("UPDATE agents SET task_id = NULL WHERE id = ? AND task_id = ?").run(agentId, taskId);
+		db.prepare("UPDATE agents SET task_id = NULL, workspace_strategy = NULL, worktree_id = NULL, worktree_cwd = NULL WHERE id = ? AND task_id = ?").run(agentId, taskId);
 		updateTask(db, taskId, { updatedAt: now });
 		createTaskEvent(db, {
 			id: randomUUID(),
@@ -528,71 +678,208 @@ export function getTaskSummary(
 	};
 }
 
+export function createTaskNeedsHuman(db: DatabaseSync, input: CreateTaskNeedsHumanInput): void {
+	const createdAt = input.createdAt ?? Date.now();
+	const updatedAt = input.updatedAt ?? createdAt;
+	db.prepare(
+		`INSERT OR REPLACE INTO task_needs_human (
+			id, task_id, agent_id, task_agent_link_id, source_message_id, legacy_attention_item_id,
+			project_key, spawn_session_id, spawn_session_file, kind, category, waiting_on, priority,
+			state, summary, payload_json, response_required, response_prompt, response_schema_json,
+			created_at, updated_at, resolved_at, resolved_by, resolution_kind, resolution_summary
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	).run(
+		input.id,
+		input.taskId,
+		input.agentId,
+		input.taskAgentLinkId ?? null,
+		input.sourceMessageId ?? null,
+		input.legacyAttentionItemId ?? null,
+		input.projectKey,
+		input.spawnSessionId ?? null,
+		input.spawnSessionFile ?? null,
+		input.kind,
+		input.category,
+		input.waitingOn ?? null,
+		Math.max(0, Math.min(input.priority, 9)),
+		input.state,
+		input.summary,
+		input.payload === undefined ? null : JSON.stringify(input.payload),
+		input.responseRequired ? 1 : 0,
+		input.responsePrompt ?? null,
+		input.responseSchema === undefined ? null : JSON.stringify(input.responseSchema),
+		createdAt,
+		updatedAt,
+		input.resolvedAt ?? null,
+		input.resolvedBy ?? null,
+		input.resolutionKind ?? null,
+		input.resolutionSummary ?? null,
+	);
+}
+
+function taskNeedsHumanAssignments(patch: UpdateTaskNeedsHumanInput): { assignments: string[]; params: unknown[] } {
+	const assignments: string[] = [];
+	const params: unknown[] = [];
+	const add = (column: string, value: unknown): void => {
+		assignments.push(`${column} = ?`);
+		params.push(value);
+	};
+	if (patch.taskAgentLinkId !== undefined) add("task_agent_link_id", patch.taskAgentLinkId);
+	if (patch.state !== undefined) add("state", patch.state);
+	if (patch.waitingOn !== undefined) add("waiting_on", patch.waitingOn);
+	if (patch.priority !== undefined) add("priority", Math.max(0, Math.min(patch.priority, 9)));
+	if (patch.summary !== undefined) add("summary", patch.summary);
+	if (patch.payload !== undefined) add("payload_json", JSON.stringify(patch.payload));
+	if (patch.responseRequired !== undefined) add("response_required", patch.responseRequired ? 1 : 0);
+	if (patch.responsePrompt !== undefined) add("response_prompt", patch.responsePrompt);
+	if (patch.responseSchema !== undefined) add("response_schema_json", JSON.stringify(patch.responseSchema));
+	add("updated_at", patch.updatedAt ?? Date.now());
+	if (patch.resolvedAt !== undefined) add("resolved_at", patch.resolvedAt);
+	if (patch.resolvedBy !== undefined) add("resolved_by", patch.resolvedBy);
+	if (patch.resolutionKind !== undefined) add("resolution_kind", patch.resolutionKind);
+	if (patch.resolutionSummary !== undefined) add("resolution_summary", patch.resolutionSummary);
+	return { assignments, params };
+}
+
+export function updateTaskNeedsHuman(db: DatabaseSync, id: string, patch: UpdateTaskNeedsHumanInput): void {
+	const { assignments, params } = taskNeedsHumanAssignments(patch);
+	params.push(id);
+	db.prepare(`UPDATE task_needs_human SET ${assignments.join(", ")} WHERE id = ?`).run(...params);
+}
+
+export function claimTaskNeedsHumanResponse(db: DatabaseSync, id: string, patch: UpdateTaskNeedsHumanInput): TaskNeedsHumanRecord | null {
+	const { assignments, params } = taskNeedsHumanAssignments(patch);
+	params.push(id, ...OPEN_NEEDS_HUMAN_STATES);
+	const result = db.prepare(`UPDATE task_needs_human SET ${assignments.join(", ")} WHERE id = ? AND state IN (${makePlaceholders(OPEN_NEEDS_HUMAN_STATES.length)})`).run(...params) as { changes?: number };
+	if (Number(result.changes ?? 0) === 0) return null;
+	return listTaskNeedsHuman(db, { ids: [id], limit: 1 })[0] ?? null;
+}
+
+export function updateTaskNeedsHumanForAgent(
+	db: DatabaseSync,
+	agentId: string,
+	patch: UpdateTaskNeedsHumanInput,
+	filters: {
+		ids?: string[];
+		states?: TaskNeedsHumanState[];
+		kinds?: TaskNeedsHumanKind[];
+		sourceMessageId?: string | null;
+	} = {},
+): number {
+	const { assignments, params } = taskNeedsHumanAssignments(patch);
+	const where: string[] = ["agent_id = ?"];
+	params.push(agentId);
+	if (filters.ids && filters.ids.length > 0) {
+		where.push(`id IN (${makePlaceholders(filters.ids.length)})`);
+		params.push(...filters.ids);
+	}
+	if (filters.states && filters.states.length > 0) {
+		where.push(`state IN (${makePlaceholders(filters.states.length)})`);
+		params.push(...filters.states);
+	}
+	if (filters.kinds && filters.kinds.length > 0) {
+		where.push(`kind IN (${makePlaceholders(filters.kinds.length)})`);
+		params.push(...filters.kinds);
+	}
+	if (filters.sourceMessageId !== undefined) {
+		if (filters.sourceMessageId === null) {
+			where.push("source_message_id IS NULL");
+		} else {
+			where.push("source_message_id = ?");
+			params.push(filters.sourceMessageId);
+		}
+	}
+	const result = db.prepare(`UPDATE task_needs_human SET ${assignments.join(", ")} WHERE ${where.join(" AND ")}`).run(...params) as { changes?: number };
+	return Number(result.changes ?? 0);
+}
+
+export function listTaskNeedsHuman(db: DatabaseSync, filters: ListTaskNeedsHumanFilters = {}): TaskNeedsHumanRecord[] {
+	if (filters.ids && filters.ids.length === 0) return [];
+	if (filters.taskIds && filters.taskIds.length === 0) return [];
+	if (filters.agentIds && filters.agentIds.length === 0) return [];
+	const where: string[] = [];
+	const params: unknown[] = [];
+	if (filters.ids?.length) {
+		where.push(`id IN (${makePlaceholders(filters.ids.length)})`);
+		params.push(...filters.ids);
+	}
+	if (filters.taskIds?.length) {
+		where.push(`task_id IN (${makePlaceholders(filters.taskIds.length)})`);
+		params.push(...filters.taskIds);
+	}
+	if (filters.agentIds?.length) {
+		where.push(`agent_id IN (${makePlaceholders(filters.agentIds.length)})`);
+		params.push(...filters.agentIds);
+	}
+	if (filters.projectKey) {
+		where.push("project_key = ?");
+		params.push(filters.projectKey);
+	}
+	addSessionScopeFilter(where, params, filters.spawnSessionId, filters.spawnSessionFile, "task_needs_human");
+	if (filters.states?.length) {
+		where.push(`state IN (${makePlaceholders(filters.states.length)})`);
+		params.push(...filters.states);
+	}
+	if (filters.waitingOn?.length) {
+		where.push(`waiting_on IN (${makePlaceholders(filters.waitingOn.length)})`);
+		params.push(...filters.waitingOn);
+	}
+	if (filters.kinds?.length) {
+		where.push(`kind IN (${makePlaceholders(filters.kinds.length)})`);
+		params.push(...filters.kinds);
+	}
+	if (filters.categories?.length) {
+		where.push(`category IN (${makePlaceholders(filters.categories.length)})`);
+		params.push(...filters.categories);
+	}
+	const limit = Math.max(1, Math.min(filters.limit ?? 100, 500));
+	params.push(limit);
+	const whereClause = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
+	const rows = db.prepare(`SELECT * FROM task_needs_human ${whereClause} ORDER BY priority ASC, updated_at DESC, created_at ASC LIMIT ?`).all(...params) as Array<Record<string, unknown>>;
+	return rows.map(toTaskNeedsHumanRecord);
+}
+
 export function listTaskAttention(
 	db: DatabaseSync,
 	filters: Pick<ListTasksFilters, "ids" | "projectKey" | "spawnSessionId" | "spawnSessionFile"> & { limit?: number },
 ): TaskAttentionRecord[] {
 	if (filters.ids && filters.ids.length === 0) return [];
-	const where: string[] = ["t.status IN ('blocked', 'in_review')"];
-	const params: unknown[] = [];
+	const where: string[] = [`nh.state IN (${makePlaceholders(OPEN_NEEDS_HUMAN_STATES.length)})`];
+	const params: unknown[] = [...OPEN_NEEDS_HUMAN_STATES];
 	if (filters.ids && filters.ids.length > 0) {
-		where.push(`t.id IN (${makePlaceholders(filters.ids.length)})`);
+		where.push(`nh.task_id IN (${makePlaceholders(filters.ids.length)})`);
 		params.push(...filters.ids);
 	}
 	if (filters.projectKey) {
-		where.push("t.project_key = ?");
+		where.push("nh.project_key = ?");
 		params.push(filters.projectKey);
 	}
-	addSessionScopeFilter(where, params, filters.spawnSessionId, filters.spawnSessionFile);
+	addSessionScopeFilter(where, params, filters.spawnSessionId, filters.spawnSessionFile, "nh");
 	const limit = Math.max(1, Math.min(filters.limit ?? 100, 500));
 	params.push(limit);
-	const rows = db
-		.prepare(
-			`SELECT
-				t.id,
-				t.title,
-				t.status,
-				t.waiting_on,
-				t.summary,
-				t.blocked_reason,
-				t.review_summary,
-				t.updated_at,
-				COALESCE((
-					SELECT COUNT(*)
-					FROM task_agent_links tal
-					JOIN agents a ON a.id = tal.agent_id
-					WHERE tal.task_id = t.id
-						AND tal.is_active = 1
-						AND a.state IN (${makePlaceholders(ACTIVE_AGENT_STATES.length)})
-				), 0) AS active_agent_count,
-				COALESCE((
-					SELECT COUNT(*)
-					FROM task_agent_links tal
-					JOIN attention_items ai ON ai.agent_id = tal.agent_id
-					WHERE tal.task_id = t.id
-						AND ai.state IN (${makePlaceholders(OPEN_ATTENTION_STATES.length)})
-				), 0) AS open_attention_count
-			FROM tasks t
-			WHERE ${where.join(" AND ")}
-			ORDER BY
-				CASE WHEN t.status = 'blocked' AND t.waiting_on = 'user' THEN 0
-					WHEN t.status = 'blocked' THEN 1
-					WHEN t.status = 'in_review' THEN 2
-					ELSE 3 END,
-				t.priority ASC,
-				t.updated_at DESC
-			LIMIT ?`,
-		)
-		.all(...ACTIVE_AGENT_STATES, ...OPEN_ATTENTION_STATES, ...params) as Array<Record<string, unknown>>;
+	const rows = db.prepare(
+		`SELECT nh.*, t.title, t.status, t.blocked_reason, t.review_summary,
+			COALESCE((
+				SELECT COUNT(*) FROM task_agent_links tal
+				JOIN agents a ON a.id = tal.agent_id
+				WHERE tal.task_id = nh.task_id AND tal.is_active = 1 AND a.state IN (${makePlaceholders(ACTIVE_AGENT_STATES.length)})
+			), 0) AS active_agent_count,
+			COALESCE((
+				SELECT COUNT(*) FROM task_needs_human sibling
+				WHERE sibling.task_id = nh.task_id AND sibling.state IN (${makePlaceholders(OPEN_NEEDS_HUMAN_STATES.length)})
+			), 0) AS open_attention_count
+		 FROM task_needs_human nh
+		 JOIN tasks t ON t.id = nh.task_id
+		 WHERE ${where.join(" AND ")}
+		 ORDER BY nh.priority ASC, nh.updated_at DESC, nh.created_at ASC
+		 LIMIT ?`,
+	).all(...ACTIVE_AGENT_STATES, ...OPEN_NEEDS_HUMAN_STATES, ...params) as Array<Record<string, unknown>>;
 	return rows.map((row) => ({
-		taskId: row.id as string,
+		...toTaskNeedsHumanRecord(row),
 		title: row.title as string,
 		status: row.status as TaskState,
-		waitingOn: (row.waiting_on as TaskWaitingOn | null) ?? null,
-		summary: (row.summary as string | null) ?? (row.blocked_reason as string | null) ?? (row.review_summary as string | null) ?? "-",
 		blockedReason: (row.blocked_reason as string | null) ?? null,
 		reviewSummary: (row.review_summary as string | null) ?? null,
-		updatedAt: Number(row.updated_at ?? 0),
 		activeAgentCount: Number(row.active_agent_count ?? 0),
 		openAttentionCount: Number(row.open_attention_count ?? 0),
 	}));
@@ -616,6 +903,7 @@ export function applyChildPublishToLinkedTask(
 		validationSteps?: string[];
 		reviewSummary?: string;
 		finalSummary?: string;
+		sourceMessageId?: string | null;
 	},
 ): TaskRecord | null {
 	const row = db.prepare("SELECT task_id FROM agents WHERE id = ?").get(options.agentId) as { task_id?: string | null } | undefined;
@@ -669,6 +957,40 @@ export function applyChildPublishToLinkedTask(
 		patch.finalSummary = options.finalSummary?.trim() || null;
 	}
 	updateTask(db, taskId, patch);
+	if (options.kind === "blocked" || options.kind === "question" || options.kind === "question_for_user" || options.kind === "complete") {
+		const link = db.prepare("SELECT id FROM task_agent_links WHERE task_id = ? AND agent_id = ? AND is_active = 1 LIMIT 1").get(taskId, options.agentId) as { id?: string } | undefined;
+		const needsWaitingOn = defaultWaitingOnForNeedsHuman(options.kind, patch.waitingOn ?? options.waitingOn ?? null);
+		createTaskNeedsHuman(db, {
+			id: options.sourceMessageId ?? randomUUID(),
+			taskId,
+			agentId: options.agentId,
+			taskAgentLinkId: link?.id ?? null,
+			sourceMessageId: options.sourceMessageId ?? null,
+			projectKey: current.projectKey,
+			spawnSessionId: current.spawnSessionId,
+			spawnSessionFile: current.spawnSessionFile,
+			kind: options.kind,
+			category: derivedStatus === "in_review" && options.kind === "complete" ? "review_gate" : needsHumanCategoryForPublish(options.kind),
+			waitingOn: needsWaitingOn,
+			priority: options.kind === "question_for_user" ? 0 : options.kind === "question" ? 1 : options.kind === "blocked" ? 2 : 3,
+			state: needsHumanStateForWaitingOn(needsWaitingOn),
+			summary: options.summary,
+			payload: {
+				kind: options.kind,
+				details: options.details ?? null,
+				files: options.files ?? [],
+				status: patch.status,
+				waitingOn: patch.waitingOn,
+				blockedReason: patch.blockedReason,
+				reviewSummary: patch.reviewSummary ?? null,
+				finalSummary: patch.finalSummary ?? null,
+			},
+			responseRequired: options.kind === "question" || options.kind === "question_for_user" || options.kind === "blocked" || derivedStatus === "in_review",
+			responsePrompt: options.kind === "question" || options.kind === "question_for_user" ? options.blockedReason ?? options.summary : null,
+			createdAt: now,
+			updatedAt: now,
+		});
+	}
 	createTaskEvent(db, {
 		id: randomUUID(),
 		taskId,
@@ -685,6 +1007,9 @@ export function applyChildPublishToLinkedTask(
 		},
 		createdAt: now,
 	});
+	if (options.kind === "complete") {
+		deactivateTaskAgentLink(db, taskId, options.agentId, "child_publish_complete", now);
+	}
 	return getTask(db, taskId);
 }
 
@@ -865,14 +1190,218 @@ export function backfillLegacyTasksFromAgents(db: DatabaseSync, limit = 500): Ar
 	return created;
 }
 
+export function backfillNeedsHumanFromAttentionItems(
+	db: DatabaseSync,
+	options: Pick<ListTasksFilters, "ids" | "projectKey" | "spawnSessionId" | "spawnSessionFile"> & { limit?: number } = {},
+): number {
+	if (options.ids && options.ids.length === 0) return 0;
+	const where: string[] = ["ai.state IN ('open', 'acknowledged', 'waiting_on_coordinator', 'waiting_on_user')"];
+	const params: unknown[] = [];
+	if (options.ids?.length) {
+		where.push(`t.id IN (${makePlaceholders(options.ids.length)})`);
+		params.push(...options.ids);
+	}
+	if (options.projectKey) {
+		where.push("t.project_key = ?");
+		params.push(options.projectKey);
+	}
+	addSessionScopeFilter(where, params, options.spawnSessionId, options.spawnSessionFile, "t");
+	const rows = db.prepare(
+		`SELECT ai.*, t.id AS task_id, t.project_key AS task_project_key, t.spawn_session_id AS task_spawn_session_id,
+			t.spawn_session_file AS task_spawn_session_file, tal.id AS task_agent_link_id
+		 FROM attention_items ai
+		 JOIN agents a ON a.id = ai.agent_id
+		 LEFT JOIN task_agent_links tal_current ON tal_current.agent_id = ai.agent_id AND tal_current.is_active = 1
+		 JOIN tasks t ON t.id = COALESCE(a.task_id, tal_current.task_id)
+		 LEFT JOIN task_agent_links tal ON tal.task_id = t.id AND tal.agent_id = ai.agent_id AND tal.is_active = 1
+		 LEFT JOIN task_needs_human nh ON nh.legacy_attention_item_id = ai.id
+		 WHERE ${where.join(" AND ")} AND nh.id IS NULL
+		 ORDER BY ai.priority ASC, ai.updated_at DESC
+		 LIMIT ?`,
+	).all(...params, Math.max(1, Math.min(options.limit ?? 500, 1000))) as Array<Record<string, unknown>>;
+	let created = 0;
+	for (const row of rows) {
+		const kind = row.kind as "question" | "question_for_user" | "blocked" | "complete";
+		const waitingOn: TaskWaitingOn | null = row.audience === "user" ? "user" : "coordinator";
+		createTaskNeedsHuman(db, {
+			id: `nh_${row.id as string}`,
+			taskId: row.task_id as string,
+			agentId: row.agent_id as string,
+			taskAgentLinkId: (row.task_agent_link_id as string | null) ?? null,
+			sourceMessageId: (row.message_id as string | null) ?? null,
+			legacyAttentionItemId: row.id as string,
+			projectKey: (row.task_project_key as string | null) ?? (row.project_key as string),
+			spawnSessionId: (row.task_spawn_session_id as string | null) ?? (row.spawn_session_id as string | null) ?? null,
+			spawnSessionFile: (row.task_spawn_session_file as string | null) ?? (row.spawn_session_file as string | null) ?? null,
+			kind,
+			category: needsHumanCategoryForPublish(kind),
+			waitingOn,
+			priority: Number(row.priority ?? 3),
+			state: needsHumanStateForWaitingOn(waitingOn),
+			summary: row.summary as string,
+			payload: safeJsonParse(row.payload_json as string | null, null),
+			responseRequired: kind !== "complete",
+			createdAt: Number(row.created_at ?? Date.now()),
+			updatedAt: Number(row.updated_at ?? Date.now()),
+		});
+		created += 1;
+	}
+	return created;
+}
+
+export function reconcileResolvedNeedsHumanFromAttentionItems(
+	db: DatabaseSync,
+	options: Pick<ListTasksFilters, "ids" | "projectKey" | "spawnSessionId" | "spawnSessionFile"> & { limit?: number } = {},
+): number {
+	if (options.ids && options.ids.length === 0) return 0;
+	const where: string[] = [
+		"(nh.legacy_attention_item_id IS NOT NULL OR nh.source_message_id IS NOT NULL)",
+		`nh.state IN (${makePlaceholders(OPEN_NEEDS_HUMAN_STATES.length)})`,
+		"ai.state NOT IN ('open', 'acknowledged', 'waiting_on_coordinator', 'waiting_on_user')",
+	];
+	const params: unknown[] = [...OPEN_NEEDS_HUMAN_STATES];
+	if (options.ids?.length) {
+		where.push(`t.id IN (${makePlaceholders(options.ids.length)})`);
+		params.push(...options.ids);
+	}
+	if (options.projectKey) {
+		where.push("t.project_key = ?");
+		params.push(options.projectKey);
+	}
+	addSessionScopeFilter(where, params, options.spawnSessionId, options.spawnSessionFile, "t");
+	const rows = db.prepare(
+		`SELECT nh.id, ai.state, ai.updated_at, ai.resolved_at, ai.resolution_kind, ai.resolution_summary
+		 FROM task_needs_human nh
+		 JOIN attention_items ai ON ai.id = COALESCE(nh.legacy_attention_item_id, nh.source_message_id)
+		 JOIN tasks t ON t.id = nh.task_id
+		 WHERE ${where.join(" AND ")}
+		 ORDER BY ai.updated_at DESC
+		 LIMIT ?`,
+	).all(...params, Math.max(1, Math.min(options.limit ?? 500, 1000))) as Array<Record<string, unknown>>;
+	for (const row of rows) {
+		const state = row.state === "cancelled" ? "cancelled" : row.state === "superseded" ? "superseded" : "resolved";
+		updateTaskNeedsHuman(db, row.id as string, {
+			state,
+			waitingOn: null,
+			responseRequired: false,
+			updatedAt: Number(row.updated_at ?? Date.now()),
+			resolvedAt: (row.resolved_at as number | null) ?? Number(row.updated_at ?? Date.now()),
+			resolvedBy: "legacy_attention",
+			resolutionKind: (row.resolution_kind as string | null) ?? "legacy_attention",
+			resolutionSummary: (row.resolution_summary as string | null) ?? "Mirrored from resolved legacy attention item.",
+		});
+	}
+	return rows.length;
+}
+
+function repairTaskAgentLinkPointers(
+	db: DatabaseSync,
+	options: Pick<ListTasksFilters, "ids" | "projectKey" | "spawnSessionId" | "spawnSessionFile"> & { limit?: number } = {},
+): { linkPointersRepaired: number; agentTaskPointersRepaired: number; tasksTouched: string[] } {
+	const where: string[] = [`nh.state IN (${makePlaceholders(OPEN_NEEDS_HUMAN_STATES.length)})`, "tal.id IS NOT NULL", "(nh.task_agent_link_id IS NULL OR nh.task_agent_link_id != tal.id)"];
+	const params: unknown[] = [...OPEN_NEEDS_HUMAN_STATES];
+	if (options.ids?.length) {
+		where.push(`nh.task_id IN (${makePlaceholders(options.ids.length)})`);
+		params.push(...options.ids);
+	}
+	if (options.projectKey) {
+		where.push("nh.project_key = ?");
+		params.push(options.projectKey);
+	}
+	addSessionScopeFilter(where, params, options.spawnSessionId, options.spawnSessionFile, "nh");
+	const rows = db.prepare(
+		`SELECT nh.id, nh.task_id, tal.id AS link_id
+		 FROM task_needs_human nh
+		 JOIN task_agent_links tal ON tal.task_id = nh.task_id AND tal.agent_id = nh.agent_id AND tal.is_active = 1
+		 WHERE ${where.join(" AND ")}
+		 LIMIT ?`,
+	).all(...params, Math.max(1, Math.min(options.limit ?? 500, 1000))) as Array<{ id: string; task_id: string; link_id: string }>;
+	const now = Date.now();
+	const tasksTouched = new Set<string>();
+	for (const row of rows) {
+		updateTaskNeedsHuman(db, row.id, { taskAgentLinkId: row.link_id, updatedAt: now });
+		tasksTouched.add(row.task_id);
+	}
+
+	const agentWhere: string[] = [
+		"tal.is_active = 1",
+		`a.state IN (${makePlaceholders(ACTIVE_AGENT_STATES.length)})`,
+		`(a.task_id IS NULL
+			OR a.task_id != tal.task_id
+			OR (tal.sync_task_workspace = 1 AND (
+				a.workspace_strategy IS NOT t.workspace_strategy
+				OR a.worktree_id IS NOT t.worktree_id
+				OR a.worktree_cwd IS NOT t.worktree_cwd
+			)))`,
+	];
+	const agentParams: unknown[] = [...ACTIVE_AGENT_STATES];
+	if (options.ids?.length) {
+		agentWhere.push(`tal.task_id IN (${makePlaceholders(options.ids.length)})`);
+		agentParams.push(...options.ids);
+	}
+	if (options.projectKey) {
+		agentWhere.push("t.project_key = ?");
+		agentParams.push(options.projectKey);
+	}
+	addSessionScopeFilter(agentWhere, agentParams, options.spawnSessionId, options.spawnSessionFile, "t");
+	const agentRows = db.prepare(
+		`SELECT tal.task_id, tal.agent_id, tal.sync_task_workspace
+		 FROM task_agent_links tal
+		 JOIN tasks t ON t.id = tal.task_id
+		 JOIN agents a ON a.id = tal.agent_id
+		 WHERE ${agentWhere.join(" AND ")}
+		 LIMIT ?`,
+	).all(...agentParams, Math.max(1, Math.min(options.limit ?? 500, 1000))) as Array<{ task_id: string; agent_id: string; sync_task_workspace: number }>;
+	for (const row of agentRows) {
+		if (Number(row.sync_task_workspace ?? 1) === 1) {
+			db.prepare(`UPDATE agents
+				SET task_id = ?,
+					workspace_strategy = (SELECT workspace_strategy FROM tasks WHERE id = ?),
+					worktree_id = (SELECT worktree_id FROM tasks WHERE id = ?),
+					worktree_cwd = (SELECT worktree_cwd FROM tasks WHERE id = ?),
+					updated_at = ?
+				WHERE id = ?
+					AND state IN (${makePlaceholders(ACTIVE_AGENT_STATES.length)})
+					AND EXISTS (
+						SELECT 1
+						FROM task_agent_links tal
+						WHERE tal.task_id = ?
+							AND tal.agent_id = agents.id
+							AND tal.is_active = 1
+							AND tal.sync_task_workspace = 1
+					)`).run(row.task_id, row.task_id, row.task_id, row.task_id, now, row.agent_id, ...ACTIVE_AGENT_STATES, row.task_id);
+		} else {
+			db.prepare(`UPDATE agents
+				SET task_id = ?,
+					updated_at = ?
+				WHERE id = ?
+					AND state IN (${makePlaceholders(ACTIVE_AGENT_STATES.length)})
+					AND EXISTS (
+						SELECT 1
+						FROM task_agent_links tal
+						WHERE tal.task_id = ?
+							AND tal.agent_id = agents.id
+							AND tal.is_active = 1
+							AND tal.sync_task_workspace = 0
+					)`).run(row.task_id, now, row.agent_id, ...ACTIVE_AGENT_STATES, row.task_id);
+		}
+		updateTask(db, row.task_id, { updatedAt: now });
+		tasksTouched.add(row.task_id);
+	}
+	return { linkPointersRepaired: rows.length, agentTaskPointersRepaired: agentRows.length, tasksTouched: [...tasksTouched] };
+}
+
 export function reconcileTasks(
 	db: DatabaseSync,
 	options: Pick<ListTasksFilters, "ids" | "projectKey" | "spawnSessionId" | "spawnSessionFile"> & { limit?: number } = {},
-): { backfilled: number; deactivatedLinks: number; tasksTouched: string[] } {
+): { backfilled: number; needsHumanBackfilled: number; needsHumanResolved: number; linkPointersRepaired: number; agentTaskPointersRepaired: number; deactivatedLinks: number; tasksTouched: string[] } {
 	if (options.ids && options.ids.length === 0) {
-		return { backfilled: 0, deactivatedLinks: 0, tasksTouched: [] };
+		return { backfilled: 0, needsHumanBackfilled: 0, needsHumanResolved: 0, linkPointersRepaired: 0, agentTaskPointersRepaired: 0, deactivatedLinks: 0, tasksTouched: [] };
 	}
 	const backfilled = options.ids ? [] : backfillLegacyTasksFromAgents(db, options.limit ?? 500);
+	const repaired = repairTaskAgentLinkPointers(db, options);
+	const needsHumanBackfilled = backfillNeedsHumanFromAttentionItems(db, options);
+	const needsHumanResolved = reconcileResolvedNeedsHumanFromAttentionItems(db, options);
 	const where: string[] = ["tal.is_active = 1"];
 	const params: unknown[] = [];
 	if (options.ids && options.ids.length > 0) {
@@ -895,7 +1424,7 @@ export function reconcileTasks(
 		)
 		.all(...params, Math.max(1, Math.min(options.limit ?? 500, 1000))) as Array<{ id: string; task_id: string; agent_id: string; state: AgentState }>;
 	let deactivatedLinks = 0;
-	const tasksTouched = new Set<string>(backfilled.map((item) => item.taskId));
+	const tasksTouched = new Set<string>([...backfilled.map((item) => item.taskId), ...repaired.tasksTouched]);
 	const now = Date.now();
 	for (const row of rows) {
 		if (ACTIVE_AGENT_STATES.includes(row.state)) continue;
@@ -915,6 +1444,10 @@ export function reconcileTasks(
 	}
 	return {
 		backfilled: backfilled.length,
+		needsHumanBackfilled,
+		needsHumanResolved,
+		linkPointersRepaired: repaired.linkPointersRepaired,
+		agentTaskPointersRepaired: repaired.agentTaskPointersRepaired,
 		deactivatedLinks,
 		tasksTouched: [...tasksTouched],
 	};

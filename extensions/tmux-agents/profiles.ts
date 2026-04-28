@@ -34,22 +34,18 @@ export function getProfilesDir(): string {
 }
 
 export function normalizeBuiltinTools(tools: string[] | undefined): string[] {
-	const ordered = tools && tools.length > 0 ? tools : DEFAULT_PROFILE_TOOLS;
+	// Only omitted tool declarations receive the default tool set. Explicit
+	// declarations/overrides are filtered to supported child tools, even when that
+	// leaves the child with no built-in tools.
+	const ordered = tools === undefined ? DEFAULT_PROFILE_TOOLS : tools;
 	const normalized: string[] = [];
 	const seen = new Set<string>();
 	for (const tool of ordered) {
 		const trimmed = tool.trim();
 		if (!trimmed || seen.has(trimmed)) continue;
-		if (!ALLOWED_BUILTIN_TOOLS.has(trimmed)) {
-			throw new Error(
-				`Unsupported child tool \"${trimmed}\". Allowed tools: ${Array.from(ALLOWED_BUILTIN_TOOLS).join(", ")}.`,
-			);
-		}
+		if (!ALLOWED_BUILTIN_TOOLS.has(trimmed)) continue;
 		seen.add(trimmed);
 		normalized.push(trimmed);
-	}
-	if (normalized.length === 0) {
-		return [...DEFAULT_PROFILE_TOOLS];
 	}
 	return normalized;
 }

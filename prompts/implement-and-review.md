@@ -8,8 +8,8 @@ Goal: $@
 Workflow:
 1. Use `task_list` to find or confirm the task. Create it with `task_create` if needed.
 2. Inspect active children with `subagent_list`.
-3. Spawn or reuse an `engineer` attached to the task for implementation.
-4. Once the engineer reports completion, move the task to `in_review` and spawn a sibling review pack attached to the same task.
+3. Spawn or reuse an `engineer` attached to the task for implementation. For writing implementation work, request `workspaceStrategy: "dedicated_worktree"` unless the user or task explicitly opts out; omit `cwd` because dedicated worktree spawns provision/reuse the deterministic task worktree and reject explicit cwd. Use `workspaceStrategy: "spawn_cwd"` when intentionally opting out of task worktree inheritance.
+4. Once the engineer reports completion, move the task to `in_review` and spawn a sibling review pack attached to the same task. Omit reviewer `cwd` unless an explicit override is needed so reviewers inherit the task worktree path.
 5. The default review pack for non-trivial code is:
    - `principal-engineer` in `structured` mode
    - `principal-engineer` in `adversarial` mode

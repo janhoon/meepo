@@ -1,6 +1,7 @@
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Key } from "@mariozechner/pi-tui";
 import { matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import type { TaskAttentionRecord } from "./task-types.js";
 import type { AgentMessageRecord, AgentSummary } from "./types.js";
 
 export type DashboardScope = "current_project" | "current_session" | "descendants" | "all";
@@ -17,6 +18,7 @@ export interface AgentsDashboardState {
 
 export interface AgentsDashboardData {
 	scopes: Record<DashboardScope, AgentSummary[]>;
+	needsHumanByScope: Record<DashboardScope, TaskAttentionRecord[]>;
 	childrenByParent: Map<string, string[]>;
 }
 
@@ -233,6 +235,25 @@ class AgentsDashboardComponent {
 		};
 	}
 
+	private getNeedsHumanAgentLabel(item: TaskAttentionRecord): string {
+		const agent = (this.data.scopes[this.state.scope] ?? []).find((candidate) => candidate.id === item.agentId);
+		return agent ? `${agent.id}/${agent.profile}` : item.agentId;
+	}
+
+	private renderNeedsHuman(width: number): string[] {
+		const items = this.data.needsHumanByScope[this.state.scope] ?? [];
+		const lines: string[] = [this.theme.fg("accent", this.theme.bold(`Needs-human queue (${items.length})`))];
+		if (items.length === 0) {
+			lines.push(this.theme.fg("muted", "No task/agent needs-human rows."));
+			return lines;
+		}
+		for (const item of items.slice(0, 5)) {
+			const agentLabel = this.getNeedsHumanAgentLabel(item);
+			lines.push(truncateToWidth(`P${item.priority} ${item.kind}/${item.category} · wait:${item.waitingOn ?? "-"} · ${short(agentLabel, 18)} · ${short(item.title, 22)} · ${short(item.summary, Math.max(20, width - 80))}`, width));
+		}
+		return lines;
+	}
+
 	private renderList(width: number): string[] {
 		const agents = this.getVisibleAgents();
 		const lines: string[] = [];
@@ -310,7 +331,7 @@ class AgentsDashboardComponent {
 			),
 		);
 		lines.push(this.theme.fg("dim", "─".repeat(Math.max(0, width))));
-		const left = this.renderList(leftWidth);
+		const left = [...this.renderNeedsHuman(leftWidth), this.theme.fg("dim", "─".repeat(Math.max(0, leftWidth))), ...this.renderList(leftWidth)];
 		const right = this.renderDetail(rightWidth);
 		const rowCount = Math.max(left.length, right.length);
 		for (let index = 0; index < rowCount; index++) {

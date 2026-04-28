@@ -1,8 +1,18 @@
 export const TASK_STATES = ["todo", "blocked", "in_progress", "in_review", "done"] as const;
 export const TASK_WAITING_ON_VALUES = ["user", "coordinator", "service", "external"] as const;
+export const TASK_LAUNCH_POLICIES = ["manual", "autonomous"] as const;
+export const TASK_WORKSPACE_STRATEGIES = ["inherit", "spawn_cwd", "existing_worktree", "dedicated_worktree"] as const;
+export const TASK_NEEDS_HUMAN_KINDS = ["question", "question_for_user", "blocked", "complete", "review_gate", "service_wait", "external_wait"] as const;
+export const TASK_NEEDS_HUMAN_CATEGORIES = ["question", "blocker", "completion", "review_gate", "service", "external"] as const;
+export const TASK_NEEDS_HUMAN_STATES = ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user", "waiting_on_service", "waiting_on_external", "resolved", "cancelled", "superseded"] as const;
 
 export type TaskState = (typeof TASK_STATES)[number];
 export type TaskWaitingOn = (typeof TASK_WAITING_ON_VALUES)[number];
+export type TaskLaunchPolicy = (typeof TASK_LAUNCH_POLICIES)[number];
+export type TaskWorkspaceStrategy = (typeof TASK_WORKSPACE_STRATEGIES)[number];
+export type TaskNeedsHumanKind = (typeof TASK_NEEDS_HUMAN_KINDS)[number];
+export type TaskNeedsHumanCategory = (typeof TASK_NEEDS_HUMAN_CATEGORIES)[number];
+export type TaskNeedsHumanState = (typeof TASK_NEEDS_HUMAN_STATES)[number];
 
 export interface TaskRecord {
 	id: string;
@@ -19,6 +29,14 @@ export interface TaskRecord {
 	priorityLabel: string | null;
 	waitingOn: TaskWaitingOn | null;
 	blockedReason: string | null;
+	requestedProfile: string | null;
+	assignedProfile: string | null;
+	launchPolicy: TaskLaunchPolicy;
+	promptTemplate: string | null;
+	roleHint: string | null;
+	workspaceStrategy: TaskWorkspaceStrategy | null;
+	worktreeId: string | null;
+	worktreeCwd: string | null;
 	acceptanceCriteria: string[];
 	planSteps: string[];
 	validationSteps: string[];
@@ -48,6 +66,14 @@ export interface CreateTaskInput {
 	priorityLabel?: string | null;
 	waitingOn?: TaskWaitingOn | null;
 	blockedReason?: string | null;
+	requestedProfile?: string | null;
+	assignedProfile?: string | null;
+	launchPolicy?: TaskLaunchPolicy | null;
+	promptTemplate?: string | null;
+	roleHint?: string | null;
+	workspaceStrategy?: TaskWorkspaceStrategy | null;
+	worktreeId?: string | null;
+	worktreeCwd?: string | null;
 	acceptanceCriteria?: string[];
 	planSteps?: string[];
 	validationSteps?: string[];
@@ -76,6 +102,14 @@ export interface UpdateTaskInput {
 	priorityLabel?: string | null;
 	waitingOn?: TaskWaitingOn | null;
 	blockedReason?: string | null;
+	requestedProfile?: string | null;
+	assignedProfile?: string | null;
+	launchPolicy?: TaskLaunchPolicy | null;
+	promptTemplate?: string | null;
+	roleHint?: string | null;
+	workspaceStrategy?: TaskWorkspaceStrategy | null;
+	worktreeId?: string | null;
+	worktreeCwd?: string | null;
 	acceptanceCriteria?: string[];
 	planSteps?: string[];
 	validationSteps?: string[];
@@ -117,6 +151,7 @@ export interface LinkTaskAgentInput {
 	isActive?: boolean;
 	linkedAt?: number;
 	summary?: string | null;
+	syncTaskWorkspace?: boolean;
 }
 
 export interface TaskAgentLinkRecord {
@@ -128,6 +163,7 @@ export interface TaskAgentLinkRecord {
 	linkedAt: number;
 	unlinkedAt: number | null;
 	summary: string | null;
+	syncTaskWorkspace: boolean;
 }
 
 export interface ListTasksFilters {
@@ -164,15 +200,98 @@ export interface TaskSummaryCounts {
 	waitingOnUser: number;
 }
 
-export interface TaskAttentionRecord {
+export interface CreateTaskNeedsHumanInput {
+	id: string;
 	taskId: string;
+	agentId: string;
+	taskAgentLinkId?: string | null;
+	sourceMessageId?: string | null;
+	legacyAttentionItemId?: string | null;
+	projectKey: string;
+	spawnSessionId?: string | null;
+	spawnSessionFile?: string | null;
+	kind: TaskNeedsHumanKind;
+	category: TaskNeedsHumanCategory;
+	waitingOn?: TaskWaitingOn | null;
+	priority: number;
+	state: TaskNeedsHumanState;
+	summary: string;
+	payload?: unknown;
+	responseRequired?: boolean;
+	responsePrompt?: string | null;
+	responseSchema?: unknown;
+	createdAt?: number;
+	updatedAt?: number;
+	resolvedAt?: number | null;
+	resolvedBy?: string | null;
+	resolutionKind?: string | null;
+	resolutionSummary?: string | null;
+}
+
+export interface UpdateTaskNeedsHumanInput {
+	taskAgentLinkId?: string | null;
+	state?: TaskNeedsHumanState;
+	waitingOn?: TaskWaitingOn | null;
+	priority?: number;
+	summary?: string;
+	payload?: unknown;
+	responseRequired?: boolean;
+	responsePrompt?: string | null;
+	responseSchema?: unknown;
+	updatedAt?: number;
+	resolvedAt?: number | null;
+	resolvedBy?: string | null;
+	resolutionKind?: string | null;
+	resolutionSummary?: string | null;
+}
+
+export interface TaskNeedsHumanRecord {
+	id: string;
+	taskId: string;
+	agentId: string;
+	taskAgentLinkId: string | null;
+	sourceMessageId: string | null;
+	legacyAttentionItemId: string | null;
+	projectKey: string;
+	spawnSessionId: string | null;
+	spawnSessionFile: string | null;
+	kind: TaskNeedsHumanKind;
+	category: TaskNeedsHumanCategory;
+	waitingOn: TaskWaitingOn | null;
+	priority: number;
+	state: TaskNeedsHumanState;
+	summary: string;
+	payload: unknown;
+	responseRequired: boolean;
+	responsePrompt: string | null;
+	responseSchema: unknown;
+	createdAt: number;
+	updatedAt: number;
+	resolvedAt: number | null;
+	resolvedBy: string | null;
+	resolutionKind: string | null;
+	resolutionSummary: string | null;
+}
+
+export interface ListTaskNeedsHumanFilters {
+	ids?: string[];
+	taskIds?: string[];
+	agentIds?: string[];
+	projectKey?: string;
+	spawnSessionId?: string;
+	spawnSessionFile?: string;
+	states?: TaskNeedsHumanState[];
+	waitingOn?: TaskWaitingOn[];
+	kinds?: TaskNeedsHumanKind[];
+	categories?: TaskNeedsHumanCategory[];
+	limit?: number;
+}
+
+export interface TaskAttentionRecord extends TaskNeedsHumanRecord {
 	title: string;
 	status: TaskState;
-	waitingOn: TaskWaitingOn | null;
-	summary: string;
 	blockedReason: string | null;
 	reviewSummary: string | null;
-	updatedAt: number;
 	activeAgentCount: number;
 	openAttentionCount: number;
 }

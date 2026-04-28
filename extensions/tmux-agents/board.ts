@@ -1,7 +1,9 @@
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import type { AgentSummary } from "./types.js";
-import type { TaskRecord, TaskWaitingOn } from "./task-types.js";
+import type { TaskAttentionRecord, TaskRecord, TaskWaitingOn } from "./task-types.js";
 
 export type BoardScope = "current_project" | "current_session" | "descendants" | "all";
 export type BoardLaneId = "todo" | "blocked" | "in_progress" | "in_review" | "done";
@@ -25,6 +27,7 @@ export interface AgentsBoardScopeData {
 	lanes: Record<BoardLaneId, BoardTicket[]>;
 	tasksById: Map<string, TaskRecord>;
 	agentsByTaskId: Map<string, AgentSummary[]>;
+	needsHumanQueue: TaskAttentionRecord[];
 }
 
 export interface AgentsBoardData {
@@ -35,10 +38,12 @@ export interface AgentsBoardState {
 	scope: BoardScope;
 	selectedLaneId?: BoardLaneId;
 	selectedTaskId?: string;
+	mode?: "tasks" | "queue";
+	selectedNeedsHumanId?: string;
 }
 
 export interface AgentsBoardAction {
-	type: "close" | "inspect" | "focus" | "stop" | "reply" | "capture" | "spawn" | "sync" | "move" | "create";
+	type: "close" | "inspect" | "focus" | "stop" | "reply" | "capture" | "spawn" | "sync" | "move" | "create" | "attention_open" | "attention_respond" | "attention_defer" | "attention_approve" | "attention_reject";
 	selectedId?: string;
 	state: AgentsBoardState;
 }
@@ -118,7 +123,7 @@ class AgentsBoardComponent {
 		private readonly done: (result: AgentsBoardAction | null) => void,
 		initialState: AgentsBoardState,
 	) {
-		this.state = { ...initialState };
+		this.state = { mode: "tasks", ...initialState };
 		this.ensureSelection();
 	}
 
@@ -143,6 +148,20 @@ class AgentsBoardComponent {
 	}
 
 	private ensureSelection(): void {
+		const queue = this.getScopeData().needsHumanQueue ?? [];
+		if (this.state.mode === "queue") {
+			if (queue.length === 0) {
+				this.state.selectedNeedsHumanId = undefined;
+				this.state.mode = "tasks";
+			} else if (!queue.some((item) => item.id === this.state.selectedNeedsHumanId)) {
+				this.state.selectedNeedsHumanId = queue[0]?.id;
+			}
+			const selectedQueueItem = queue.find((item) => item.id === this.state.selectedNeedsHumanId);
+			if (selectedQueueItem) {
+				this.state.selectedTaskId = selectedQueueItem.taskId;
+				this.state.selectedLaneId = selectedQueueItem.status;
+			}
+		}
 		const firstLane = this.getFirstNonEmptyLane() ?? LANE_ORDER[0];
 		if (!this.state.selectedLaneId || !LANE_ORDER.includes(this.state.selectedLaneId)) {
 			this.state.selectedLaneId = firstLane;
@@ -162,6 +181,13 @@ class AgentsBoardComponent {
 		}
 		this.state.selectedLaneId = fallbackLane;
 		this.state.selectedTaskId = this.getLaneTickets(fallbackLane)[0]?.taskId;
+	}
+
+	private getSelectedQueueItem(): TaskAttentionRecord | null {
+		this.ensureSelection();
+		const id = this.state.selectedNeedsHumanId;
+		if (!id) return null;
+		return (this.getScopeData().needsHumanQueue ?? []).find((item) => item.id === id) ?? null;
 	}
 
 	private getSelectedTicket(): BoardTicket | null {
@@ -194,7 +220,24 @@ class AgentsBoardComponent {
 		this.ensureSelection();
 	}
 
+	private moveQueue(delta: number): void {
+		const queue = this.getScopeData().needsHumanQueue ?? [];
+		if (queue.length === 0) return;
+		const currentIndex = Math.max(0, queue.findIndex((item) => item.id === this.state.selectedNeedsHumanId));
+		const nextIndex = Math.max(0, Math.min(queue.length - 1, currentIndex + delta));
+		const item = queue[nextIndex];
+		this.state.selectedNeedsHumanId = item?.id;
+		if (item) {
+			this.state.selectedTaskId = item.taskId;
+			this.state.selectedLaneId = item.status;
+		}
+	}
+
 	private moveTicket(delta: number): void {
+		if (this.state.mode === "queue") {
+			this.moveQueue(delta);
+			return;
+		}
 		this.ensureSelection();
 		const laneId = this.state.selectedLaneId;
 		if (!laneId) return;
@@ -212,11 +255,13 @@ class AgentsBoardComponent {
 	}
 
 	private makeAction(type: AgentsBoardAction["type"]): AgentsBoardAction {
+		const queueAction = type.startsWith("attention_");
+		const selectedQueue = queueAction && this.state.mode === "queue" ? this.getSelectedQueueItem() : null;
 		const selected = this.getSelectedTicket();
 		return {
 			type,
-			selectedId: selected?.taskId,
-			state: { ...this.state, selectedTaskId: selected?.taskId },
+			selectedId: queueAction ? selectedQueue?.id : selected?.taskId,
+			state: { ...this.state, selectedTaskId: selected?.taskId, selectedNeedsHumanId: selectedQueue?.id },
 		};
 	}
 
@@ -256,6 +301,32 @@ class AgentsBoardComponent {
 		return lines.map((line) => truncateToWidth(line, width));
 	}
 
+	private getQueueAgentLabel(item: TaskAttentionRecord): string {
+		const agent = (this.getScopeData().agentsByTaskId.get(item.taskId) ?? []).find((candidate) => candidate.id === item.agentId);
+		return agent ? `${agent.id}/${agent.profile}` : item.agentId;
+	}
+
+	private renderQueue(width: number): string[] {
+		const queue = this.getScopeData().needsHumanQueue ?? [];
+		const lines: string[] = [];
+		lines.push(this.theme.fg("accent", this.theme.bold(`Needs-human queue (${queue.length})`)));
+		if (queue.length === 0) {
+			lines.push(this.theme.fg("muted", "No open task/agent needs-human rows."));
+			return lines;
+		}
+		const selectedIndex = queue.findIndex((item) => item.id === this.state.selectedNeedsHumanId);
+		const start = selectedIndex >= 0 ? Math.max(0, Math.min(selectedIndex - 1, Math.max(0, queue.length - 4))) : 0;
+		for (let index = start; index < Math.min(queue.length, start + 4); index++) {
+			const item = queue[index]!;
+			const selected = this.state.mode === "queue" && item.id === this.state.selectedNeedsHumanId;
+			const marker = selected ? ">" : " ";
+			const agentLabel = this.getQueueAgentLabel(item);
+			const row = `${marker} P${item.priority} ${item.kind}/${item.category} · ${item.waitingOn ?? "-"} · ${short(agentLabel, 20)} · ${short(item.title, 22)} · ${short(item.summary, Math.max(20, width - 84))}`;
+			lines.push(selected ? this.theme.fg("accent", row) : row);
+		}
+		return lines.map((line) => truncateToWidth(line, width));
+	}
+
 	private renderDetails(width: number): string[] {
 		const selected = this.getSelectedTicket();
 		const lines: string[] = [];
@@ -266,15 +337,38 @@ class AgentsBoardComponent {
 		}
 		const task = this.getScopeData().tasksById.get(selected.taskId);
 		const linkedAgents = this.getScopeData().agentsByTaskId.get(selected.taskId) ?? [];
+		const activeWorktreeAgents = linkedAgents.filter((agent) => ["launching", "running", "idle", "waiting", "blocked"].includes(agent.state) && (agent.worktreeId || agent.worktreeCwd)).length;
+		const worktreeConflicts = linkedAgents.filter((agent) => {
+			if (agent.worktreeCwd && task?.worktreeCwd && resolve(agent.worktreeCwd) !== resolve(task.worktreeCwd)) return true;
+			if (agent.worktreeId && task?.worktreeId && agent.worktreeId !== task.worktreeId) return true;
+			return false;
+		}).length;
+		const worktreePathExists = task?.worktreeCwd ? existsSync(task.worktreeCwd) : false;
+		let worktreeStatus = "none";
+		if (task?.workspaceStrategy || task?.worktreeId || task?.worktreeCwd) {
+			if (worktreeConflicts > 0) worktreeStatus = "conflict";
+			else if (activeWorktreeAgents > 0) worktreeStatus = "active";
+			else if (task?.workspaceStrategy === "dedicated_worktree" && !task.worktreeCwd) worktreeStatus = "stale-missing";
+			else if (task?.worktreeCwd && !worktreePathExists) worktreeStatus = "stale-missing";
+			else if (task?.workspaceStrategy === "dedicated_worktree" && task.status === "done") worktreeStatus = "ready-cleanup";
+			else if (task?.workspaceStrategy === "dedicated_worktree") worktreeStatus = "reusable";
+			else if (task?.workspaceStrategy === "existing_worktree") worktreeStatus = "preserved-existing";
+			else if (task?.workspaceStrategy === "spawn_cwd") worktreeStatus = "opt-out-spawn-cwd";
+			else worktreeStatus = task?.workspaceStrategy ?? "metadata-only";
+		}
 		lines.push(`${laneIcon(selected.laneId)} ${selected.title} · ${selected.taskId}`);
 		lines.push(`lane: ${laneLabel(selected.laneId)} · priority: ${selected.priority}${selected.priorityLabel ? ` (${selected.priorityLabel})` : ""}`);
 		lines.push(`waiting: ${selected.waitingOn ?? "-"} · active agents: ${selected.activeAgentCount} · open attention: ${selected.openAttentionCount}`);
+		lines.push(`worktree: ${worktreeStatus} · strategy: ${task?.workspaceStrategy ?? "-"} · id: ${task?.worktreeId ?? "-"}`);
+		lines.push(`worktree cwd: ${short(task?.worktreeCwd, Math.max(24, width - 15))}`);
+		lines.push(`worktree path exists: ${task?.worktreeCwd ? (worktreePathExists ? "yes" : "no") : "-"}`);
+		lines.push(`worktree agents: active=${activeWorktreeAgents} · conflicts=${worktreeConflicts}`);
 		lines.push(`summary: ${short(task?.summary ?? selected.summary, Math.max(24, width - 10))}`);
 		lines.push(`blocked: ${short(task?.blockedReason ?? selected.blockedReason, Math.max(24, width - 10))}`);
 		lines.push(`plan: ${short(task?.planSteps.join(" | "), Math.max(24, width - 7))}`);
 		lines.push(`validation: ${short(task?.validationSteps.join(" | "), Math.max(24, width - 13))}`);
 		lines.push(`files: ${short(task?.files.join(", "), Math.max(24, width - 8))}`);
-		lines.push(`agents: ${linkedAgents.length > 0 ? short(linkedAgents.map((agent) => `${agent.id}:${agent.profile}:${agent.state}`).join(", "), Math.max(24, width - 9)) : "-"}`);
+		lines.push(`agents: ${linkedAgents.length > 0 ? short(linkedAgents.map((agent) => `${agent.id}:${agent.profile}:${agent.state}${agent.worktreeId ? `:wt=${agent.worktreeId}` : ""}`).join(", "), Math.max(24, width - 9)) : "-"}`);
 		return lines.map((line) => truncateToWidth(line, width));
 	}
 
@@ -288,7 +382,7 @@ class AgentsBoardComponent {
 			truncateToWidth(
 				this.theme.fg(
 					"dim",
-					"auto-refresh 5s · ←→ lanes · ↑↓ tasks · enter inspect · s spawn · m move · n new · o open agent · x stop agent · r reply · c capture · y sync · f scope · esc close",
+					"auto-refresh 5s · h queue/tasks · ↑↓ move · enter inspect/open · R respond · d defer · A approve · J reject · s spawn · m move · n new · o open agent · x stop · r reply · c capture · y sync · f scope · esc close",
 				),
 				width,
 			),
@@ -300,6 +394,8 @@ class AgentsBoardComponent {
 			lines.push(truncateToWidth(parts.join(separator), width));
 		}
 		lines.push(this.theme.fg("dim", "─".repeat(Math.max(0, width))));
+		lines.push(...this.renderQueue(width));
+		lines.push(this.theme.fg("dim", "─".repeat(Math.max(0, width))));
 		lines.push(...this.renderDetails(width));
 		return lines;
 	}
@@ -308,10 +404,12 @@ class AgentsBoardComponent {
 
 	handleInput(data: string): void {
 		if (matchesKey(data, Key.left)) {
+			if (this.state.mode === "queue") return;
 			this.moveLane(-1);
 			return;
 		}
 		if (matchesKey(data, Key.right)) {
+			if (this.state.mode === "queue") return;
 			this.moveLane(1);
 			return;
 		}
@@ -324,7 +422,7 @@ class AgentsBoardComponent {
 			return;
 		}
 		if (matchesKey(data, Key.enter)) {
-			this.done(this.makeAction("inspect"));
+			this.done(this.makeAction(this.state.mode === "queue" ? "attention_open" : "inspect"));
 			return;
 		}
 		if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
@@ -334,11 +432,20 @@ class AgentsBoardComponent {
 		if (data === "o") return void this.done(this.makeAction("focus"));
 		if (data === "x") return void this.done(this.makeAction("stop"));
 		if (data === "r") return void this.done(this.makeAction("reply"));
+		if (data === "R") return void this.done(this.makeAction("attention_respond"));
+		if (data === "d") return void this.done(this.makeAction("attention_defer"));
+		if (data === "A") return void this.done(this.makeAction("attention_approve"));
+		if (data === "J") return void this.done(this.makeAction("attention_reject"));
 		if (data === "c") return void this.done(this.makeAction("capture"));
 		if (data === "s") return void this.done(this.makeAction("spawn"));
 		if (data === "n") return void this.done(this.makeAction("create"));
 		if (data === "m") return void this.done(this.makeAction("move"));
 		if (data === "y") return void this.done(this.makeAction("sync"));
+		if (data === "h") {
+			this.state.mode = this.state.mode === "queue" ? "tasks" : "queue";
+			this.ensureSelection();
+			return;
+		}
 		if (data === "f") {
 			this.cycleScope();
 			return;

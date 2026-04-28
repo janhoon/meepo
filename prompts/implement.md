@@ -10,7 +10,7 @@ Workflow:
 2. Ensure the task has acceptance criteria and validation steps. Use `ceo` when product framing or scope needs work. Use `cto` when architecture or validation planning needs hardening. Use `planner` only as a legacy narrow task-refinement helper when that is sufficient.
 3. If planning creates follow-on tasks, inspect them with `task_list` / `task_get` and choose the correct task id for the next execution step.
 4. Spawn a `scout` only if code discovery is still needed.
-5. Spawn an `engineer` attached to the target task for focused implementation.
+5. Spawn an `engineer` attached to the target task for focused implementation. For writing implementation work, request `workspaceStrategy: "dedicated_worktree"` unless the user or task explicitly opts out; omit `cwd` because dedicated worktree spawns provision/reuse the deterministic task worktree and reject explicit cwd. Use `workspaceStrategy: "spawn_cwd"` when intentionally opting out of task worktree inheritance.
 6. Move the active execution task to `in_progress` while work is active.
 7. Supervise via `subagent_inbox`, `subagent_get`, and `task_attention`.
 8. If the engineer blocks, answer with `subagent_message` and update the task if needed.

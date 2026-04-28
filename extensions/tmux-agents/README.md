@@ -4,7 +4,7 @@ Current implementation status: **task-first board + task registry + agent/runtim
 
 Implemented so far:
 - global SQLite bootstrap at `~/.pi/agent/subagents.db`
-- schema + migrations for `agents`, `agent_messages`, `agent_events`, and `artifacts`
+- schema + migrations for `agents`, `agent_messages`, `agent_events`, `artifacts`, and task execution intent fields (`requestedProfile`, `assignedProfile`, `launchPolicy`, `promptTemplate`, `roleHint`)
 - registry helper functions for create/update/list/get/message/event/artifact operations
 - model-callable coordinator tools:
   - `task_create`
@@ -16,6 +16,8 @@ Implemented so far:
   - `task_link_agent`
   - `task_unlink_agent`
   - `task_attention`
+  - `task_response_open`
+  - `task_respond`
   - `task_reconcile`
   - `subagent_spawn`
   - `subagent_focus`
@@ -38,6 +40,7 @@ Implemented so far:
 - lightweight interactive commands and shortcuts:
   - `/agents`
   - `/task-board`
+  - `/needs-human`
   - `/tasks`
   - `/task-new`
   - `/task-open <id>`
@@ -46,6 +49,8 @@ Implemented so far:
   - `/task-link-agent <task-id> <agent-id> [role]`
   - `/task-unlink-agent <task-id> <agent-id>`
   - `/task-attention [scope]`
+  - `/task-response-open <needs-human-id>`
+  - `/task-respond <needs-human-id> [summary text | JSON object]`
   - `/task-sync [scope]`
   - `/task-spawn [task-id]`
   - `/agent-open <id>`
@@ -69,6 +74,16 @@ Implemented so far:
 - run directory creation under:
   - `~/.pi/agent/subagents/runs/<agent-id>/`
   - `~/.pi/agent/services/runs/<service-id>/`
+- task execution intent + autonomous launch:
+  - `task_create` accepts `launchPolicy: "autonomous"` or `autonomousStart: true` for ready `todo` tasks
+  - explicit `requestedProfile` / `assignedProfile` overrides profile selection
+  - deterministic fallback selection maps planning/design to `planner`, implementation/build/fix work to `engineer`, and review/QA work to `reviewer`/`qa-lead` when available
+  - `/task-spawn` and `subagent_spawn` remain manual explicit-profile launch paths
+- child profile tool declarations are normalized to the supported child allowlist:
+  - `read`, `bash`, `grep`, `ls`, `edit`, `write`
+  - `task_create`, `task_list`, `task_get`, `task_update`, `task_move`, `task_note`, `task_attention`
+  - unsupported names are ignored during profile loading so unrelated profiles do not block discovery
+  - defaults (`read`, `bash`, `edit`, `write`) apply only when a profile or spawn omits tools entirely; explicit invalid-only declarations or overrides grant no built-in tools
 - generated child artifacts:
   - `task.md`
   - `runtime-appendix.md`
@@ -107,21 +122,61 @@ Implemented so far:
   - live registry + `latest-status.json` preview updates while the child runs
   - live RPC bridge delivery for queued child messages when the bridge is healthy
   - fallback transport-state classification when the bridge is unavailable
-  - coordinator wake-up routing from unresolved attention items
+  - coordinator wake-up routing from task-first needs-human queue rows before falling back to legacy unresolved attention items
 - interactive dashboard behavior:
+  - task-first needs-human queue preview above the agent list, sorted by queue priority/update time
   - list view with scope/filter/sort controls
   - detail pane with parent/child relationships
   - in-dashboard focus/stop/reply/capture/spawn/sync actions
 - Pi-native task board behavior:
   - Kanban-style TUI lanes for todo, blocked, in-progress, in-review, and done
+  - dedicated needs-human queue pane with one row per task/agent queue item showing priority, kind/category, waiting target, task title, agent/profile when available, and summary
+  - `/needs-human` opens the board directly in queue mode; in headless sessions it prints task-first queue rows with response hints; `h` toggles queue/task navigation without losing the selected task lane
+  - queue actions include open/acknowledge (`enter`), response route (`R`), defer (`d`), approve review (`A`), reject review (`J`), focus (`o`), and capture (`c`); approve/reject are limited to review-gate/completion rows
   - board cards represent tasks, not agents
   - linked agents remain available for focus/reply/stop/capture from the selected task
-  - keyboard navigation across lanes and tasks
+  - keyboard navigation across lanes, tasks, and queue rows
   - per-task inspect/focus/reply/stop/capture/spawn/move/sync actions
+- task needs-human response routing:
+  - `task_response_open` inspects one `task_needs_human` row and can mark it `acknowledged` without resolving it
+  - `task_respond` supports `mode: "task_patch"` to update persistent task fields without sending any child message
+  - `task_respond` supports `mode: "child_message"` to queue an answer/note/redirect/cancel/priority for the linked child with `inReplyToMessageId` inferred from the source message; queue resolution is scoped to the selected `needsHumanId`
+  - `task_respond` supports `mode: "combined"` to preflight child messaging, apply task metadata changes, then queue a concise child message describing the change
+  - response resolution can be `acknowledged`, `resolved`, `cancelled`, or `superseded`; task events record open, patch, child-message, child-message failure, and final response actions
+  - `resolution: "acknowledged"` is allowed only for `mode: "task_patch"`; `mode: "child_message"` and `mode: "combined"` require terminal `resolved`, `cancelled`, or `superseded` semantics before queueing a child message
+  - stale rows already `resolved`, `cancelled`, or `superseded` are rejected instead of reopened or double-responded; already-acknowledged rows can be opened idempotently
+  - child-message and combined responses atomically terminal-claim the selected `needsHumanId` before bridge delivery, so a rapid duplicate `task_respond` cannot queue a second child message while the first response is awaiting live delivery
+  - nullable task fields such as `summary`, `description`, `parentTaskId`, `priorityLabel`, `waitingOn`, `blockedReason`, `requestedProfile`, `assignedProfile`, `launchPolicy`, `promptTemplate`, `roleHint`, `reviewSummary`, and `finalSummary` accept `null` clears in `patch`
+  - defaults: answering blockers uses `resume_if_blocked` and moves blocked tasks back to `in_progress` while clearing `waitingOn`/`blockedReason` unless the response patch explicitly overrides those fields; completion/review responses without an explicit patch mark the task `done`
+  - examples:
+    - task-only patch: `task_respond({ needsHumanId, mode: "task_patch", patch: { status: "in_progress", waitingOn: null, blockedReason: null } })`
+    - child reply: `task_respond({ needsHumanId, mode: "child_message", resolution: "resolved", kind: "answer", summary: "Use extensions/tmux-agents/index.ts; resume implementation." })`
+    - combined: `task_respond({ needsHumanId, mode: "combined", resolution: "resolved", patch: { files: ["extensions/tmux-agents/index.ts"] }, kind: "note", summary: "Task files were narrowed to extensions/tmux-agents/index.ts." })`
+- autonomous task lifecycle behavior:
+  - child `subagent_publish` is the source of truth for task-linked progress: milestone/note => task `in_progress`, blocker/question/question_for_user => task `blocked` with `waitingOn`, complete => review gate (`in_review` for worker-style profiles, `done` for reviewer-style profiles unless `taskStatus` overrides)
+  - every blocker/question/completion publish creates both a legacy `attention_items` row and a task-first `task_needs_human` row; during migration both surfaces remain compatible
+  - `task_response_open` may acknowledge a queue row without resolving it; `task_respond` with child-message/combined terminal-claims the selected `needsHumanId` before delivery so duplicate replies do not fan out
+  - answering blockers defaults the task back to `in_progress` and clears `waitingOn`/`blockedReason`; unanswered or still-blocked children should publish a new blocker/question immediately
+  - completion/review gates stay visible until reviewed; approving via `task_respond` defaults the task to `done`, resolves the queue row, and mirrors the matching legacy attention row when present
+  - terminal child completion deactivates the task-agent link after the completion/review queue row is created; reconcile also deactivates links for terminal/error/lost agents without regressing task status
+- state transition matrix:
+  - start: task `in_progress`, agent `running`, no needs-human row, active `task_agent_links`
+  - milestone/note: task stays/moves `in_progress`, agent `running`, needs-human unchanged, link active
+  - blocker/question: task `blocked`, agent `blocked`/`waiting`, needs-human open or waiting on coordinator/user/service/external, link active
+  - answer/task patch: task follows patch (blocker answers default `in_progress`), needs-human acknowledged or resolved, child state unchanged until it resumes
+  - answer/child message: selected needs-human row is terminal before delivery; queued child message uses action policy (`resume_if_blocked`, `replan`, `interrupt_and_replan`, `stop`, or `fyi`)
+  - complete: agent `done`, task `in_review` or `done`, completion/review needs-human row open when review is required, active link deactivated
+  - review approval: task `done`, needs-human resolved, legacy attention mirrored resolved when linked
+  - cancel/error/lost: agent terminal, reconcile deactivates links and preserves unresolved human-needed rows instead of silently clearing blockers/questions
+  - cleanup: completion rows are resolved during cleanup; unresolved blockers/questions prevent cleanup unless `force=true`, which cancels those rows intentionally
+- migration/reconcile expectations:
+  - `task_reconcile` backfills task records for legacy agents, mirrors unresolved legacy `attention_items` into `task_needs_human`, mirrors resolved legacy items back into task queue rows, repairs stale `task_agent_links`/`agents.task_id` pointers, and deactivates terminal-agent links
+  - reconcile does not downgrade active task status or resolve unresolved human-needed rows merely because an agent is terminal/lost; use `task_respond` or forced cleanup for intentional resolution/cancellation
+  - operators can use `task_attention` as the task-first queue and `subagent_attention` during the compatibility period; both should show equivalent blocker/question/completion work items for new child publishes
 - terminal agent cleanup behavior:
   - cleanup candidates come from terminal agents with live tmux targets
-  - unresolved completion attention can be resolved during cleanup
-  - unresolved blocker/question attention prevents cleanup unless force is intentional
+  - unresolved completion attention or task needs-human rows can be resolved during cleanup
+  - unresolved blocker/question attention or task needs-human rows prevent cleanup unless force is intentional
 - initial agent profile prompts under `~/.pi/agent/agents/`
 - orchestration skills under `~/.pi/agent/skills/`
 - workflow prompt templates under `~/.pi/agent/prompts/`
@@ -147,6 +202,15 @@ Manual validation / troubleshooting checklist:
 - Watch the healthy launch progression: a freshly spawned child should move from `launching` (bridge entrypoint starting) to `listening` (socket accepting connections) to `live` (child runtime attached and exchanging RPC traffic). If it stalls at `launching` or `listening` for more than a few seconds, inspect `bridge.log` and `bridge-status.json`.
 - Send `subagent_message` to a live child and verify the message is either reported as delivered via the bridge or left queued with `transportState=fallback`.
 - Publish a child `question` or `blocked` update and verify the coordinator gets a wake-up message while the item also remains visible in attention surfaces.
+- Use `task_respond` with `mode: "task_patch"` against a blocker and verify the task metadata changes, a task event is recorded, the needs-human row resolves, and no child message is queued.
+- Use `task_respond` with `mode: "child_message"` against a blocker and verify the child message queues while the task defaults back to `in_progress` with `waitingOn`/`blockedReason` cleared.
+- Use `task_respond` with `mode: "child_message"` against a question and verify the child message has `inReplyToMessageId` populated and is delivered via the RPC bridge or left queued for fallback delivery.
+- Seed two open rows for the same agent with `sourceMessageId: null`; respond to one by `needsHumanId` and verify only that selected row resolves.
+- Issue two rapid `task_respond` calls against the same `needsHumanId` with `mode: "child_message"` or `mode: "combined"` while the linked child is bridge-live; verify the first queues at most one child message and the second is rejected/no-ops against the now-terminal row. Also verify `resolution: "acknowledged"` is rejected for these message modes before any child message is queued.
+- Use `task_respond` with `mode: "combined"` and verify task patch events precede child-message events; force a stale/missing child target and verify a `needs_human_child_message_failed` event records any partial failure instead of silently implying success.
+- Use `task_respond` patch clears such as `{ waitingOn: null, blockedReason: null, reviewSummary: null }` and verify nulls are accepted.
+- Try `task_response_open`/`task_respond` against `resolved`, `cancelled`, and `superseded` rows and verify they are rejected or no-op safely without reopening.
+- Use `task_respond` against a completion/review gate and verify the task moves to `done` unless an explicit patch says otherwise.
 - Run `subagent_reconcile` after killing the bridge or closing the tmux target and confirm the transport state changes to something explicit like `fallback`, `disconnected`, `stopped`, or `lost`.
 - If transport is not `live`, inspect `bridge-status.json`, `bridge.log`, and the tmux pane before falling back to `subagent_capture`.
 
