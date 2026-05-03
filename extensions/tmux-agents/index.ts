@@ -3607,20 +3607,19 @@ async function runTaskCreateWizard(pi: ExtensionAPI, ctx: ExtensionContext): Pro
 	return launched ? getTask(getTmuxAgentsDb(), created.id) ?? created : created;
 }
 
-async function runNeedsHumanOpenFlow(ctx: ExtensionContext, needsHumanId: string): Promise<void> {
+function getNeedsHumanRecordForFlow(needsHumanId: string): { item: TaskNeedsHumanRecord; task: TaskRecord; agent: AgentSummary | null; latest: AgentMessageRecord | null } {
 	const db = getTmuxAgentsDb();
 	const item = listTaskNeedsHuman(db, { ids: [needsHumanId], limit: 1 })[0];
 	if (!item) throw new Error(`Unknown task needs-human id \"${needsHumanId}\".`);
 	const task = getTask(db, item.taskId);
 	if (!task) throw new Error(`Task ${item.taskId} for needs-human row ${item.id} is missing.`);
-	assertTaskNeedsHumanOpenable(item);
-	if (item.state !== "acknowledged") {
-		markTaskNeedsHumanResponse(item, "acknowledged", "opened", "Needs-human item opened from board queue.");
-		createTaskEvent(db, { id: randomUUID(), taskId: task.id, agentId: item.agentId, eventType: "needs_human_opened", summary: "Needs-human item opened from board queue.", payload: { needsHumanId: item.id, sourceMessageId: item.sourceMessageId ?? null } });
-	}
 	const agent = getAgent(db, item.agentId);
-	const latest = listMessagesForRecipient(db, item.agentId, { includeDelivered: true, limit: 1 })[0];
-	await ctx.ui.editor(`Needs-human ${item.id}`, [
+	const latest = listMessagesForRecipient(db, item.agentId, { includeDelivered: true, limit: 1 })[0] ?? null;
+	return { item, task, agent, latest };
+}
+
+function formatNeedsHumanContext(item: TaskNeedsHumanRecord, task: TaskRecord, agent: AgentSummary | null, latest: AgentMessageRecord | null): string[] {
+	return [
 		`Needs-human: ${item.id}`,
 		`Task: ${task.id} · ${task.title}`,
 		`Status: ${task.status} · waiting: ${task.waitingOn ?? "-"} · priority: ${task.priority}`,
@@ -3631,17 +3630,92 @@ async function runNeedsHumanOpenFlow(ctx: ExtensionContext, needsHumanId: string
 		`Blocked: ${task.blockedReason ?? "-"}`,
 		`Review: ${task.reviewSummary ?? "-"}`,
 		`Latest message: ${latest ? `${latest.kind} · ${JSON.stringify(latest.payload).slice(0, 1200)}` : "-"}`,
-		"",
-		"Routes: R respond, d defer, A approve review, J reject review, o focus, c capture.",
-	].join("\n"));
+	];
+}
+
+function defaultUnblockPatchForNeedsHuman(item: TaskNeedsHumanRecord): Partial<UpdateTaskInput> | undefined {
+	if (["blocked", "question", "question_for_user", "service_wait", "external_wait"].includes(item.kind) || ["blocker", "question", "service", "external"].includes(item.category)) {
+		return { status: "in_progress", waitingOn: null, blockedReason: null };
+	}
+	return undefined;
+}
+
+function defaultAnswerPromptForNeedsHuman(item: TaskNeedsHumanRecord, task: TaskRecord): string {
+	return item.responsePrompt || item.summary || task.blockedReason || "Tell the agent how to proceed.";
+}
+
+function acknowledgeNeedsHumanForFlow(item: TaskNeedsHumanRecord, task: TaskRecord): void {
+	if (item.state === "acknowledged") return;
+	markTaskNeedsHumanResponse(item, "acknowledged", "opened", "Needs-human item opened from board queue.");
+	createTaskEvent(getTmuxAgentsDb(), {
+		id: randomUUID(),
+		taskId: task.id,
+		agentId: item.agentId,
+		eventType: "needs_human_opened",
+		summary: "Needs-human item opened from board queue.",
+		payload: { needsHumanId: item.id, sourceMessageId: item.sourceMessageId ?? null },
+	});
+}
+
+async function runNeedsHumanOpenFlow(ctx: ExtensionContext, needsHumanId: string): Promise<void> {
+	const { item, task } = getNeedsHumanRecordForFlow(needsHumanId);
+	assertTaskNeedsHumanOpenable(item);
+	acknowledgeNeedsHumanForFlow(item, task);
+	await runNeedsHumanRespondFlow(ctx, needsHumanId);
 }
 
 async function runNeedsHumanRespondFlow(ctx: ExtensionContext, needsHumanId: string): Promise<void> {
-	const mode = await ctx.ui.select("Response route:", ["combined", "task_patch", "child_message"]);
-	if (!mode) return;
-	const summary = await ctx.ui.input("Response summary:", "");
-	if (!summary?.trim()) return;
-	const result = await respondToTaskNeedsHuman({ needsHumanId, mode: mode as "combined" | "task_patch" | "child_message", summary: summary.trim() });
+	const { item, task, agent, latest } = getNeedsHumanRecordForFlow(needsHumanId);
+	assertTaskNeedsHumanRespondable(item);
+	const context = formatNeedsHumanContext(item, task, agent, latest);
+	const prompt = [
+		`Needs human: ${truncateText(item.summary, 90)}`,
+		`Task: ${truncateText(task.title, 90)}`,
+		`Blocked: ${truncateText(task.blockedReason ?? item.responsePrompt ?? "-", 120)}`,
+		"What do you want to do?",
+	].join("\n");
+	const choices = [
+		"Answer child and unblock task",
+		"Answer child only",
+		"Update task only: unblock without child message",
+		"Keep blocked / defer",
+		"View details",
+		"Cancel",
+	];
+	const selected = await ctx.ui.select(prompt, choices);
+	if (!selected || selected === "Cancel") return;
+	if (selected === "View details") {
+		await ctx.ui.editor(`Needs-human ${item.id}`, [
+			...context,
+			"",
+			"This is a read-only detail view. Re-open or press R to answer/unblock.",
+		].join("\n"));
+		return;
+	}
+	if (selected === "Keep blocked / defer") {
+		await runNeedsHumanDeferFlow(ctx, needsHumanId);
+		return;
+	}
+	const defaultPrompt = defaultAnswerPromptForNeedsHuman(item, task);
+	const answer = selected === "Update task only: unblock without child message"
+		? await ctx.ui.input("Unblock note:", "Decision recorded; unblock task.")
+		: await ctx.ui.input("Reply to blocked agent:", "");
+	if (!answer?.trim()) return;
+	const patch = selected === "Answer child and unblock task" || selected === "Update task only: unblock without child message"
+		? defaultUnblockPatchForNeedsHuman(item)
+		: undefined;
+	const details = selected === "Update task only: unblock without child message" ? undefined : `${defaultPrompt}\n\nCoordinator answer: ${answer.trim()}`;
+	const mode = selected === "Update task only: unblock without child message" ? "task_patch" : selected === "Answer child and unblock task" ? "combined" : "child_message";
+	const result = await respondToTaskNeedsHuman({
+		needsHumanId,
+		mode,
+		patch,
+		kind: "answer",
+		summary: answer.trim(),
+		details,
+		actionPolicy: selected === "Answer child only" ? undefined : "resume_if_blocked",
+		resolution: "resolved",
+	});
 	ctx.ui.notify(`Responded to ${needsHumanId}; patched=${result.patched}; message=${result.messageId ?? "none"}.`, "info");
 }
 

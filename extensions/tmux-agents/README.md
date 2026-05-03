@@ -132,12 +132,13 @@ Implemented so far:
   - Kanban-style TUI lanes for todo, blocked, in-progress, in-review, and done
   - dedicated needs-human queue pane with one row per task/agent queue item showing priority, kind/category, waiting target, task title, agent/profile when available, and summary
   - `/needs-human` opens the board directly in queue mode; in headless sessions it prints task-first queue rows with response hints; `h` toggles queue/task navigation without losing the selected task lane
-  - queue actions include open/acknowledge (`enter`), response route (`R`), defer (`d`), approve review (`A`), reject review (`J`), focus (`o`), and capture (`c`); approve/reject are limited to review-gate/completion rows
+  - queue actions include unblock/response flow (`enter` or `R`), defer (`d`), approve review (`A`), reject review (`J`), focus (`o`), and capture (`c`); approve/reject are limited to review-gate/completion rows
   - board cards represent tasks, not agents
   - linked agents remain available for focus/reply/stop/capture from the selected task
   - keyboard navigation across lanes, tasks, and queue rows
   - per-task inspect/focus/reply/stop/capture/spawn/move/sync actions
 - task needs-human response routing:
+  - board `enter` on a needs-human row shows the blocker/question context and asks how to unblock it: answer child + unblock task, answer child only, update task only, defer, or view details
   - `task_response_open` inspects one `task_needs_human` row and can mark it `acknowledged` without resolving it
   - `task_respond` supports `mode: "task_patch"` to update persistent task fields without sending any child message
   - `task_respond` supports `mode: "child_message"` to queue an answer/note/redirect/cancel/priority for the linked child with `inReplyToMessageId` inferred from the source message; queue resolution is scoped to the selected `needsHumanId`
