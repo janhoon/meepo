@@ -6385,6 +6385,8 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 	const runtime = createMeepoRuntime({
 		registerCoordinatorTools: registerTmuxAgents,
+		// Full preset seeds org role/edge doctrine; core skips (hierarchy off).
+		getDb: () => getTmuxAgentsDb(),
 	});
 	runtime.start(pi);
 }

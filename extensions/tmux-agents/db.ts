@@ -773,6 +773,8 @@ CREATE INDEX IF NOT EXISTS idx_agent_attention_task_state_priority
 CREATE INDEX IF NOT EXISTS idx_agent_attention_message_updated
 	ON agent_attention_items_v2(message_id, updated_at DESC);
 
+-- Historical migration_6 opinion seeds (INSERT OR IGNORE). Forward path is full-org-preset seeder
+-- via MeepoRuntime (org-preset.ts). Kept for non-destructive upgrades of existing DBs.
 INSERT OR IGNORE INTO agent_roles
 	(role_key, label, authority_rank, default_visibility_scope, can_spawn_children, can_admin_override, metadata_json, created_at, updated_at)
 VALUES
@@ -808,6 +810,7 @@ SELECT DISTINCT
 FROM agents
 WHERE TRIM(profile) <> '';
 
+-- Historical migration_6 edge seeds. Prefer full-org-preset seeder for new installs going forward.
 INSERT OR IGNORE INTO agent_role_edge_policies
 	(id, parent_role_key, child_role_key, edge_type, allow_spawn, allow_parent_to_child_message, allow_child_to_parent_message, allow_parent_inspect_child, allow_child_inspect_parent, allow_parent_inspect_subtree, metadata_json, created_at, updated_at)
 VALUES

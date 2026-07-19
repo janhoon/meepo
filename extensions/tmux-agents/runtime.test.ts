@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import {
@@ -11,6 +12,7 @@ import {
 	loadMeepoConfig,
 	type MeepoCapability,
 } from "./config.js";
+import { countOrgRoleSeeds } from "./org-preset.js";
 import { createCapabilityFilteredExtensionApi, createMeepoRuntime } from "./runtime.js";
 
 function createRecordingPi(): { pi: ExtensionAPI } {
@@ -187,5 +189,57 @@ describe("capability-gated registration", () => {
 		assert.ok(!snap!.tools.includes("task_create"));
 		assert.ok(!snap!.tools.includes("tmux_service_start"));
 		assert.equal(snap!.shortcutCount, 0);
+	});
+
+	it("full preset start seeds org roles when getDb is provided", () => {
+		const db = new DatabaseSync(":memory:");
+		db.exec(`
+			CREATE TABLE agent_roles (
+				role_key TEXT PRIMARY KEY, label TEXT, authority_rank INTEGER,
+				default_visibility_scope TEXT, can_spawn_children INTEGER, can_admin_override INTEGER,
+				metadata_json TEXT, created_at INTEGER, updated_at INTEGER
+			);
+			CREATE TABLE agent_role_edge_policies (
+				id TEXT PRIMARY KEY, parent_role_key TEXT, child_role_key TEXT, edge_type TEXT,
+				allow_spawn INTEGER, allow_parent_to_child_message INTEGER, allow_child_to_parent_message INTEGER,
+				allow_parent_inspect_child INTEGER, allow_child_inspect_parent INTEGER, allow_parent_inspect_subtree INTEGER,
+				metadata_json TEXT, created_at INTEGER, updated_at INTEGER
+			);
+		`);
+		const rec = createRecordingPi();
+		const runtime = createMeepoRuntime({
+			config: createFullDefaultConfig(),
+			getDb: () => db,
+			registerCoordinatorTools: () => {},
+		});
+		runtime.start(rec.pi);
+		assert.equal(runtime.didApplyOrgPreset(), true);
+		assert.equal(countOrgRoleSeeds(db, ["ceo", "cto", "engineer"]), 3);
+	});
+
+	it("core preset start does not seed org roles", () => {
+		const db = new DatabaseSync(":memory:");
+		db.exec(`
+			CREATE TABLE agent_roles (
+				role_key TEXT PRIMARY KEY, label TEXT, authority_rank INTEGER,
+				default_visibility_scope TEXT, can_spawn_children INTEGER, can_admin_override INTEGER,
+				metadata_json TEXT, created_at INTEGER, updated_at INTEGER
+			);
+			CREATE TABLE agent_role_edge_policies (
+				id TEXT PRIMARY KEY, parent_role_key TEXT, child_role_key TEXT, edge_type TEXT,
+				allow_spawn INTEGER, allow_parent_to_child_message INTEGER, allow_child_to_parent_message INTEGER,
+				allow_parent_inspect_child INTEGER, allow_child_inspect_parent INTEGER, allow_parent_inspect_subtree INTEGER,
+				metadata_json TEXT, created_at INTEGER, updated_at INTEGER
+			);
+		`);
+		const rec = createRecordingPi();
+		const runtime = createMeepoRuntime({
+			config: createCoreDefaultConfig(),
+			getDb: () => db,
+			registerCoordinatorTools: () => {},
+		});
+		runtime.start(rec.pi);
+		assert.equal(runtime.didApplyOrgPreset(), false);
+		assert.equal(countOrgRoleSeeds(db, ["ceo", "cto"]), 0);
 	});
 });

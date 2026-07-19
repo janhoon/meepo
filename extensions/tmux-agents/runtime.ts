@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { DatabaseSync } from "node:sqlite";
 import {
 	type MeepoCapability,
 	type MeepoConfig,
@@ -11,6 +12,7 @@ import {
 	shouldRegisterCoordinatorTool,
 	type LoadMeepoConfigOptions,
 } from "./config.js";
+import { applyFullOrgPresetSeeds, shouldApplyFullOrgPreset } from "./org-preset.js";
 
 export type RegisterCoordinatorTools = (pi: ExtensionAPI, runtime: MeepoRuntime) => void;
 
@@ -22,6 +24,11 @@ export interface MeepoRuntimeOptions {
 	 * Tests can omit this and only inspect the planned tool surface.
 	 */
 	registerCoordinatorTools?: RegisterCoordinatorTools;
+	/**
+	 * Optional DB accessor for preset seeders. Injected so unit tests need not open the real DB.
+	 * When omitted and full org preset applies, start() skips seeding (callers that need seeds pass getTmuxAgentsDb).
+	 */
+	getDb?: () => DatabaseSync;
 }
 
 export interface RegistrationFilterResult {
@@ -104,12 +111,15 @@ export function createCapabilityFilteredExtensionApi(
 export class MeepoRuntime {
 	readonly config: MeepoConfig;
 	private readonly registerCoordinatorTools?: RegisterCoordinatorTools;
+	private readonly getDb?: () => DatabaseSync;
 	private started = false;
 	private lastFilter: RegistrationFilterResult | null = null;
+	private orgPresetApplied = false;
 
 	constructor(options: MeepoRuntimeOptions = {}) {
 		this.config = options.config ?? loadMeepoConfig(options.loadOptions ?? {});
 		this.registerCoordinatorTools = options.registerCoordinatorTools;
+		this.getDb = options.getDb;
 	}
 
 	/** Planned coordinator tool names for the active config (no side effects). */
@@ -148,8 +158,14 @@ export class MeepoRuntime {
 		};
 	}
 
+	/** Whether full-org seeds were applied during start(). */
+	didApplyOrgPreset(): boolean {
+		return this.orgPresetApplied;
+	}
+
 	/**
 	 * Wire the extension into Pi. Registration is filtered by capabilities.
+	 * Full preset optionally seeds org roles/edges via getDb().
 	 * Child-only tools (subagent_publish) still pass the filter when registered.
 	 */
 	start(pi: ExtensionAPI): void {
@@ -157,6 +173,10 @@ export class MeepoRuntime {
 			throw new Error("MeepoRuntime.start() called more than once");
 		}
 		this.started = true;
+		if (shouldApplyFullOrgPreset(this.config) && this.getDb) {
+			applyFullOrgPresetSeeds(this.getDb());
+			this.orgPresetApplied = true;
+		}
 		const filter = createCapabilityFilteredExtensionApi(pi, this.config);
 		this.lastFilter = filter;
 		if (this.registerCoordinatorTools) {
