@@ -2,40 +2,24 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseFrontmatter } from "@mariozechner/pi-coding-agent";
+import { getActiveProfileLoadOptions, setActiveProfileLoadOptions } from "./profile-load-options.js";
 import { buildProfileFieldsFromFrontmatter } from "./profile-metadata.js";
+import {
+	getAllowedBuiltinToolNames,
+	mergeProfilesByName,
+	normalizeBuiltinTools,
+	type NormalizeToolsOptions,
+} from "./profile-tools.js";
 import type { SubagentProfile } from "./types.js";
 
-const DEFAULT_PROFILE_TOOLS = ["read", "bash", "edit", "write"];
-const ALLOWED_BUILTIN_TOOLS = new Set([
-	"read",
-	"bash",
-	"grep",
-	"ls",
-	"edit",
-	"write",
-	"task_create",
-	"task_list",
-	"task_get",
-	"task_update",
-	"task_move",
-	"task_note",
-	"task_link",
-	"task_unlink",
-	"task_links",
-	"task_ready",
-	"task_dispatch_ready",
-	"task_attention",
-	"subagent_list",
-	"subagent_get",
-	"subagent_inbox",
-	"subagent_attention",
-	"subagent_spawn",
-	"subagent_message",
-	"subagent_stop",
-	"subagent_cleanup",
-	"web_search",
-	"code_search",
-]);
+export {
+	getActiveProfileLoadOptions,
+	setActiveProfileLoadOptions,
+	getAllowedBuiltinToolNames,
+	mergeProfilesByName,
+	normalizeBuiltinTools,
+};
+export type { NormalizeToolsOptions };
 
 function isDirectory(path: string): boolean {
 	try {
@@ -45,29 +29,30 @@ function isDirectory(path: string): boolean {
 	}
 }
 
-export function getProfilesDir(): string {
+/** Package-bundled agents directory (works for git/npm install layout). */
+export function getPackageProfilesDir(): string {
 	return resolve(dirname(fileURLToPath(import.meta.url)), "../../agents");
 }
 
-export function normalizeBuiltinTools(tools: string[] | undefined): string[] {
-	const ordered = tools && tools.length > 0 ? tools : DEFAULT_PROFILE_TOOLS;
-	const normalized: string[] = [];
-	const seen = new Set<string>();
-	for (const tool of ordered) {
-		const trimmed = tool.trim();
-		if (!trimmed || seen.has(trimmed)) continue;
-		if (!ALLOWED_BUILTIN_TOOLS.has(trimmed)) {
-			throw new Error(
-				`Unsupported child tool \"${trimmed}\". Allowed tools: ${Array.from(ALLOWED_BUILTIN_TOOLS).join(", ")}.`,
-			);
-		}
-		seen.add(trimmed);
-		normalized.push(trimmed);
-	}
-	if (normalized.length === 0) {
-		return [...DEFAULT_PROFILE_TOOLS];
-	}
-	return normalized;
+/** @deprecated Prefer getPackageProfilesDir + listProfilesFromDirs. */
+export function getProfilesDir(): string {
+	return getPackageProfilesDir();
+}
+
+/**
+ * Resolve ordered profile directories.
+ * - If `dirs` is non-empty, those paths are used in order (later shadows earlier by name).
+ * - If empty, only the package agents directory is used.
+ * Missing directories are skipped.
+ */
+export function resolveProfileDirs(dirs?: string[]): string[] {
+	const active = getActiveProfileLoadOptions();
+	const configured = dirs && dirs.length > 0 ? dirs : active.dirs;
+	const ordered =
+		configured.length > 0
+			? configured.map((d) => resolve(d))
+			: [getPackageProfilesDir()];
+	return ordered.filter((dir) => isDirectory(dir));
 }
 
 /**
@@ -78,6 +63,7 @@ export function profileFromFrontmatter(
 	frontmatter: Record<string, unknown>,
 	body: string,
 	filePath: string,
+	toolOptions?: NormalizeToolsOptions,
 ): SubagentProfile | null {
 	const fields = buildProfileFieldsFromFrontmatter(frontmatter, body);
 	if (!fields) return null;
@@ -85,7 +71,7 @@ export function profileFromFrontmatter(
 		name: fields.name,
 		description: fields.description,
 		systemPrompt: fields.systemPrompt,
-		tools: normalizeBuiltinTools(fields.toolNames),
+		tools: normalizeBuiltinTools(fields.toolNames, toolOptions),
 		model: fields.model,
 		filePath,
 		roleKey: fields.roleKey,
@@ -94,8 +80,10 @@ export function profileFromFrontmatter(
 	};
 }
 
-export function listSubagentProfiles(): SubagentProfile[] {
-	const profilesDir = getProfilesDir();
+export function loadProfilesFromDir(
+	profilesDir: string,
+	toolOptions?: NormalizeToolsOptions,
+): SubagentProfile[] {
 	if (!isDirectory(profilesDir)) return [];
 	const profiles: SubagentProfile[] = [];
 	for (const entry of readdirSync(profilesDir, { withFileTypes: true })) {
@@ -110,7 +98,7 @@ export function listSubagentProfiles(): SubagentProfile[] {
 		}
 		const { frontmatter, body } = parseFrontmatter<Record<string, string>>(content);
 		try {
-			const profile = profileFromFrontmatter(frontmatter, body, filePath);
+			const profile = profileFromFrontmatter(frontmatter, body, filePath, toolOptions);
 			if (profile) profiles.push(profile);
 		} catch (error) {
 			throw new Error(
@@ -118,13 +106,26 @@ export function listSubagentProfiles(): SubagentProfile[] {
 			);
 		}
 	}
-	return profiles.sort((left, right) => left.name.localeCompare(right.name));
+	return profiles;
+}
+
+export function listProfilesFromDirs(
+	dirs?: string[],
+	toolOptions?: NormalizeToolsOptions,
+): SubagentProfile[] {
+	const resolved = resolveProfileDirs(dirs);
+	const layers = resolved.map((dir) => loadProfilesFromDir(dir, toolOptions));
+	return mergeProfilesByName(layers);
+}
+
+export function listSubagentProfiles(): SubagentProfile[] {
+	const active = getActiveProfileLoadOptions();
+	return listProfilesFromDirs(undefined, {
+		extraTools: active.extraTools,
+		allowUnknownTools: active.allowUnknownTools,
+	});
 }
 
 export function getSubagentProfile(name: string): SubagentProfile | null {
 	return listSubagentProfiles().find((profile) => profile.name === name) ?? null;
-}
-
-export function getAllowedBuiltinToolNames(): string[] {
-	return Array.from(ALLOWED_BUILTIN_TOOLS);
 }

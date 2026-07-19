@@ -14,6 +14,7 @@ import {
 } from "./config.js";
 import { applyFullOrgPresetSeeds, shouldApplyFullOrgPreset } from "./org-preset.js";
 import { registerFullMeepoProfileCompat } from "./profile-metadata.js";
+import { setActiveProfileLoadOptions } from "./profile-load-options.js";
 
 export type RegisterCoordinatorTools = (pi: ExtensionAPI, runtime: MeepoRuntime) => void;
 
@@ -174,6 +175,11 @@ export class MeepoRuntime {
 			throw new Error("MeepoRuntime.start() called more than once");
 		}
 		this.started = true;
+		setActiveProfileLoadOptions({
+			dirs: this.config.profiles.dirs,
+			extraTools: this.config.profiles.extraTools,
+			allowUnknownTools: this.config.profiles.allowUnknownTools,
+		});
 		// Full preset registers name-compat fallbacks + org seeds (doctrine pack).
 		if (this.config.preset === "full") {
 			registerFullMeepoProfileCompat();
