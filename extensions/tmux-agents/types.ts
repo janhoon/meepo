@@ -176,6 +176,8 @@ export interface SpawnSubagentInput {
 	spawnedByAgentId?: string | null;
 	createdByKind?: AgentSystemActorKind;
 	allowDuplicateOwner?: boolean;
+	/** Hierarchy edge policy mode; default enforce (operator compatibility). */
+	hierarchyMode?: "off" | "advisory" | "enforce";
 	spawnSessionId: string | null;
 	spawnSessionFile: string | null;
 }

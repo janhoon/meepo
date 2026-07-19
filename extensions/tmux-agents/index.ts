@@ -46,7 +46,11 @@ import {
 } from "./registry.js";
 import type { ListAgentAttentionItemsV2Filters } from "./registry.js";
 import { collectQueuedWakeCoalescingContext } from "./wake-coalescing.js";
+import { loadMeepoConfig } from "./config.js";
 import { createMeepoRuntime, type MeepoRuntime } from "./runtime.js";
+
+/** Active Meepo config for this extension process (set on register). */
+let activeMeepoRuntime: MeepoRuntime | null = null;
 import {
 	assertTaskLeaseAvailable,
 	cancelTaskLink,
@@ -3492,6 +3496,8 @@ function spawnChildFromParams(pi: ExtensionAPI, ctx: ExtensionContext, params: {
 		allowDuplicateOwner: params.allowDuplicateOwner,
 	});
 	const tools = normalizeBuiltinTools(params.tools ?? profile.tools);
+	const hierarchyMode =
+		activeMeepoRuntime?.config.policies.hierarchy ?? loadMeepoConfig().policies.hierarchy;
 	const result = spawnSubagent({
 		title: params.title,
 		task: params.task,
@@ -3505,6 +3511,7 @@ function spawnChildFromParams(pi: ExtensionAPI, ctx: ExtensionContext, params: {
 		spawnedByAgentId: actor.kind === "agent" ? actor.agentId : null,
 		createdByKind: actor.kind === "agent" ? "agent" : "root",
 		allowDuplicateOwner: params.allowDuplicateOwner,
+		hierarchyMode,
 		spawnSessionId: ctx.sessionManager.getSessionId(),
 		spawnSessionFile: ctx.sessionManager.getSessionFile(),
 	});
@@ -4584,6 +4591,7 @@ async function runServiceSpawnWizard(ctx: ExtensionContext): Promise<void> {
  * Invoked by MeepoRuntime.start(); capability gating lands in a follow-up ticket.
  */
 function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
+	activeMeepoRuntime = runtime;
 	const noWaitMode = runtime.config.policies.noWait;
 	if (childRuntimeEnvironment) {
 		registerChildRuntime(pi, childRuntimeEnvironment, { noWaitMode });

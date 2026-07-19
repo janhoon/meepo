@@ -16,6 +16,8 @@ import {
 	updateAgent,
 	upsertAgentOrg,
 } from "./registry.js";
+import type { HierarchyPolicyMode } from "./config.js";
+import { evaluateHierarchySpawn } from "./hierarchy-policy.js";
 import { resolveProfileRoleKey } from "./profile-metadata.js";
 import { assertTaskLeaseAvailable, getTask, linkTaskAgent, unlinkTaskAgent } from "./task-registry.js";
 import type { TaskRecord } from "./task-types.js";
@@ -406,14 +408,11 @@ function ensureAgentRoleKey(agentId: string): string | null {
 	return inferredRoleKey;
 }
 
-function assertSpawnEdgePolicy(parentAgentId: string, childRoleKey: string | null): void {
+function lookupReportsToEdgePolicy(
+	parentRoleKey: string,
+	childRoleKey: string,
+): { id: string; allowSpawn: boolean } | null {
 	const db = getTmuxAgentsDb();
-	const parentRoleKey = ensureAgentRoleKey(parentAgentId);
-	if (!parentRoleKey || !childRoleKey) {
-		throw new Error(
-			`Cannot create hierarchy edge ${parentAgentId} -> child because ${!parentRoleKey ? "parent" : "child"} role is missing from agent_roles.`,
-		);
-	}
 	const row = db
 		.prepare(
 			`SELECT id, allow_spawn
@@ -424,12 +423,34 @@ function assertSpawnEdgePolicy(parentAgentId: string, childRoleKey: string | nul
 			 LIMIT 1`,
 		)
 		.get(parentRoleKey, childRoleKey) as { id: string; allow_spawn: number } | undefined;
-	if (!row) {
-		throw new Error(`No reports_to role edge policy allows ${parentRoleKey} to spawn ${childRoleKey}.`);
+	if (!row) return null;
+	return { id: row.id, allowSpawn: Number(row.allow_spawn) !== 0 };
+}
+
+/**
+ * Apply hierarchy spawn policy for parent→child.
+ * Returns advisory notes for operator-visible logging when mode is advisory.
+ */
+function assertSpawnEdgePolicy(
+	parentAgentId: string,
+	childRoleKey: string | null,
+	mode: HierarchyPolicyMode = "enforce",
+): string | null {
+	const parentRoleKey = ensureAgentRoleKey(parentAgentId);
+	const edgePolicy =
+		parentRoleKey && childRoleKey ? lookupReportsToEdgePolicy(parentRoleKey, childRoleKey) : null;
+	const decision = evaluateHierarchySpawn({
+		mode,
+		parentAgentId,
+		parentRoleKey,
+		childRoleKey,
+		edgePolicy,
+	});
+	if (decision.outcome === "deny") {
+		throw new Error(decision.reason);
 	}
-	if (Number(row.allow_spawn) === 0) {
-		throw new Error(`Role edge policy ${row.id} does not allow spawning ${childRoleKey} under ${parentRoleKey}.`);
-	}
+	if (decision.outcome === "advisory") return decision.note;
+	return decision.note ?? null;
 }
 
 export function spawnSubagent(input: SpawnSubagentInput): SpawnSubagentResult {
@@ -440,7 +461,11 @@ export function spawnSubagent(input: SpawnSubagentInput): SpawnSubagentResult {
 	const db = getTmuxAgentsDb();
 	const projectKey = getProjectKey(spawnCwd);
 	const childRoleKey = existingRoleKeyForProfile(input.profile.name, input.profile.roleKey);
-	if (input.parentAgentId) assertSpawnEdgePolicy(input.parentAgentId, childRoleKey);
+	const hierarchyMode: HierarchyPolicyMode = input.hierarchyMode ?? "enforce";
+	let hierarchyAdvisory: string | null = null;
+	if (input.parentAgentId) {
+		hierarchyAdvisory = assertSpawnEdgePolicy(input.parentAgentId, childRoleKey, hierarchyMode);
+	}
 	const orgId = ensureSpawnOrg(input, projectKey, input.parentAgentId);
 	const createRunOptions: CreateRunArtifactsOptions = {
 		agentId,
@@ -575,9 +600,29 @@ export function spawnSubagent(input: SpawnSubagentInput): SpawnSubagentResult {
 			task: input.task,
 			spawnCwd,
 			priority: input.priority,
+			hierarchyMode,
 		},
 		createdAt: now,
 	});
+	if (hierarchyAdvisory) {
+		createAgentEvent(db, {
+			id: randomUUID(),
+			agentId,
+			eventType: "hierarchy_policy_advisory",
+			summary: hierarchyAdvisory,
+			payload: {
+				mode: hierarchyMode,
+				parentAgentId: input.parentAgentId,
+				childRoleKey,
+			},
+			createdAt: now,
+		});
+		appendRunEvent(runArtifacts.runDir, "hierarchy_policy_advisory", hierarchyAdvisory, {
+			mode: hierarchyMode,
+			parentAgentId: input.parentAgentId,
+			childRoleKey,
+		});
+	}
 	for (const artifact of [
 		{ kind: "task", path: runArtifacts.taskFile },
 		{ kind: "runtime_appendix", path: runArtifacts.runtimeAppendixFile },
