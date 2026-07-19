@@ -6,9 +6,7 @@ Instead of letting one orchestrator or one reviewer do all acceptance work inlin
 
 ## Why review packs exist
 
-Review packs preserve the strongest parts of G Stack's review methodology while using Pi's task-first tmux-backed subagent system.
-
-G Stack contributes:
+Review packs use Pi's task-first tmux-backed subagent system to get multi-angle acceptance coverage:
 
 - structured review methodology
 - adversarial review methodology
@@ -83,9 +81,7 @@ Do not silently pick one reviewer and discard the rest.
 
 ## Browser acceptance
 
-Browser acceptance in a review pack should go to `qa-lead` or `design-lead` and should prefer **G Stack Browser**.
-
-Pi browser tools remain fallback-only during migration and troubleshooting.
+Browser acceptance in a review pack should go to `qa-lead` or `design-lead`.
 
 ## What not to do
 
@@ -94,4 +90,3 @@ Do not:
 - self-accept non-trivial code in the coordinator
 - hide cross-model review inside one opaque subagent
 - invent a separate role just for outside-voice review
-- use Pi browser tools as the default browser path for review-pack QA

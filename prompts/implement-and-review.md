@@ -33,4 +33,4 @@ Rules:
 - “Keep going” means keep taking productive actions across ready tasks; it does not mean keeping the current turn open while waiting for child progress.
 - Do not perform final acceptance QA yourself for non-trivial implementation work.
 - Outside-voice review is a mode of `principal-engineer`, not a separate agent family. Use `model` overrides on `subagent_spawn` to get cross-model coverage.
-- Browser acceptance should go to `qa-lead` or `design-lead` with G Stack Browser as the default browser path. Pi browser tools are fallback-only during migration.
+- Browser acceptance should go to `qa-lead` or `design-lead`.

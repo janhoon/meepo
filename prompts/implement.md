@@ -29,4 +29,4 @@ Rules:
 - Treat `A depends_on B` as a dispatch gate: no agent for A until B is resolved; when B is done, `task_move`/`task_dispatch_ready` should spawn A if all prerequisites are resolved and `recommendedProfile` is set.
 - “Keep going” means keep taking productive actions across ready tasks; it does not mean keeping the current turn open while waiting for asynchronous child progress.
 - Do not self-accept non-trivial implementation work. Your own checks are triage only; acceptance belongs to the review pack.
-- Browser-facing acceptance should go to `qa-lead` or `design-lead`, with G Stack Browser as the default browser path and Pi browser tools as fallback-only.
+- Browser-facing acceptance should go to `qa-lead` or `design-lead`.

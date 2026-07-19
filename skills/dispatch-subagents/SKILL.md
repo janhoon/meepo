@@ -24,7 +24,7 @@ Use this skill when work should be split across specialized child agents or isol
   - legacy helpers `scout`, `planner`, `reviewer`, and `coordinator-helper` when those narrower compatibility roles are still the best fit
 - For non-trivial code review, prefer a sibling review pack over a single reviewer.
 - Outside-voice review is a mode of `principal-engineer`; use `model` overrides on `subagent_spawn` instead of inventing a separate agent family.
-- Browser-facing work should prefer `qa-lead` or `design-lead` with G Stack Browser as the default browser path. Pi browser tools are fallback-only during migration.
+- Browser-facing work should prefer `qa-lead` or `design-lead`.
 - Keep each child task focused and concrete.
 - Include exact file paths and expected deliverables in the delegated task.
 - Dispatch is dependency-aware: spawn agents for dependency-free ready tickets, do not spawn agents for tickets with unresolved prerequisites, and after a prerequisite reaches `done`, inspect/spawn newly unblocked tickets immediately.
