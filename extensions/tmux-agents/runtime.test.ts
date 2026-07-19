@@ -1,13 +1,43 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import {
+	FULL_COORDINATOR_COMMAND_NAMES,
 	FULL_COORDINATOR_TOOL_NAMES,
+	coordinatorCommandNamesForConfig,
 	coordinatorToolNamesForConfig,
 	createCoreDefaultConfig,
 	createFullDefaultConfig,
 	loadMeepoConfig,
+	type MeepoCapability,
 } from "./config.js";
-import { createMeepoRuntime } from "./runtime.js";
+import { createCapabilityFilteredExtensionApi, createMeepoRuntime } from "./runtime.js";
+
+function createRecordingPi(): { pi: ExtensionAPI } {
+	const pi = {
+		registerTool(_tool: { name: string }) {},
+		registerCommand(_name: string) {},
+		registerShortcut() {},
+		on() {},
+	} as unknown as ExtensionAPI;
+	return { pi };
+}
+
+/** Simulate today's registrar: attempt every known tool/command/shortcut. */
+function registerAllKnownSurface(pi: ExtensionAPI): void {
+	for (const name of FULL_COORDINATOR_TOOL_NAMES) {
+		pi.registerTool({ name } as Parameters<ExtensionAPI["registerTool"]>[0]);
+	}
+	// child-only
+	pi.registerTool({ name: "subagent_publish" } as Parameters<ExtensionAPI["registerTool"]>[0]);
+	for (const name of FULL_COORDINATOR_COMMAND_NAMES) {
+		pi.registerCommand(name, { description: name, handler: async () => {} });
+	}
+	// five operator shortcuts (as in index today)
+	for (let i = 0; i < 5; i++) {
+		pi.registerShortcut("k" as never, { description: "x", handler: async () => {} });
+	}
+}
 
 describe("loadMeepoConfig", () => {
 	it("defaults to full preset with all coordinator capabilities (operator compatibility)", () => {
@@ -43,7 +73,6 @@ describe("MeepoRuntime full-default tool surface", () => {
 		assert.deepEqual(names, [...FULL_COORDINATOR_TOOL_NAMES]);
 		assert.equal(names.length, FULL_COORDINATOR_TOOL_NAMES.length);
 
-		// Spot-check families operators rely on today
 		for (const required of [
 			"subagent_spawn",
 			"subagent_message",
@@ -58,8 +87,10 @@ describe("MeepoRuntime full-default tool surface", () => {
 			assert.equal(runtime.shouldRegisterTool(required), true);
 		}
 
-		// Child-only publish is not a coordinator registration plan entry
-		assert.equal(runtime.shouldRegisterTool("subagent_publish"), false);
+		// Child-only publish is allowed through the filter when a child registers it,
+		// but is not part of the coordinator plan list.
+		assert.ok(!names.includes("subagent_publish"));
+		assert.equal(runtime.shouldRegisterTool("subagent_publish"), true);
 	});
 
 	it("createFullDefaultConfig matches loadMeepoConfig() tool plan", () => {
@@ -69,7 +100,7 @@ describe("MeepoRuntime full-default tool surface", () => {
 		assert.deepEqual(fromFactory, [...FULL_COORDINATOR_TOOL_NAMES]);
 	});
 
-	it("core config plans a thinner agents-only surface (catalog readiness for later tickets)", () => {
+	it("core config plans a thinner agents-only surface", () => {
 		const runtime = createMeepoRuntime({ config: createCoreDefaultConfig() });
 		const names = runtime.listCoordinatorToolNames();
 		assert.ok(names.includes("subagent_spawn"));
@@ -77,5 +108,84 @@ describe("MeepoRuntime full-default tool surface", () => {
 		assert.ok(!names.includes("task_create"));
 		assert.ok(!names.includes("tmux_service_start"));
 		assert.ok(names.length < FULL_COORDINATOR_TOOL_NAMES.length);
+	});
+});
+
+describe("capability-gated registration", () => {
+	it("full config registers all coordinator tools, commands, and shortcuts", () => {
+		const config = createFullDefaultConfig();
+		const rec = createRecordingPi();
+		const filter = createCapabilityFilteredExtensionApi(rec.pi, config);
+		registerAllKnownSurface(filter.api);
+
+		assert.deepEqual(
+			filter.registeredTools.filter((n) => n !== "subagent_publish"),
+			[...FULL_COORDINATOR_TOOL_NAMES],
+		);
+		assert.ok(filter.registeredTools.includes("subagent_publish"));
+		assert.deepEqual(filter.registeredCommands, [...FULL_COORDINATOR_COMMAND_NAMES]);
+		assert.equal(filter.registeredShortcutCount, 5);
+	});
+
+	it("core config registers agents tools/commands only — no tasks, services, or ui chrome", () => {
+		const config = createCoreDefaultConfig();
+		const rec = createRecordingPi();
+		const filter = createCapabilityFilteredExtensionApi(rec.pi, config);
+		registerAllKnownSurface(filter.api);
+
+		const planned = coordinatorToolNamesForConfig(config);
+		assert.deepEqual(
+			filter.registeredTools.filter((n) => n !== "subagent_publish"),
+			planned,
+		);
+		assert.ok(filter.registeredTools.includes("subagent_spawn"));
+		assert.ok(filter.registeredTools.includes("subagent_inbox"));
+		assert.ok(!filter.registeredTools.includes("task_create"));
+		assert.ok(!filter.registeredTools.includes("task_dispatch_ready"));
+		assert.ok(!filter.registeredTools.includes("tmux_service_start"));
+
+		const plannedCommands = coordinatorCommandNamesForConfig(config);
+		assert.deepEqual(filter.registeredCommands, plannedCommands);
+		assert.ok(filter.registeredCommands.includes("agents"));
+		assert.ok(filter.registeredCommands.includes("agent-attention"));
+		assert.ok(!filter.registeredCommands.includes("task-board"));
+		assert.ok(!filter.registeredCommands.includes("tasks"));
+		assert.ok(!filter.registeredCommands.includes("services"));
+		assert.equal(filter.registeredShortcutCount, 0);
+	});
+
+	it("supports capability independence: services without tasks", () => {
+		const config = loadMeepoConfig({
+			env: {},
+			preset: "core",
+			capabilities: ["agents.core", "services"] as MeepoCapability[],
+		});
+		const rec = createRecordingPi();
+		const filter = createCapabilityFilteredExtensionApi(rec.pi, config);
+		registerAllKnownSurface(filter.api);
+
+		assert.ok(filter.registeredTools.includes("subagent_spawn"));
+		assert.ok(filter.registeredTools.includes("tmux_service_start"));
+		assert.ok(!filter.registeredTools.includes("task_create"));
+		assert.ok(!filter.registeredTools.includes("subagent_inbox")); // attention not enabled
+		assert.ok(filter.registeredCommands.includes("services"));
+		assert.ok(!filter.registeredCommands.includes("tasks"));
+	});
+
+	it("MeepoRuntime.start applies the filter when a registrar is provided", () => {
+		const rec = createRecordingPi();
+		const runtime = createMeepoRuntime({
+			config: createCoreDefaultConfig(),
+			registerCoordinatorTools: (pi) => {
+				registerAllKnownSurface(pi);
+			},
+		});
+		runtime.start(rec.pi);
+		const snap = runtime.getLastRegistrationSnapshot();
+		assert.ok(snap);
+		assert.ok(snap!.tools.includes("subagent_spawn"));
+		assert.ok(!snap!.tools.includes("task_create"));
+		assert.ok(!snap!.tools.includes("tmux_service_start"));
+		assert.equal(snap!.shortcutCount, 0);
 	});
 });

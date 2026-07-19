@@ -274,3 +274,111 @@ export function coordinatorToolNamesForConfig(config: MeepoConfig): string[] {
 	const enabled = new Set(config.capabilities);
 	return FULL_COORDINATOR_TOOL_NAMES.filter((name) => enabled.has(TOOL_CAPABILITY[name]));
 }
+
+/** Slash commands registered today under full Meepo. */
+export const FULL_COORDINATOR_COMMAND_NAMES = [
+	// agents.core
+	"agents",
+	"agent-open",
+	"agent-message",
+	"agent-capture",
+	"agent-stop",
+	"agent-sync",
+	"agent-cleanup",
+	// agents.attention
+	"agent-attention",
+	// tasks.core + ui board
+	"task-board",
+	"standup",
+	"tasks",
+	"task-new",
+	"task-open",
+	"task-move",
+	"task-note",
+	// tasks.ops
+	"task-link-agent",
+	"task-unlink-agent",
+	"task-attention",
+	"task-sync",
+	// tasks.graph
+	"task-subtree",
+	// agents + tasks (spawn against task)
+	"task-spawn",
+	// services
+	"service-start",
+	"services",
+	"service-open",
+	"service-capture",
+	"service-stop",
+	"service-sync",
+] as const;
+
+export type FullCoordinatorCommandName = (typeof FULL_COORDINATOR_COMMAND_NAMES)[number];
+
+/**
+ * Capability required to register each slash command.
+ * UI-heavy board/standup require both tasks.core and ui in practice — gated on `ui`
+ * so core (agents only) stays free of Kanban operator chrome.
+ */
+export const COMMAND_CAPABILITY: Record<FullCoordinatorCommandName, MeepoCapability> = {
+	"agents": "agents.core",
+	"agent-open": "agents.core",
+	"agent-message": "agents.core",
+	"agent-capture": "agents.core",
+	"agent-stop": "agents.core",
+	"agent-sync": "agents.core",
+	"agent-cleanup": "agents.core",
+	"agent-attention": "agents.attention",
+	"task-board": "ui",
+	"standup": "ui",
+	"tasks": "tasks.core",
+	"task-new": "tasks.core",
+	"task-open": "tasks.core",
+	"task-move": "tasks.core",
+	"task-note": "tasks.core",
+	"task-link-agent": "tasks.ops",
+	"task-unlink-agent": "tasks.ops",
+	"task-attention": "tasks.ops",
+	"task-sync": "tasks.ops",
+	"task-subtree": "tasks.graph",
+	// Needs agents.core to spawn; listed under agents.core so core can still attach spawn UX later if desired.
+	// Full preset has both; without tasks, task-spawn is less useful — gate on tasks.core.
+	"task-spawn": "tasks.core",
+	"service-start": "services",
+	"services": "services",
+	"service-open": "services",
+	"service-capture": "services",
+	"service-stop": "services",
+	"service-sync": "services",
+};
+
+/** Shortcuts are operator chrome; require ui capability. */
+export const SHORTCUT_CAPABILITY: MeepoCapability = "ui";
+
+export function coordinatorCommandNamesForConfig(config: MeepoConfig): string[] {
+	const enabled = new Set(config.capabilities);
+	return FULL_COORDINATOR_COMMAND_NAMES.filter((name) => enabled.has(COMMAND_CAPABILITY[name]));
+}
+
+export function shouldRegisterCoordinatorTool(config: MeepoConfig, toolName: string): boolean {
+	if (toolName === "subagent_publish") {
+		// Child-only tool; always allowed when child runtime registers it.
+		return true;
+	}
+	if ((FULL_COORDINATOR_TOOL_NAMES as readonly string[]).includes(toolName)) {
+		return hasCapability(config, TOOL_CAPABILITY[toolName as FullCoordinatorToolName]);
+	}
+	// Unknown tools: allow (forward-compatible; child/custom tools not in catalog).
+	return true;
+}
+
+export function shouldRegisterCoordinatorCommand(config: MeepoConfig, commandName: string): boolean {
+	if ((FULL_COORDINATOR_COMMAND_NAMES as readonly string[]).includes(commandName)) {
+		return hasCapability(config, COMMAND_CAPABILITY[commandName as FullCoordinatorCommandName]);
+	}
+	return true;
+}
+
+export function shouldRegisterCoordinatorShortcut(config: MeepoConfig): boolean {
+	return hasCapability(config, SHORTCUT_CAPABILITY);
+}
