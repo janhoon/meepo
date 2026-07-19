@@ -47,6 +47,7 @@ import {
 } from "./registry.js";
 import type { ListAgentAttentionItemsV2Filters } from "./registry.js";
 import { collectQueuedWakeCoalescingContext } from "./wake-coalescing.js";
+import { createMeepoRuntime, type MeepoRuntime } from "./runtime.js";
 import {
 	assertTaskLeaseAvailable,
 	cancelTaskLink,
@@ -4579,7 +4580,11 @@ async function runServiceSpawnWizard(ctx: ExtensionContext): Promise<void> {
 	}
 }
 
-export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
+/**
+ * Coordinator + shared tool/command registration (today's full surface).
+ * Invoked by MeepoRuntime.start(); capability gating lands in a follow-up ticket.
+ */
+function registerTmuxAgents(pi: ExtensionAPI, _runtime: MeepoRuntime): void {
 	if (childRuntimeEnvironment) {
 		registerChildRuntime(pi, childRuntimeEnvironment);
 	} else {
@@ -6363,4 +6368,15 @@ export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 		attentionWakePoll = undefined;
 		closeTmuxAgentsDb();
 	});
+}
+
+/**
+ * Pi extension entrypoint. Boots MeepoRuntime with full-default config, then registers
+ * today's coordinator/child surface. Capability gating uses the runtime plan in later tickets.
+ */
+export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
+	const runtime = createMeepoRuntime({
+		registerCoordinatorTools: registerTmuxAgents,
+	});
+	runtime.start(pi);
 }

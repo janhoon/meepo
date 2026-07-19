@@ -2,7 +2,11 @@
   "name": "meepo",
   "version": "0.1.0",
   "description": "tmux-backed Pi subagents and tracked service tooling",
+  "type": "module",
   "keywords": ["pi-package"],
+  "scripts": {
+    "test": "tsx --test extensions/tmux-agents/runtime.test.ts"
+  },
   "pi": {
     "extensions": ["./extensions"],
     "skills": ["./skills"],
@@ -14,5 +18,8 @@
     "@mariozechner/pi-coding-agent": "*",
     "@mariozechner/pi-tui": "*",
     "@sinclair/typebox": "*"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0"
   }
 }
