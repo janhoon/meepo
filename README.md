@@ -43,7 +43,7 @@ Launch API servers, frontend dev servers, watchers, or other long-running comman
 
 ### Orchestration scaffolding
 
-The package also includes reusable agent profiles, orchestration skills, and prompt templates for splitting work across both legacy scout/planner/worker/reviewer flows and newer org-style role flows backed by upstream G Stack methodology.
+The package also includes reusable agent profiles, orchestration skills, and prompt templates for splitting work across both legacy scout/planner/worker/reviewer flows and newer org-style role flows.
 
 ## Included in the box
 
@@ -74,6 +74,23 @@ Or use it directly from a local checkout:
 
 ```bash
 pi install /path/to/meepo
+```
+
+## Platform vs presets (MeepoRuntime)
+
+Meepo is a **platform** (tracked tmux subagents, registry, optional tasks/services) plus optional **doctrine** (org chart, no-wait enforce, review-pack personas).
+
+- **Default (full):** today’s full operator experience — all tools, hierarchy enforce, no-wait enforce, org role/edge seeds, package agent personas.
+- **Core consumer:** set `MEEPO_PRESET=core` for agents-core tools only, soft policies, and no org seeder.
+
+Config keys, capability→tool maps, policy modes, profile frontmatter (`role` / `lease`), and DB upgrade notes live in:
+
+- [`docs/MEEPO_RUNTIME_CONFIG.md`](docs/MEEPO_RUNTIME_CONFIG.md)
+
+Run unit tests (no tmux):
+
+```bash
+npm test
 ```
 
 ## Main tools
@@ -166,7 +183,7 @@ In other words: split the work, keep the replicas coordinated, and avoid the cla
 - Child agents report upward proactively through the registry instead of relying on status polling.
 - Bridge-backed children expose transport state in operator-facing surfaces. The full vocabulary is `legacy`, `launching`, `listening`, `live`, `fallback`, `disconnected`, `stopped`, `error`, and `lost`. A healthy launch progresses `launching → listening → live`.
 - The coordinator can now attempt live downward child delivery through the RPC bridge before falling back to the child-side mailbox poll path.
-- First-wave browser-facing role work prefers G Stack Browser-backed roles such as `qa-lead` and `design-lead`; Pi browser tools remain fallback-only during migration and troubleshooting.
+- Browser-facing acceptance work should go to roles such as `qa-lead` and `design-lead`.
 - The task board is task-first. Agents are linked executors, not the board cards themselves.
 - Task health/liveness is derived separately from the Kanban lane: `task.status` controls columns and workflow state, while health flags such as `owner_active`, `stale`, `blocked_external`, `approval_required`, `empty_or_no_progress`, and `needs_review` explain operational liveness and next action.
 - Search policy is ripgrep-first. `find` is intentionally excluded from the normal workflow.
@@ -175,12 +192,10 @@ In other words: split the work, keep the replicas coordinated, and avoid the cla
 
 ## Docs
 
+- `docs/MEEPO_RUNTIME_CONFIG.md` — MeepoRuntime config, presets, policies, upgrades
 - `docs/TMUX_SUBAGENTS_IMPLEMENTATION.md`
 - `docs/TMUX_SUBAGENTS_PROGRESS.md`
-- `docs/GSTACK_INTEGRATION.md`
-- `docs/GSTACK_UPSTREAM_STATUS.md`
 - `docs/REVIEW_PACKS.md`
-- `docs/GSTACK_ROLLOUT.md`
 
 ## Final pitch
 
