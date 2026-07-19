@@ -1,13 +1,23 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it } from "node:test";
 import {
-	LEGACY_REVIEW_LEASE_PROFILE_NAMES,
+	clearProfileCompatRegistry,
 	buildProfileFieldsFromFrontmatter,
+	getProfileCompatRegistry,
 	parseProfileMetadataFields,
+	registerFullMeepoProfileCompat,
 	resolveProfileLeaseKind,
 	resolveProfileRoleKey,
 	toTaskLeaseKind,
 } from "./profile-metadata.js";
+
+beforeEach(() => {
+	clearProfileCompatRegistry();
+});
+
+afterEach(() => {
+	clearProfileCompatRegistry();
+});
 
 describe("parseProfileMetadataFields", () => {
 	it("returns nulls when metadata is absent", () => {
@@ -44,35 +54,46 @@ describe("parseProfileMetadataFields", () => {
 	});
 });
 
-describe("resolveProfileLeaseKind (metadata wins, name fallback)", () => {
-	it("uses metadata lease for custom profiles not on the legacy name list", () => {
-		assert.ok(!LEGACY_REVIEW_LEASE_PROFILE_NAMES.has("security-auditor"));
+describe("resolveProfileLeaseKind without hardcoded tables (contract)", () => {
+	it("metadata-only custom profile is review without name-list membership", () => {
+		assert.equal(getProfileCompatRegistry().reviewLeaseNames.size, 0);
 		assert.equal(resolveProfileLeaseKind("security-auditor", "review"), "review");
 		assert.equal(toTaskLeaseKind(resolveProfileLeaseKind("security-auditor", "review")), "review");
 	});
 
-	it("falls back to legacy name table when metadata lease is absent", () => {
-		assert.equal(resolveProfileLeaseKind("principal-engineer", null), "review");
-		assert.equal(resolveProfileLeaseKind("reviewer", undefined), "review");
-		assert.equal(resolveProfileLeaseKind("qa-lead"), "review");
-		assert.equal(resolveProfileLeaseKind("engineer"), "exclusive");
-		assert.equal(resolveProfileLeaseKind("worker"), "exclusive");
+	it("without compat registry, unknown names default to exclusive", () => {
+		assert.equal(resolveProfileLeaseKind("principal-engineer", null), "exclusive");
+		assert.equal(resolveProfileLeaseKind("reviewer", null), "exclusive");
+		assert.equal(resolveProfileLeaseKind("qa-lead", null), "exclusive");
 	});
 
-	it("metadata overrides even when the name is not a legacy reviewer", () => {
+	it("full-meepo compat registry restores historical name fallbacks", () => {
+		registerFullMeepoProfileCompat();
+		assert.equal(resolveProfileLeaseKind("principal-engineer", null), "review");
+		assert.equal(resolveProfileLeaseKind("reviewer", null), "review");
+		assert.equal(resolveProfileLeaseKind("qa-lead", null), "review");
+		assert.equal(resolveProfileLeaseKind("engineer", null), "exclusive");
+	});
+
+	it("metadata overrides compat registry", () => {
+		registerFullMeepoProfileCompat();
 		assert.equal(resolveProfileLeaseKind("engineer", "none"), "none");
 		assert.equal(toTaskLeaseKind("none"), "review");
-		assert.equal(toTaskLeaseKind("shared"), "review");
 		assert.equal(toTaskLeaseKind("exclusive"), "exclusive");
 	});
 });
 
-describe("resolveProfileRoleKey", () => {
+describe("resolveProfileRoleKey without buried aliases", () => {
 	it("prefers metadata role", () => {
 		assert.equal(resolveProfileRoleKey("principal-engineer", "staff-reviewer"), "staff-reviewer");
 	});
 
-	it("uses legacy principal-engineer → reviewer alias when metadata absent", () => {
+	it("without compat, principal-engineer is not aliased", () => {
+		assert.equal(resolveProfileRoleKey("principal-engineer", null), "principal-engineer");
+	});
+
+	it("full-meepo compat registers principal-engineer → reviewer", () => {
+		registerFullMeepoProfileCompat();
 		assert.equal(resolveProfileRoleKey("principal-engineer", null), "reviewer");
 	});
 
@@ -81,34 +102,37 @@ describe("resolveProfileRoleKey", () => {
 	});
 });
 
-describe("buildProfileFieldsFromFrontmatter", () => {
-	it("builds fields with lease/role metadata for a custom review profile", () => {
+describe("full-preset profile frontmatter parity", () => {
+	it("principal-engineer frontmatter carries review lease + reviewer role", () => {
+		const fields = buildProfileFieldsFromFrontmatter(
+			{
+				name: "principal-engineer",
+				description: "Technical acceptance",
+				lease: "review",
+				role: "reviewer",
+			},
+			"Review code.",
+		);
+		assert.ok(fields);
+		assert.equal(fields!.lease, "review");
+		assert.equal(fields!.roleKey, "reviewer");
+		// Metadata alone is enough — no compat registry required
+		assert.equal(resolveProfileLeaseKind(fields!.name, fields!.lease), "review");
+		assert.equal(resolveProfileRoleKey(fields!.name, fields!.roleKey), "reviewer");
+	});
+
+	it("custom metadata-only profile works without name-table membership", () => {
 		const fields = buildProfileFieldsFromFrontmatter(
 			{
 				name: "security-auditor",
 				description: "Security review",
-				tools: "read, bash, grep",
 				lease: "review",
 				role: "reviewer",
 			},
-			"You audit security.",
+			"Audit.",
 		);
 		assert.ok(fields);
-		assert.equal(fields!.name, "security-auditor");
-		assert.equal(fields!.lease, "review");
-		assert.equal(fields!.roleKey, "reviewer");
 		assert.equal(resolveProfileLeaseKind(fields!.name, fields!.lease), "review");
-	});
-
-	it("defaults metadata fields to null when omitted", () => {
-		const fields = buildProfileFieldsFromFrontmatter(
-			{ name: "worker", description: "Implement" },
-			"Do the work.",
-		);
-		assert.ok(fields);
-		assert.equal(fields!.lease, null);
-		assert.equal(fields!.roleKey, null);
-		assert.equal(fields!.canSpawn, null);
-		assert.equal(resolveProfileLeaseKind(fields!.name, fields!.lease), "exclusive");
+		assert.equal(getProfileCompatRegistry().reviewLeaseNames.has("security-auditor"), false);
 	});
 });

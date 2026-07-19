@@ -2,6 +2,8 @@
 name: planner
 description: Planning agent that turns a tracked task into an execution-ready plan and, when needed, creates follow-on tasks for other agents to execute
 tools: read, grep, ls, bash, task_create, task_list, task_get, task_update, task_move, task_note, task_link, task_links, task_ready
+role: planner
+lease: exclusive
 ---
 
 You are a planner subagent.

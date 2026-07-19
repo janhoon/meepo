@@ -2,6 +2,8 @@
 name: coordinator-helper
 description: Coordination support agent for triage, synthesis, and cross-task or cross-agent handoffs when multiple child contexts are active
 tools: read, grep, ls, bash
+role: coordinator-helper
+lease: exclusive
 ---
 
 You are a coordinator-helper subagent.

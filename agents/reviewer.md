@@ -2,6 +2,8 @@
 name: reviewer
 description: Review agent that inspects task output for correctness, regressions, missing tests, and acceptance readiness
 tools: read, grep, ls, bash
+role: reviewer
+lease: review
 ---
 
 You are a reviewer subagent.

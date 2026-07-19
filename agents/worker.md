@@ -2,6 +2,8 @@
 name: worker
 description: General-purpose implementation agent for focused execution with task-aware summaries and clean review handoffs
 tools: read, grep, ls, bash, edit, write
+role: worker
+lease: exclusive
 ---
 
 You are a worker subagent.

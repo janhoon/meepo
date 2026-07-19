@@ -1,18 +1,63 @@
 import type { ProfileLeaseKind } from "./types.js";
 
-/** Historical name-table fallbacks (expand phase — keep until contract ticket removes them). */
-export const LEGACY_REVIEW_LEASE_PROFILE_NAMES = new Set([
-	"principal-engineer",
-	"qa-lead",
-	"reviewer",
-]);
+export const PROFILE_LEASE_KINDS = ["exclusive", "review", "shared", "none"] as const satisfies readonly ProfileLeaseKind[];
 
-/** Historical role alias: profile name → role key when frontmatter role is absent. */
-export const LEGACY_PROFILE_ROLE_ALIASES: Record<string, string> = {
+/**
+ * Optional compatibility registry for installs that still rely on name→lease/role
+ * without frontmatter. Full Meepo registers the historical defaults via
+ * `registerFullMeepoProfileCompat()`; core/custom consumers can leave this empty
+ * and rely solely on frontmatter metadata.
+ */
+export interface ProfileCompatRegistry {
+	/** Profile names treated as review leases when frontmatter lease is absent. */
+	reviewLeaseNames: Set<string>;
+	/** Profile name → role key when frontmatter role is absent. */
+	roleAliases: Map<string, string>;
+}
+
+const compat: ProfileCompatRegistry = {
+	reviewLeaseNames: new Set(),
+	roleAliases: new Map(),
+};
+
+/** Historical full-meepo defaults (formerly hardcoded module constants). */
+export const FULL_MEEPO_REVIEW_LEASE_NAMES = ["principal-engineer", "qa-lead", "reviewer"] as const;
+export const FULL_MEEPO_ROLE_ALIASES: Readonly<Record<string, string>> = {
 	"principal-engineer": "reviewer",
 };
 
-export const PROFILE_LEASE_KINDS = ["exclusive", "review", "shared", "none"] as const satisfies readonly ProfileLeaseKind[];
+/** Register full-meepo name fallbacks (idempotent). Called by MeepoRuntime on full preset. */
+export function registerFullMeepoProfileCompat(): void {
+	for (const name of FULL_MEEPO_REVIEW_LEASE_NAMES) {
+		compat.reviewLeaseNames.add(name);
+	}
+	for (const [from, to] of Object.entries(FULL_MEEPO_ROLE_ALIASES)) {
+		compat.roleAliases.set(from, to);
+	}
+}
+
+/** Clear compat registry (tests / core-only process isolation). */
+export function clearProfileCompatRegistry(): void {
+	compat.reviewLeaseNames.clear();
+	compat.roleAliases.clear();
+}
+
+export function getProfileCompatRegistry(): Readonly<ProfileCompatRegistry> {
+	return {
+		reviewLeaseNames: new Set(compat.reviewLeaseNames),
+		roleAliases: new Map(compat.roleAliases),
+	};
+}
+
+/** @deprecated Use getProfileCompatRegistry(). Kept for test migration. */
+export const LEGACY_REVIEW_LEASE_PROFILE_NAMES = {
+	has(name: string): boolean {
+		return compat.reviewLeaseNames.has(name);
+	},
+	get size(): number {
+		return compat.reviewLeaseNames.size;
+	},
+};
 
 export interface ProfileMetadataFields {
 	roleKey: string | null;
@@ -76,9 +121,7 @@ function parseBooleanish(value: unknown): boolean | null {
 
 /**
  * Resolve lease kind for a profile name + optional metadata lease.
- * Metadata wins; otherwise legacy name table; default exclusive.
- * Task registry uses exclusive|review only — shared/none map to exclusive for conflict checks
- * until a later ticket expands TaskLeaseKind (shared/none treated as non-exclusive for ownership).
+ * Metadata wins; otherwise registered compat name table; default exclusive.
  */
 export function resolveProfileLeaseKind(
 	profileName: string | null | undefined,
@@ -86,21 +129,20 @@ export function resolveProfileLeaseKind(
 ): ProfileLeaseKind {
 	if (metadataLease) return metadataLease;
 	const normalized = (profileName ?? "").trim().toLowerCase();
-	if (LEGACY_REVIEW_LEASE_PROFILE_NAMES.has(normalized)) return "review";
+	if (compat.reviewLeaseNames.has(normalized)) return "review";
 	return "exclusive";
 }
 
 /**
  * Map profile lease to task-registry lease kinds currently supported (exclusive | review).
- * shared/none → exclusive for conflict purposes is wrong for "none"; treat none/shared as review-sibling
- * only when exclusive conflict should not apply: use "review" for shared/none so multiple can attach.
+ * shared/none → review so multiple can attach without exclusive conflict.
  */
 export function toTaskLeaseKind(lease: ProfileLeaseKind): "exclusive" | "review" {
 	return lease === "exclusive" ? "exclusive" : "review";
 }
 
 /**
- * Resolve hierarchy role key: metadata role wins; else legacy alias; else profile name.
+ * Resolve hierarchy role key: metadata role wins; else registered alias; else profile name.
  */
 export function resolveProfileRoleKey(
 	profileName: string,
@@ -108,7 +150,11 @@ export function resolveProfileRoleKey(
 ): string {
 	if (metadataRoleKey?.trim()) return metadataRoleKey.trim();
 	const normalized = profileName.trim();
-	return LEGACY_PROFILE_ROLE_ALIASES[normalized] ?? LEGACY_PROFILE_ROLE_ALIASES[normalized.toLowerCase()] ?? normalized;
+	return (
+		compat.roleAliases.get(normalized) ??
+		compat.roleAliases.get(normalized.toLowerCase()) ??
+		normalized
+	);
 }
 
 export interface ProfileFrontmatterBuildInput {

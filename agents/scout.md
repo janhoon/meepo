@@ -2,6 +2,8 @@
 name: scout
 description: Fast recon agent that maps the codebase, gathers exact file paths, and prepares task-ready context for planning or implementation
 tools: read, grep, ls, bash
+role: scout
+lease: exclusive
 ---
 
 You are a scout subagent.
