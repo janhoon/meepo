@@ -2,6 +2,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseFrontmatter } from "@mariozechner/pi-coding-agent";
+import { buildProfileFieldsFromFrontmatter } from "./profile-metadata.js";
 import type { SubagentProfile } from "./types.js";
 
 const DEFAULT_PROFILE_TOOLS = ["read", "bash", "edit", "write"];
@@ -69,6 +70,30 @@ export function normalizeBuiltinTools(tools: string[] | undefined): string[] {
 	return normalized;
 }
 
+/**
+ * Build a SubagentProfile from frontmatter + body.
+ * Throws when lease/canSpawn values are invalid.
+ */
+export function profileFromFrontmatter(
+	frontmatter: Record<string, unknown>,
+	body: string,
+	filePath: string,
+): SubagentProfile | null {
+	const fields = buildProfileFieldsFromFrontmatter(frontmatter, body);
+	if (!fields) return null;
+	return {
+		name: fields.name,
+		description: fields.description,
+		systemPrompt: fields.systemPrompt,
+		tools: normalizeBuiltinTools(fields.toolNames),
+		model: fields.model,
+		filePath,
+		roleKey: fields.roleKey,
+		lease: fields.lease,
+		canSpawn: fields.canSpawn,
+	};
+}
+
 export function listSubagentProfiles(): SubagentProfile[] {
 	const profilesDir = getProfilesDir();
 	if (!isDirectory(profilesDir)) return [];
@@ -84,21 +109,14 @@ export function listSubagentProfiles(): SubagentProfile[] {
 			continue;
 		}
 		const { frontmatter, body } = parseFrontmatter<Record<string, string>>(content);
-		if (!frontmatter.name || !frontmatter.description) continue;
-		const tools = normalizeBuiltinTools(
-			frontmatter.tools
-				?.split(",")
-				.map((value) => value.trim())
-				.filter(Boolean),
-		);
-		profiles.push({
-			name: frontmatter.name,
-			description: frontmatter.description,
-			systemPrompt: body.trim(),
-			tools,
-			model: frontmatter.model?.trim() || null,
-			filePath,
-		});
+		try {
+			const profile = profileFromFrontmatter(frontmatter, body, filePath);
+			if (profile) profiles.push(profile);
+		} catch (error) {
+			throw new Error(
+				`Invalid profile metadata in ${filePath}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
 	}
 	return profiles.sort((left, right) => left.name.localeCompare(right.name));
 }

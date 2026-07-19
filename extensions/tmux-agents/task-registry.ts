@@ -1,6 +1,17 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import type { AgentAttentionV2State, AgentState, AttentionItemKind, AttentionItemState } from "./types.js";
+import {
+	resolveProfileLeaseKind,
+	toTaskLeaseKind,
+} from "./profile-metadata.js";
+import { getSubagentProfile } from "./profiles.js";
+import type {
+	AgentAttentionV2State,
+	AgentState,
+	AttentionItemKind,
+	AttentionItemState,
+	ProfileLeaseKind,
+} from "./types.js";
 import type {
 	CreateTaskEventInput,
 	CreateTaskInput,
@@ -31,7 +42,6 @@ const ACTIVE_AGENT_STATES: AgentState[] = ["launching", "running", "idle", "wait
 const OPEN_ATTENTION_STATES: AttentionItemState[] = ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user"];
 const OPEN_AGENT_ATTENTION_V2_STATES: AgentAttentionV2State[] = ["open", "acknowledged", "waiting_on_owner"];
 export const TASK_HEALTH_DEFAULT_STALE_AFTER_MS = 24 * 60 * 60 * 1000;
-const TASK_REVIEW_LEASE_PROFILES = new Set(["principal-engineer", "qa-lead", "reviewer"]);
 
 export type TaskLeaseKind = "exclusive" | "review";
 
@@ -118,9 +128,20 @@ function makePlaceholders(count: number): string {
 	return new Array(count).fill("?").join(", ");
 }
 
+/**
+ * Resolve task lease kind for a profile name.
+ * Uses profile frontmatter `lease` when the profile is loadable; otherwise legacy name-table fallback.
+ */
 export function taskLeaseKindForProfile(profile: string | null | undefined): TaskLeaseKind {
-	const normalized = (profile ?? "").trim().toLowerCase();
-	return TASK_REVIEW_LEASE_PROFILES.has(normalized) ? "review" : "exclusive";
+	const name = (profile ?? "").trim();
+	if (!name) return "exclusive";
+	let metadataLease: ProfileLeaseKind | null = null;
+	try {
+		metadataLease = getSubagentProfile(name)?.lease ?? null;
+	} catch {
+		metadataLease = null;
+	}
+	return toTaskLeaseKind(resolveProfileLeaseKind(name, metadataLease));
 }
 
 function toTaskLeaseOwnerRecord(row: Record<string, unknown>): TaskLeaseOwnerRecord {

@@ -141,6 +141,9 @@ export interface SessionChildLinkEntryData {
 	createdAt: number;
 }
 
+/** Task ownership lease kind for a profile (expand: metadata-driven with name fallbacks). */
+export type ProfileLeaseKind = "exclusive" | "review" | "shared" | "none";
+
 export interface SubagentProfile {
 	name: string;
 	description: string;
@@ -148,6 +151,15 @@ export interface SubagentProfile {
 	tools: string[];
 	model: string | null;
 	filePath: string;
+	/** Optional role key for hierarchy (from frontmatter `role`). Null = infer later. */
+	roleKey: string | null;
+	/**
+	 * Lease kind from frontmatter `lease` when set.
+	 * Null means callers should use name-table fallback via resolveProfileLeaseKind.
+	 */
+	lease: ProfileLeaseKind | null;
+	/** Optional can-spawn hint from frontmatter (hierarchy later). */
+	canSpawn: boolean | null;
 }
 
 export interface SpawnSubagentInput {

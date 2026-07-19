@@ -16,6 +16,7 @@ import {
 	updateAgent,
 	upsertAgentOrg,
 } from "./registry.js";
+import { resolveProfileRoleKey } from "./profile-metadata.js";
 import { assertTaskLeaseAvailable, getTask, linkTaskAgent, unlinkTaskAgent } from "./task-registry.js";
 import type { TaskRecord } from "./task-types.js";
 import type {
@@ -362,13 +363,14 @@ function spawnTmuxWindow(launchScript: string, title: string, agentId: string): 
 	);
 }
 
-function roleKeyForProfile(profileName: string): string {
-	return profileName === "principal-engineer" ? "reviewer" : profileName;
+function roleKeyForProfile(profileName: string, metadataRoleKey?: string | null): string {
+	// Expand: metadata role wins; legacy principal-engineer→reviewer alias remains in resolveProfileRoleKey.
+	return resolveProfileRoleKey(profileName, metadataRoleKey);
 }
 
-function existingRoleKeyForProfile(profileName: string): string | null {
+function existingRoleKeyForProfile(profileName: string, metadataRoleKey?: string | null): string | null {
 	const db = getTmuxAgentsDb();
-	const roleKey = roleKeyForProfile(profileName);
+	const roleKey = roleKeyForProfile(profileName, metadataRoleKey);
 	return getAgentRole(db, roleKey) ? roleKey : null;
 }
 
@@ -437,7 +439,7 @@ export function spawnSubagent(input: SpawnSubagentInput): SpawnSubagentResult {
 	const tools = [...input.tools];
 	const db = getTmuxAgentsDb();
 	const projectKey = getProjectKey(spawnCwd);
-	const childRoleKey = existingRoleKeyForProfile(input.profile.name);
+	const childRoleKey = existingRoleKeyForProfile(input.profile.name, input.profile.roleKey);
 	if (input.parentAgentId) assertSpawnEdgePolicy(input.parentAgentId, childRoleKey);
 	const orgId = ensureSpawnOrg(input, projectKey, input.parentAgentId);
 	const createRunOptions: CreateRunArtifactsOptions = {
