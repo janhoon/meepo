@@ -10,10 +10,12 @@ import { randomUUID } from "node:crypto";
 import { getTmuxAgentsDb } from "./db.js";
 import { getRpcBridgeSocketPath, readRpcBridgeStatus, sendRpcBridgeCommand } from "./rpc-client.js";
 import {
-	appendNoWaitPolicyToSystemPrompt,
+	applyNoWaitSystemPrompt,
 	classifyNoWaitBashCommand,
 	formatNoWaitPolicyViolation,
 	getBashCommandFromToolInput,
+	noWaitBashBlockReason,
+	type NoWaitMode,
 } from "./no-wait-policy.js";
 import { TASK_STATES, TASK_WAITING_ON_VALUES } from "./task-types.js";
 import { applyChildPublishToLinkedTask } from "./task-registry.js";
@@ -717,7 +719,17 @@ function publishChildUpdate(
 	};
 }
 
-export function registerChildRuntime(pi: ExtensionAPI, environment: ChildRuntimeEnvironment): void {
+export interface RegisterChildRuntimeOptions {
+	/** Defaults to enforce (historical child behavior). */
+	noWaitMode?: NoWaitMode;
+}
+
+export function registerChildRuntime(
+	pi: ExtensionAPI,
+	environment: ChildRuntimeEnvironment,
+	options: RegisterChildRuntimeOptions = {},
+): void {
+	const noWaitMode: NoWaitMode = options.noWaitMode ?? "enforce";
 	let startedPublished = false;
 	let completePublished = false;
 	let downwardPoll: ReturnType<typeof setInterval> | undefined;
@@ -954,24 +966,28 @@ export function registerChildRuntime(pi: ExtensionAPI, environment: ChildRuntime
 	});
 
 	pi.on("before_agent_start", async (event) => ({
-		systemPrompt: appendNoWaitPolicyToSystemPrompt(event.systemPrompt),
+		systemPrompt: applyNoWaitSystemPrompt(event.systemPrompt, noWaitMode),
 	}));
 
 	pi.on("tool_call", (event) => {
 		if (event.toolName !== "bash") return;
 		const command = getBashCommandFromToolInput(event.input);
 		if (!command) return;
+		const reason = noWaitBashBlockReason(command, noWaitMode);
+		if (!reason) return;
 		const violation = classifyNoWaitBashCommand(command);
-		if (!violation) return;
-		const reason = formatNoWaitPolicyViolation(violation);
 		createAgentEvent(getTmuxAgentsDb(), {
 			id: randomUUID(),
 			agentId: environment.childId,
 			eventType: "policy_blocked_wait_command",
-			summary: violation.reason,
-			payload: { kind: violation.kind, command },
+			summary: violation?.reason ?? "no-wait policy blocked bash command",
+			payload: { kind: violation?.kind ?? "sleep", command, mode: noWaitMode },
 		});
-		appendRunEvent(environment, "policy_blocked_wait_command", violation.reason, { kind: violation.kind, command });
+		appendRunEvent(environment, "policy_blocked_wait_command", violation?.reason ?? reason, {
+			kind: violation?.kind ?? "sleep",
+			command,
+			mode: noWaitMode,
+		});
 		return { block: true, reason };
 	});
 

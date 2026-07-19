@@ -28,9 +28,32 @@ function stripQuotedSegments(command: string): string {
 	return command.replace(QUOTED_SEGMENT_PATTERN, " ");
 }
 
+export type NoWaitMode = "off" | "prompt" | "enforce";
+
 export function appendNoWaitPolicyToSystemPrompt(systemPrompt: string): string {
 	if (systemPrompt.includes("## Meepo no-wait coordination policy")) return systemPrompt;
 	return `${systemPrompt}\n\n${COORDINATION_NO_WAIT_PROMPT}`;
+}
+
+/**
+ * Apply no-wait system-prompt policy for a given mode.
+ * - off: leave prompt unchanged
+ * - prompt | enforce: inject coordination guidance
+ */
+export function applyNoWaitSystemPrompt(systemPrompt: string, mode: NoWaitMode): string {
+	if (mode === "off") return systemPrompt;
+	return appendNoWaitPolicyToSystemPrompt(systemPrompt);
+}
+
+/**
+ * Decide whether to block a bash tool call under no-wait policy.
+ * Returns a block reason string when enforce mode classifies a violation; otherwise null.
+ */
+export function noWaitBashBlockReason(command: string, mode: NoWaitMode): string | null {
+	if (mode !== "enforce") return null;
+	const violation = classifyNoWaitBashCommand(command);
+	if (!violation) return null;
+	return formatNoWaitPolicyViolation(violation);
 }
 
 export function formatNoWaitPolicyViolation(violation: NoWaitPolicyViolation): string {

@@ -5,7 +5,7 @@
   "type": "module",
   "keywords": ["pi-package"],
   "scripts": {
-    "test": "tsx --test extensions/tmux-agents/runtime.test.ts"
+    "test": "tsx --test extensions/tmux-agents/*.test.ts"
   },
   "pi": {
     "extensions": ["./extensions"],

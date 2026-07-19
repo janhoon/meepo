@@ -12,10 +12,9 @@ import { openAgentsDashboard, type AgentsDashboardData, type AgentsDashboardStat
 import { closeTmuxAgentsDb, getTmuxAgentsDb } from "./db.js";
 import { getRpcBridgeSocketPath, pingRpcBridge, readRpcBridgeStatus, sendRpcBridgeCommand } from "./rpc-client.js";
 import {
-	appendNoWaitPolicyToSystemPrompt,
-	classifyNoWaitBashCommand,
-	formatNoWaitPolicyViolation,
+	applyNoWaitSystemPrompt,
 	getBashCommandFromToolInput,
+	noWaitBashBlockReason,
 } from "./no-wait-policy.js";
 import { SESSION_CHILD_LINK_ENTRY_TYPE } from "./paths.js";
 import { getAllowedBuiltinToolNames, getSubagentProfile, listSubagentProfiles, normalizeBuiltinTools } from "./profiles.js";
@@ -4584,20 +4583,21 @@ async function runServiceSpawnWizard(ctx: ExtensionContext): Promise<void> {
  * Coordinator + shared tool/command registration (today's full surface).
  * Invoked by MeepoRuntime.start(); capability gating lands in a follow-up ticket.
  */
-function registerTmuxAgents(pi: ExtensionAPI, _runtime: MeepoRuntime): void {
+function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
+	const noWaitMode = runtime.config.policies.noWait;
 	if (childRuntimeEnvironment) {
-		registerChildRuntime(pi, childRuntimeEnvironment);
+		registerChildRuntime(pi, childRuntimeEnvironment, { noWaitMode });
 	} else {
 		pi.on("before_agent_start", async (event) => ({
-			systemPrompt: appendNoWaitPolicyToSystemPrompt(event.systemPrompt),
+			systemPrompt: applyNoWaitSystemPrompt(event.systemPrompt, noWaitMode),
 		}));
 		pi.on("tool_call", (event) => {
 			if (event.toolName !== "bash") return;
 			const command = getBashCommandFromToolInput(event.input);
 			if (!command) return;
-			const violation = classifyNoWaitBashCommand(command);
-			if (!violation) return;
-			return { block: true, reason: formatNoWaitPolicyViolation(violation) };
+			const reason = noWaitBashBlockReason(command, noWaitMode);
+			if (!reason) return;
+			return { block: true, reason };
 		});
 	}
 
