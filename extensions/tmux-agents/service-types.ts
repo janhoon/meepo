@@ -27,6 +27,10 @@ export interface ServiceSummary {
 	tmuxSessionName: string | null;
 	tmuxWindowId: string | null;
 	tmuxPaneId: string | null;
+	hostKind: string | null;
+	hostPrimaryId: string | null;
+	hostDisplayName: string | null;
+	hostTargetJson: string | null;
 	runDir: string;
 	logFile: string;
 	latestStatusFile: string;
@@ -53,6 +57,10 @@ export interface CreateServiceInput {
 	tmuxSessionName?: string | null;
 	tmuxWindowId?: string | null;
 	tmuxPaneId?: string | null;
+	hostKind?: string | null;
+	hostPrimaryId?: string | null;
+	hostDisplayName?: string | null;
+	hostTargetJson?: string | null;
 	runDir: string;
 	logFile: string;
 	latestStatusFile: string;
@@ -78,6 +86,10 @@ export interface UpdateServiceInput {
 	tmuxSessionName?: string | null;
 	tmuxWindowId?: string | null;
 	tmuxPaneId?: string | null;
+	hostKind?: string | null;
+	hostPrimaryId?: string | null;
+	hostDisplayName?: string | null;
+	hostTargetJson?: string | null;
 	runDir?: string;
 	logFile?: string;
 	latestStatusFile?: string;
@@ -126,4 +138,7 @@ export interface SpawnServiceResult {
 	tmuxSessionName: string;
 	tmuxWindowId: string;
 	tmuxPaneId: string;
+	hostKind: string;
+	hostPrimaryId: string;
+	hostDisplayName: string | null;
 }

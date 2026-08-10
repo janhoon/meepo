@@ -31,17 +31,9 @@ import type {
 } from "./types.js";
 import { getTmuxAgentsDb } from "./db.js";
 import { getProjectKey } from "./project.js";
+import { getProcessHost, hostFieldsFromTarget } from "./process-host.js";
 
-const DETACHED_SESSION_NAME = "pi-subagents";
-const TMUX_OUTPUT_FORMAT = "#{session_id}\t#{session_name}\t#{window_id}\t#{pane_id}";
 const RPC_BRIDGE_ENTRY_SCRIPT = fileURLToPath(new URL("./rpc-bridge.mjs", import.meta.url));
-
-interface TmuxTarget {
-	sessionId: string;
-	sessionName: string;
-	windowId: string;
-	paneId: string;
-}
 
 interface CreateRunArtifactsOptions {
 	agentId: string;
@@ -63,46 +55,10 @@ function shellQuote(value: string): string {
 	return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
-function commandExists(command: string): boolean {
-	const result = spawnSync("bash", ["-lc", `command -v ${shellQuote(command)} >/dev/null 2>&1`], { stdio: "ignore" });
-	return result.status === 0;
-}
-
 function resolvePiCommand(): string {
 	const result = spawnSync("bash", ["-lc", "command -v pi"], { encoding: "utf8" });
 	const command = result.stdout?.trim();
 	return command || "pi";
-}
-
-function parseTmuxTarget(output: string): TmuxTarget {
-	const [sessionId, sessionName, windowId, paneId] = output.trim().split("\t");
-	if (!sessionId || !sessionName || !windowId || !paneId) {
-		throw new Error(`Unexpected tmux target output: ${JSON.stringify(output)}`);
-	}
-	return { sessionId, sessionName, windowId, paneId };
-}
-
-function runTmux(args: string[]): string {
-	const result = spawnSync("tmux", args, { encoding: "utf8" });
-	if (result.status !== 0) {
-		throw new Error(result.stderr?.trim() || result.stdout?.trim() || `tmux ${args.join(" ")} failed`);
-	}
-	return result.stdout ?? "";
-}
-
-function getCurrentTmuxTarget(): TmuxTarget | null {
-	if (!process.env.TMUX) return null;
-	try {
-		return parseTmuxTarget(runTmux(["display-message", "-p", TMUX_OUTPUT_FORMAT]));
-	} catch {
-		return null;
-	}
-}
-
-function sanitizeWindowName(title: string, agentId: string): string {
-	const safeTitle = title.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
-	const base = safeTitle || "agent";
-	return `${base.slice(0, 24)}-${agentId.slice(-6)}`;
 }
 
 function buildTaskFileContent(options: CreateRunArtifactsOptions): string {
@@ -342,29 +298,6 @@ function appendRunEvent(runDir: string, eventType: string, summary: string, payl
 	);
 }
 
-function spawnTmuxWindow(launchScript: string, title: string, agentId: string): TmuxTarget {
-	if (!commandExists("tmux")) {
-		throw new Error("tmux is not installed or not on PATH.");
-	}
-	const currentTarget = getCurrentTmuxTarget();
-	const windowName = sanitizeWindowName(title, agentId);
-	const launchCommand = `exec ${shellQuote(launchScript)}`;
-	if (currentTarget) {
-		return parseTmuxTarget(
-			runTmux(["new-window", "-t", currentTarget.sessionId, "-P", "-F", TMUX_OUTPUT_FORMAT, "-n", windowName, launchCommand]),
-		);
-	}
-	const hasDetachedSession = spawnSync("tmux", ["has-session", "-t", DETACHED_SESSION_NAME], { stdio: "ignore" }).status === 0;
-	if (hasDetachedSession) {
-		return parseTmuxTarget(
-			runTmux(["new-window", "-t", DETACHED_SESSION_NAME, "-P", "-F", TMUX_OUTPUT_FORMAT, "-n", windowName, launchCommand]),
-		);
-	}
-	return parseTmuxTarget(
-		runTmux(["new-session", "-d", "-P", "-F", TMUX_OUTPUT_FORMAT, "-s", DETACHED_SESSION_NAME, "-n", windowName, launchCommand]),
-	);
-}
-
 function roleKeyForProfile(profileName: string, metadataRoleKey?: string | null): string {
 	// Expand: metadata role wins; legacy principal-engineer→reviewer alias remains in resolveProfileRoleKey.
 	return resolveProfileRoleKey(profileName, metadataRoleKey);
@@ -453,7 +386,7 @@ function assertSpawnEdgePolicy(
 	return decision.note ?? null;
 }
 
-export function spawnSubagent(input: SpawnSubagentInput): SpawnSubagentResult {
+export async function spawnSubagent(input: SpawnSubagentInput): Promise<SpawnSubagentResult> {
 	const now = Date.now();
 	const agentId = input.agentId ?? `sa_${now.toString(36)}_${randomUUID().slice(0, 8)}`;
 	const spawnCwd = resolve(input.spawnCwd);
@@ -651,9 +584,16 @@ export function spawnSubagent(input: SpawnSubagentInput): SpawnSubagentResult {
 		task: input.task,
 		spawnCwd,
 	});
-	let tmuxTarget: TmuxTarget;
+	const host = getProcessHost();
+	let hostTarget;
 	try {
-		tmuxTarget = spawnTmuxWindow(runArtifacts.launchScript, input.title, agentId);
+		hostTarget = await host.spawnWindow({
+			title: input.title,
+			entityId: agentId,
+			launchCommand: `exec ${shellQuote(runArtifacts.launchScript)}`,
+			pool: "agents",
+			cwd: spawnCwd,
+		});
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		if (taskLeaseClaimed && input.taskId) {
@@ -679,24 +619,50 @@ export function spawnSubagent(input: SpawnSubagentInput): SpawnSubagentResult {
 		appendRunEvent(runArtifacts.runDir, "spawn_failed", message, { error: message });
 		throw error;
 	}
+	const fields = hostFieldsFromTarget(hostTarget);
 	updateAgent(db, agentId, {
-		tmuxSessionId: tmuxTarget.sessionId,
-		tmuxSessionName: tmuxTarget.sessionName,
-		tmuxWindowId: tmuxTarget.windowId,
-		tmuxPaneId: tmuxTarget.paneId,
+		tmuxSessionId: fields.tmuxSessionId,
+		tmuxSessionName: fields.tmuxSessionName,
+		tmuxWindowId: fields.tmuxWindowId,
+		tmuxPaneId: fields.tmuxPaneId,
+		hostKind: fields.hostKind,
+		hostPrimaryId: fields.hostPrimaryId,
+		hostDisplayName: fields.hostDisplayName,
+		hostTargetJson: fields.hostTargetJson,
 		transportKind: "rpc_bridge",
 		transportState: "launching",
 		bridgeUpdatedAt: Date.now(),
 		updatedAt: Date.now(),
 	});
+	// Dual-write host_spawned + legacy tmux_spawned during transition.
+	createAgentEvent(db, {
+		id: randomUUID(),
+		agentId,
+		eventType: "host_spawned",
+		summary: `Spawned on ${fields.hostKind} (${fields.hostDisplayName ?? fields.hostPrimaryId})`,
+		payload: hostTarget,
+	});
 	createAgentEvent(db, {
 		id: randomUUID(),
 		agentId,
 		eventType: "tmux_spawned",
-		summary: `Spawned in tmux ${tmuxTarget.sessionName}`,
-		payload: tmuxTarget,
+		summary: `Spawned in ${fields.tmuxSessionName ?? fields.hostKind}`,
+		payload: {
+			sessionId: fields.tmuxSessionId,
+			sessionName: fields.tmuxSessionName,
+			windowId: fields.tmuxWindowId,
+			paneId: fields.tmuxPaneId,
+			hostKind: fields.hostKind,
+			primaryId: fields.hostPrimaryId,
+		},
 	});
-	appendRunEvent(runArtifacts.runDir, "tmux_spawned", `Spawned in tmux ${tmuxTarget.sessionName}`, tmuxTarget);
+	appendRunEvent(runArtifacts.runDir, "host_spawned", `Spawned on ${fields.hostKind}`, hostTarget);
+	appendRunEvent(runArtifacts.runDir, "tmux_spawned", `Spawned in ${fields.tmuxSessionName ?? fields.hostKind}`, {
+		sessionId: fields.tmuxSessionId,
+		sessionName: fields.tmuxSessionName,
+		windowId: fields.tmuxWindowId,
+		paneId: fields.tmuxPaneId,
+	});
 	const sessionLinkData: SessionChildLinkEntryData = {
 		childId: agentId,
 		title: input.title,
@@ -708,10 +674,10 @@ export function spawnSubagent(input: SpawnSubagentInput): SpawnSubagentResult {
 		transportState: "launching",
 		bridgeSocketPath: runArtifacts.bridgeSocketPath,
 		bridgeStatusFile: runArtifacts.bridgeStatusFile,
-		tmuxSessionId: tmuxTarget.sessionId,
-		tmuxSessionName: tmuxTarget.sessionName,
-		tmuxWindowId: tmuxTarget.windowId,
-		tmuxPaneId: tmuxTarget.paneId,
+		tmuxSessionId: fields.tmuxSessionId,
+		tmuxSessionName: fields.tmuxSessionName,
+		tmuxWindowId: fields.tmuxWindowId,
+		tmuxPaneId: fields.tmuxPaneId,
 		taskId: input.taskId,
 		createdAt: now,
 	};
@@ -728,10 +694,10 @@ export function spawnSubagent(input: SpawnSubagentInput): SpawnSubagentResult {
 		bridgeSocketPath: runArtifacts.bridgeSocketPath,
 		bridgeStatusFile: runArtifacts.bridgeStatusFile,
 		bridgeLogFile: runArtifacts.bridgeLogFile,
-		tmuxSessionId: tmuxTarget.sessionId,
-		tmuxSessionName: tmuxTarget.sessionName,
-		tmuxWindowId: tmuxTarget.windowId,
-		tmuxPaneId: tmuxTarget.paneId,
+		tmuxSessionId: fields.tmuxSessionId ?? "",
+		tmuxSessionName: fields.tmuxSessionName ?? "",
+		tmuxWindowId: fields.tmuxWindowId ?? "",
+		tmuxPaneId: fields.tmuxPaneId ?? "",
 		sessionLinkData,
 	};
 }

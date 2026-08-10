@@ -56,11 +56,21 @@ export interface MeepoProfilesConfig {
 	extraTools: string[];
 }
 
+export const PROCESS_HOST_SELECTIONS = ["auto", "tmux", "herdr"] as const;
+export type ProcessHostSelectionConfig = (typeof PROCESS_HOST_SELECTIONS)[number];
+
 export interface MeepoRuntimePathsConfig {
 	/** Optional override for agent dir / DB / runs roots. Null = Pi getAgentDir defaults. */
 	agentDir: string | null;
-	/** Detached tmux session name when primary is not inside tmux. */
+	/** Detached tmux session name when primary is not inside tmux (agent pool). */
 	detachedSessionName: string;
+	/** Detached tmux session name for services when primary is not inside tmux. */
+	serviceDetachedSessionName: string;
+	/**
+	 * Process host backend: auto (herdr if PATH+probe else tmux) | tmux | herdr.
+	 * Overridden by env MEEPO_PROCESS_HOST. Frozen once per primary session at start.
+	 */
+	processHost: ProcessHostSelectionConfig;
 }
 
 export interface MeepoConfig {
@@ -180,6 +190,8 @@ export function createFullDefaultConfig(): MeepoConfig {
 		runtime: {
 			agentDir: null,
 			detachedSessionName: "pi-subagents",
+			serviceDetachedSessionName: "pi-services",
+			processHost: "auto",
 		},
 	};
 }
@@ -203,6 +215,8 @@ export function createCoreDefaultConfig(): MeepoConfig {
 		runtime: {
 			agentDir: null,
 			detachedSessionName: "pi-subagents",
+			serviceDetachedSessionName: "pi-services",
+			processHost: "auto",
 		},
 	};
 }
@@ -221,8 +235,15 @@ export interface LoadMeepoConfigOptions {
 	/**
 	 * Optional env map (defaults to process.env). Recognized:
 	 * - MEEPO_PRESET=full|core
+	 * - MEEPO_PROCESS_HOST=auto|tmux|herdr
 	 */
 	env?: NodeJS.ProcessEnv;
+}
+
+function parseProcessHostEnv(value: string | undefined): ProcessHostSelectionConfig | undefined {
+	const trimmed = value?.trim().toLowerCase();
+	if (trimmed === "auto" || trimmed === "tmux" || trimmed === "herdr") return trimmed;
+	return undefined;
 }
 
 function resolvePresetBase(preset: MeepoPreset): MeepoConfig {
@@ -241,6 +262,7 @@ export function loadMeepoConfig(options: LoadMeepoConfigOptions = {}): MeepoConf
 		envPreset === "core" || envPreset === "full" ? (envPreset as MeepoPreset) : undefined;
 	const preset = options.preset ?? presetFromEnv ?? "full";
 	const base = resolvePresetBase(preset);
+	const processHostFromEnv = parseProcessHostEnv(env.MEEPO_PROCESS_HOST);
 
 	return {
 		version: MEEPO_CONFIG_VERSION,
@@ -261,6 +283,8 @@ export function loadMeepoConfig(options: LoadMeepoConfigOptions = {}): MeepoConf
 		runtime: {
 			...base.runtime,
 			...options.runtime,
+			// Env wins over options.runtime.processHost when set (matches ProcessHost selection precedence).
+			processHost: processHostFromEnv ?? options.runtime?.processHost ?? base.runtime.processHost,
 		},
 	};
 }

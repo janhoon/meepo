@@ -1,23 +1,14 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { getTmuxAgentsDb } from "./db.js";
 import { ensureTmuxAgentsRuntimePaths } from "./paths.js";
 import { getProjectKey } from "./project.js";
+import { getProcessHost, hostFieldsFromTarget } from "./process-host.js";
 import { createService, updateService } from "./service-registry.js";
 import type { CreateServiceInput, ServiceStatusSnapshot, SpawnServiceInput, SpawnServiceResult } from "./service-types.js";
 
-const DETACHED_SESSION_NAME = "pi-services";
-const TMUX_OUTPUT_FORMAT = "#{session_id}\t#{session_name}\t#{window_id}\t#{pane_id}";
 const READY_POLL_INTERVAL_MS = 250;
-
-interface TmuxTarget {
-	sessionId: string;
-	sessionName: string;
-	windowId: string;
-	paneId: string;
-}
 
 interface ServiceRunArtifacts {
 	runDir: string;
@@ -28,43 +19,7 @@ interface ServiceRunArtifacts {
 }
 
 function shellQuote(value: string): string {
-	return `'${value.replace(/'/g, `"'"'"'`)}'`;
-}
-
-function commandExists(command: string): boolean {
-	const result = spawnSync("bash", ["-lc", `command -v ${shellQuote(command)} >/dev/null 2>&1`], { stdio: "ignore" });
-	return result.status === 0;
-}
-
-function parseTmuxTarget(output: string): TmuxTarget {
-	const [sessionId, sessionName, windowId, paneId] = output.trim().split("\t");
-	if (!sessionId || !sessionName || !windowId || !paneId) {
-		throw new Error(`Unexpected tmux target output: ${JSON.stringify(output)}`);
-	}
-	return { sessionId, sessionName, windowId, paneId };
-}
-
-function runTmux(args: string[]): string {
-	const result = spawnSync("tmux", args, { encoding: "utf8" });
-	if (result.status !== 0) {
-		throw new Error(result.stderr?.trim() || result.stdout?.trim() || `tmux ${args.join(" ")} failed`);
-	}
-	return result.stdout ?? "";
-}
-
-function getCurrentTmuxTarget(): TmuxTarget | null {
-	if (!process.env.TMUX) return null;
-	try {
-		return parseTmuxTarget(runTmux(["display-message", "-p", TMUX_OUTPUT_FORMAT]));
-	} catch {
-		return null;
-	}
-}
-
-function sanitizeWindowName(title: string, serviceId: string): string {
-	const safeTitle = title.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
-	const base = safeTitle || "service";
-	return `${base.slice(0, 24)}-${serviceId.slice(-6)}`;
+	return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
 function normalizeEnv(env: Record<string, string> | null | undefined): Record<string, string> {
@@ -165,29 +120,6 @@ function writeRunArtifacts(options: {
 	);
 	chmodSync(launchScript, 0o755);
 	return { runDir, launchScript, commandFile, logFile, latestStatusFile };
-}
-
-function spawnTmuxWindow(launchScript: string, title: string, serviceId: string): TmuxTarget {
-	if (!commandExists("tmux")) {
-		throw new Error("tmux is not installed or not on PATH.");
-	}
-	const currentTarget = getCurrentTmuxTarget();
-	const windowName = sanitizeWindowName(title, serviceId);
-	const launchCommand = `exec ${shellQuote(launchScript)}`;
-	if (currentTarget) {
-		return parseTmuxTarget(
-			runTmux(["new-window", "-t", currentTarget.sessionId, "-P", "-F", TMUX_OUTPUT_FORMAT, "-n", windowName, launchCommand]),
-		);
-	}
-	const hasDetachedSession = spawnSync("tmux", ["has-session", "-t", DETACHED_SESSION_NAME], { stdio: "ignore" }).status === 0;
-	if (hasDetachedSession) {
-		return parseTmuxTarget(
-			runTmux(["new-window", "-t", DETACHED_SESSION_NAME, "-P", "-F", TMUX_OUTPUT_FORMAT, "-n", windowName, launchCommand]),
-		);
-	}
-	return parseTmuxTarget(
-		runTmux(["new-session", "-d", "-P", "-F", TMUX_OUTPUT_FORMAT, "-s", DETACHED_SESSION_NAME, "-n", windowName, launchCommand]),
-	);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -293,20 +225,33 @@ export async function spawnService(input: SpawnServiceInput): Promise<SpawnServi
 		updatedAt: now,
 	};
 	createService(db, serviceRecord);
-	let tmuxTarget: TmuxTarget;
+	const host = getProcessHost();
+	let hostTarget;
 	try {
-		tmuxTarget = spawnTmuxWindow(runArtifacts.launchScript, input.title, serviceId);
+		hostTarget = await host.spawnWindow({
+			title: input.title,
+			entityId: serviceId,
+			launchCommand: `exec ${shellQuote(runArtifacts.launchScript)}`,
+			pool: "services",
+			cwd: spawnCwd,
+			env,
+		});
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		updateService(db, serviceId, { state: "error", lastError: message, updatedAt: Date.now() });
 		throw error;
 	}
+	const fields = hostFieldsFromTarget(hostTarget);
 	updateService(db, serviceId, {
 		state: "running",
-		tmuxSessionId: tmuxTarget.sessionId,
-		tmuxSessionName: tmuxTarget.sessionName,
-		tmuxWindowId: tmuxTarget.windowId,
-		tmuxPaneId: tmuxTarget.paneId,
+		tmuxSessionId: fields.tmuxSessionId,
+		tmuxSessionName: fields.tmuxSessionName,
+		tmuxWindowId: fields.tmuxWindowId,
+		tmuxPaneId: fields.tmuxPaneId,
+		hostKind: fields.hostKind,
+		hostPrimaryId: fields.hostPrimaryId,
+		hostDisplayName: fields.hostDisplayName,
+		hostTargetJson: fields.hostTargetJson,
 		updatedAt: Date.now(),
 	});
 	await sleep(READY_POLL_INTERVAL_MS);
@@ -353,9 +298,12 @@ export async function spawnService(input: SpawnServiceInput): Promise<SpawnServi
 		state: statusSnapshot?.state ?? "running",
 		statusSnapshot,
 		initialOutput,
-		tmuxSessionId: tmuxTarget.sessionId,
-		tmuxSessionName: tmuxTarget.sessionName,
-		tmuxWindowId: tmuxTarget.windowId,
-		tmuxPaneId: tmuxTarget.paneId,
+		tmuxSessionId: fields.tmuxSessionId ?? "",
+		tmuxSessionName: fields.tmuxSessionName ?? "",
+		tmuxWindowId: fields.tmuxWindowId ?? "",
+		tmuxPaneId: fields.tmuxPaneId ?? "",
+		hostKind: fields.hostKind,
+		hostPrimaryId: fields.hostPrimaryId,
+		hostDisplayName: fields.hostDisplayName,
 	};
 }

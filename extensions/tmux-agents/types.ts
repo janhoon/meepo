@@ -324,6 +324,12 @@ export interface AgentSummary {
 	tmuxSessionName: string | null;
 	tmuxWindowId: string | null;
 	tmuxPaneId: string | null;
+	/** Process host backend: tmux | herdr (default tmux for legacy rows). */
+	hostKind: string | null;
+	hostPrimaryId: string | null;
+	hostDisplayName: string | null;
+	/** JSON blob of HostTarget.refs */
+	hostTargetJson: string | null;
 	runDir: string;
 	sessionFile: string;
 	lastToolName: string | null;
@@ -633,6 +639,10 @@ export interface CreateAgentInput {
 	tmuxSessionName?: string | null;
 	tmuxWindowId?: string | null;
 	tmuxPaneId?: string | null;
+	hostKind?: string | null;
+	hostPrimaryId?: string | null;
+	hostDisplayName?: string | null;
+	hostTargetJson?: string | null;
 	runDir: string;
 	sessionFile: string;
 	lastToolName?: string | null;
@@ -675,6 +685,10 @@ export interface UpdateAgentInput {
 	tmuxSessionName?: string | null;
 	tmuxWindowId?: string | null;
 	tmuxPaneId?: string | null;
+	hostKind?: string | null;
+	hostPrimaryId?: string | null;
+	hostDisplayName?: string | null;
+	hostTargetJson?: string | null;
 	runDir?: string;
 	sessionFile?: string;
 	lastToolName?: string | null;

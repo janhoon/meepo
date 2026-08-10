@@ -83,7 +83,7 @@ import {
 import { getService, listServices, updateService } from "./service-registry.js";
 import { readServiceStatus, spawnService, tailFileLines } from "./service-spawn.js";
 import { spawnSubagent } from "./spawn.js";
-import { captureTmuxTarget, focusTmuxTarget, getTmuxInventory, stopTmuxTarget, tmuxTargetExists } from "./tmux.js";
+import { getProcessHost, hostTargetRefFromLegacy } from "./process-host.js";
 import type {
 	ListServicesFilters,
 	ServiceStatusSnapshot,
@@ -693,7 +693,7 @@ function buildTaskReadyText(items: TaskReadinessRecord[], includeBlocked: boolea
 	return visible.map(formatTaskReadinessLine).join("\n");
 }
 
-function buildTaskDispatchText(result: ReturnType<typeof dispatchReadyTasks>, dryRun: boolean): string {
+function buildTaskDispatchText(result: Awaited<ReturnType<typeof dispatchReadyTasks>>, dryRun: boolean): string {
 	const lines = [dryRun ? "# Ready dispatch preview" : "# Ready dispatch result"];
 	if (result.preview.length > 0) {
 		lines.push("", "Dispatchable:", ...result.preview.map((item) => `- ${item.taskId} · ${truncateText(item.title, 60)} · profile=${item.profile}`));
@@ -810,12 +810,12 @@ function buildTaskSubtreePreviewToken(input: {
 		.slice(0, 16);
 }
 
-function buildTaskSubtreeControlPreview(
+async function buildTaskSubtreeControlPreview(
 	ctx: ExtensionContext,
 	rootTaskId: string,
 	action: TaskSubtreeControlAction,
 	options: { includeRoot?: boolean; reason?: string } = {},
-): TaskSubtreeControlPreview {
+): Promise<TaskSubtreeControlPreview> {
 	const db = getTmuxAgentsDb();
 	const rootTask = getTask(db, rootTaskId);
 	if (!rootTask) throw new Error(`Unknown task id \"${rootTaskId}\".`);
@@ -866,7 +866,7 @@ function buildTaskSubtreeControlPreview(
 	const subjectAgentAttentionItems = agentIds.length > 0 ? listAgentAttentionItemsV2(db, { subjectAgentIds: agentIds, states: OPEN_AGENT_ATTENTION_V2_STATES, limit: SUBTREE_QUERY_ATTENTION_LIMIT }) : [];
 	if (subjectAgentAttentionItems.length >= SUBTREE_QUERY_ATTENTION_LIMIT) truncationWarnings.push(`subject hierarchy attention reached safety cap ${SUBTREE_QUERY_ATTENTION_LIMIT}; apply is disabled until attention fanout is narrowed`);
 	const agentAttentionItems = [...new Map([...directAgentAttentionItems, ...subjectAgentAttentionItems].map((item) => [item.id, item])).values()];
-	const cleanupCandidates = agentIds.length > 0 ? listCleanupCandidates(ctx, { ids: agentIds, limit: agentIds.length, force: false }) : [];
+	const cleanupCandidates = agentIds.length > 0 ? await listCleanupCandidates(ctx, { ids: agentIds, limit: agentIds.length, force: false }) : [];
 	if (agentIds.length > SUBTREE_QUERY_AGENT_LIMIT) truncationWarnings.push(`cleanup candidate lookup is incomplete for ${agentIds.length} agents due agent list cap ${SUBTREE_QUERY_AGENT_LIMIT}; apply is disabled`);
 	const taskIdsToUpdate = tasks.filter((task) => taskShouldUpdateForSubtreeAction(task, action)).map((task) => task.id);
 	const agentIdsToStop = action === "pause" || action === "cancel" ? activeAgents.map((agent) => agent.id) : [];
@@ -1014,7 +1014,7 @@ async function applyTaskSubtreeControl(
 	options: { includeRoot?: boolean; reason?: string; previewToken?: string } = {},
 ): Promise<TaskSubtreeControlApplyResult> {
 	const db = getTmuxAgentsDb();
-	const preview = buildTaskSubtreeControlPreview(ctx, rootTaskId, action, options);
+	const preview = await buildTaskSubtreeControlPreview(ctx, rootTaskId, action, options);
 	if (!preview.isComplete) {
 		throw new Error(`Refusing to apply subtree ${action}: preview is incomplete. ${preview.truncationWarnings.join(" ")}`);
 	}
@@ -2043,12 +2043,13 @@ function formatAttentionGateWarning(items: AttentionItemRecord[], agentsById: Ma
 	return `Attention gate: ${items.length} unresolved attention item(s) already exist.\n${preview}`;
 }
 
-function listCleanupCandidates(
+async function listCleanupCandidates(
 	ctx: ExtensionContext,
 	params: { scope?: "all" | "current_project" | "current_session" | "descendants"; ids?: string[]; force?: boolean; limit?: number },
-): CleanupCandidate[] {
+): Promise<CleanupCandidate[]> {
 	const db = getTmuxAgentsDb();
-	const inventory = getTmuxInventory();
+	const host = getProcessHost();
+	const inventory = await host.listInventory();
 	const agents = params.ids && params.ids.length > 0
 		? listAgents(db, { ids: params.ids, limit: params.limit ?? params.ids.length })
 		: listAgents(db, resolveAgentFilters(ctx, params.scope ?? "current_project", { limit: params.limit }));
@@ -2063,47 +2064,36 @@ function listCleanupCandidates(
 		items.push(item);
 		attentionByAgent.set(item.agentId, items);
 	}
-	return agents
-		.filter((agent) => TERMINAL_AGENT_STATES.includes(agent.state))
-		.map((agent) => {
-			const items = (attentionByAgent.get(agent.id) ?? []).sort((left, right) => left.priority - right.priority || right.updatedAt - left.updatedAt);
-			const targetExists = tmuxTargetExists(
-				{
-					sessionId: agent.tmuxSessionId,
-					sessionName: agent.tmuxSessionName,
-					windowId: agent.tmuxWindowId,
-					paneId: agent.tmuxPaneId,
-				},
-				inventory,
-			);
-			const blockingItems = items.filter((item) => item.kind !== "complete");
-			let cleanupAllowed = targetExists;
-			let reason = !targetExists ? "tmux target already gone" : items.length === 0 ? "no unresolved attention items" : "completion attention can be resolved during cleanup";
-			if (blockingItems.length > 0 && !(params.force ?? false)) {
-				cleanupAllowed = false;
-				reason = `blocked by unresolved ${blockingItems[0]!.kind}`;
-			}
-			if (blockingItems.length > 0 && (params.force ?? false)) {
-				reason = `force cleanup despite unresolved ${blockingItems[0]!.kind}`;
-			}
-			return { agent, attentionItems: items, targetExists, cleanupAllowed, reason };
-		})
-		.filter((candidate) => candidate.targetExists || params.ids?.includes(candidate.agent.id));
+	const candidates: CleanupCandidate[] = [];
+	for (const agent of agents.filter((agent) => TERMINAL_AGENT_STATES.includes(agent.state))) {
+		const items = (attentionByAgent.get(agent.id) ?? []).sort((left, right) => left.priority - right.priority || right.updatedAt - left.updatedAt);
+		const targetExists = await host.targetExists(hostTargetRefFromLegacy(agent), inventory);
+		const blockingItems = items.filter((item) => item.kind !== "complete");
+		let cleanupAllowed = targetExists;
+		let reason = !targetExists ? "host target already gone" : items.length === 0 ? "no unresolved attention items" : "completion attention can be resolved during cleanup";
+		if (blockingItems.length > 0 && !(params.force ?? false)) {
+			cleanupAllowed = false;
+			reason = `blocked by unresolved ${blockingItems[0]!.kind}`;
+		}
+		if (blockingItems.length > 0 && (params.force ?? false)) {
+			reason = `force cleanup despite unresolved ${blockingItems[0]!.kind}`;
+		}
+		if (targetExists || params.ids?.includes(agent.id)) {
+			candidates.push({ agent, attentionItems: items, targetExists, cleanupAllowed, reason });
+		}
+	}
+	return candidates;
 }
 
-function cleanupAgentTarget(candidate: CleanupCandidate, force = false): { agentId: string; cleaned: boolean; reason: string; command: string } {
+async function cleanupAgentTarget(candidate: CleanupCandidate, force = false): Promise<{ agentId: string; cleaned: boolean; reason: string; command: string }> {
 	const db = getTmuxAgentsDb();
 	const agent = candidate.agent;
-	const target = {
-		sessionId: agent.tmuxSessionId,
-		sessionName: agent.tmuxSessionName,
-		windowId: agent.tmuxWindowId,
-		paneId: agent.tmuxPaneId,
-	};
-	if (!tmuxTargetExists(target, getTmuxInventory())) {
-		return { agentId: agent.id, cleaned: false, reason: "tmux target already gone", command: "(already gone)" };
+	const host = getProcessHost();
+	const target = hostTargetRefFromLegacy(agent);
+	if (!(await host.targetExists(target))) {
+		return { agentId: agent.id, cleaned: false, reason: "host target already gone", command: "(already gone)" };
 	}
-	const result = stopTmuxTarget(target, true);
+	const result = await host.stop(target, { force: true });
 	const now = Date.now();
 	const completionItems = candidate.attentionItems.filter((item) => item.kind === "complete");
 	if (completionItems.length > 0) {
@@ -2618,13 +2608,9 @@ async function stopAgentById(id: string, force: boolean, reason?: string): Promi
 	if (!force && ["done", "error", "stopped", "lost"].includes(agent.state)) {
 		throw new Error(`Agent ${agent.id} is already in terminal state ${agent.state}.`);
 	}
-	const target = {
-		sessionId: agent.tmuxSessionId,
-		sessionName: agent.tmuxSessionName,
-		windowId: agent.tmuxWindowId,
-		paneId: agent.tmuxPaneId,
-	};
-	const targetExists = tmuxTargetExists(target, getTmuxInventory());
+	const host = getProcessHost();
+	const target = hostTargetRefFromLegacy(agent);
+	const targetExists = await host.targetExists(target);
 	if (!targetExists && force) {
 		updateAgent(getTmuxAgentsDb(), agent.id, {
 			state: "stopped",
@@ -2633,7 +2619,7 @@ async function stopAgentById(id: string, force: boolean, reason?: string): Promi
 			lastError: reason?.trim() || agent.lastError,
 		});
 		if (agent.taskId) {
-			unlinkTaskAgent(getTmuxAgentsDb(), agent.taskId, agent.id, reason?.trim() || "force_stop_missing_tmux_target");
+			unlinkTaskAgent(getTmuxAgentsDb(), agent.taskId, agent.id, reason?.trim() || "force_stop_missing_host_target");
 		}
 		updateAttentionItemsForAgent(
 			getTmuxAgentsDb(),
@@ -2643,7 +2629,7 @@ async function stopAgentById(id: string, force: boolean, reason?: string): Promi
 				updatedAt: Date.now(),
 				resolvedAt: Date.now(),
 				resolutionKind: "force_stop",
-				resolutionSummary: reason?.trim() || "tmux target missing; registry marked stopped.",
+				resolutionSummary: reason?.trim() || "host target missing; registry marked stopped.",
 			},
 			{ states: ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user"] },
 		);
@@ -2651,21 +2637,21 @@ async function stopAgentById(id: string, force: boolean, reason?: string): Promi
 			id: randomUUID(),
 			agentId: agent.id,
 			eventType: "force_stopped",
-			summary: reason?.trim() || "tmux target missing; registry marked stopped.",
-			payload: { command: "(tmux target already missing)" },
+			summary: reason?.trim() || "host target missing; registry marked stopped.",
+			payload: { command: "(host target already missing)" },
 		});
 		return {
 			agent: getAgent(getTmuxAgentsDb(), agent.id) ?? agent,
 			result: {
 				stopped: true,
 				graceful: false,
-				command: "(tmux target already missing)",
-				reason: "tmux target was already gone; registry marked stopped.",
+				command: "(host target already missing)",
+				reason: "host target was already gone; registry marked stopped.",
 			},
 		};
 	}
 	if (!targetExists && !force) {
-		throw new Error(`Agent ${agent.id} no longer has a live tmux target. Use force stop or reconcile.`);
+		throw new Error(`Agent ${agent.id} no longer has a live host target. Use force stop or reconcile.`);
 	}
 	if (!force) {
 		const cancelMessageId = queueDownwardMessage(
@@ -2703,7 +2689,7 @@ async function stopAgentById(id: string, force: boolean, reason?: string): Promi
 			};
 		}
 	}
-	const result = stopTmuxTarget(target, force);
+	const result = await host.stop(target, { force });
 	if (force) {
 		updateAgent(getTmuxAgentsDb(), agent.id, {
 			state: "stopped",
@@ -2749,7 +2735,8 @@ async function reconcileAgents(ctx: ExtensionContext, params: { scope?: "all" | 
 	});
 	const db = getTmuxAgentsDb();
 	const agents = listAgents(db, filters);
-	const inventory = getTmuxInventory();
+	const host = getProcessHost();
+	const inventory = await host.listInventory();
 	const changed: Array<{ id: string; state: string; transportState: string; reason: string }> = [];
 	const bridgeHealth = new Map(
 		await Promise.all(
@@ -2769,15 +2756,7 @@ async function reconcileAgents(ctx: ExtensionContext, params: { scope?: "all" | 
 		const bridge = bridgeHealth.get(agent.id);
 		const bridgeStatus = bridge?.status ?? null;
 		const bridgeReachable = Boolean(bridge?.ping?.success);
-		const targetExists = tmuxTargetExists(
-			{
-				sessionId: agent.tmuxSessionId,
-				sessionName: agent.tmuxSessionName,
-				windowId: agent.tmuxWindowId,
-				paneId: agent.tmuxPaneId,
-			},
-			inventory,
-		);
+		const targetExists = await host.targetExists(hostTargetRefFromLegacy(agent), inventory);
 		let patch: UpdateAgentInput = {};
 		let reason = "";
 		if (bridgeStatus && bridgeStatus.updatedAt > (agent.bridgeUpdatedAt ?? 0)) {
@@ -3119,35 +3098,26 @@ async function spawnServiceFromParams(ctx: ExtensionContext, params: {
 	});
 }
 
-function focusServiceById(id: string): { service: ServiceSummary; result: { focused: boolean; command: string; reason?: string } } {
+async function focusServiceById(id: string): Promise<{ service: ServiceSummary; result: { focused: boolean; command: string; reason?: string } }> {
 	const service = getService(getTmuxAgentsDb(), id);
 	if (!service) {
 		throw new Error(`Unknown service id "${id}".`);
 	}
-	const result = focusTmuxTarget({
-		sessionId: service.tmuxSessionId,
-		sessionName: service.tmuxSessionName,
-		windowId: service.tmuxWindowId,
-		paneId: service.tmuxPaneId,
-	});
+	const result = await getProcessHost().focus(hostTargetRefFromLegacy(service));
 	return { service, result };
 }
 
-function captureServiceById(id: string, lines = 200): { service: ServiceSummary; content: string; command: string; source: "tmux" | "log" } {
+async function captureServiceById(id: string, lines = 200): Promise<{ service: ServiceSummary; content: string; command: string; source: "host" | "log" }> {
 	const db = getTmuxAgentsDb();
 	const service = getService(db, id);
 	if (!service) {
 		throw new Error(`Unknown service id "${id}".`);
 	}
-	const target = {
-		sessionId: service.tmuxSessionId,
-		sessionName: service.tmuxSessionName,
-		windowId: service.tmuxWindowId,
-		paneId: service.tmuxPaneId,
-	};
-	if (tmuxTargetExists(target, getTmuxInventory())) {
-		const result = captureTmuxTarget(target, lines);
-		return { service, content: result.content, command: result.command, source: "tmux" };
+	const host = getProcessHost();
+	const target = hostTargetRefFromLegacy(service);
+	if (await host.targetExists(target)) {
+		const result = await host.capture(target, { lines });
+		return { service, content: result.content, command: result.command, source: "host" };
 	}
 	const latestStatus = readLatestServiceStatus(service);
 	if (latestStatus) {
@@ -3162,22 +3132,18 @@ function captureServiceById(id: string, lines = 200): { service: ServiceSummary;
 	};
 }
 
-function stopServiceById(id: string, force: boolean, reason?: string): {
+async function stopServiceById(id: string, force: boolean, reason?: string): Promise<{
 	service: ServiceSummary;
 	result: { stopped: boolean; graceful: boolean; command: string; reason?: string };
-} {
+}> {
 	const db = getTmuxAgentsDb();
 	const service = getService(db, id);
 	if (!service) {
 		throw new Error(`Unknown service id "${id}".`);
 	}
-	const target = {
-		sessionId: service.tmuxSessionId,
-		sessionName: service.tmuxSessionName,
-		windowId: service.tmuxWindowId,
-		paneId: service.tmuxPaneId,
-	};
-	const targetExists = tmuxTargetExists(target, getTmuxInventory());
+	const host = getProcessHost();
+	const target = hostTargetRefFromLegacy(service);
+	const targetExists = await host.targetExists(target);
 	if (!targetExists) {
 		const latestStatus = readLatestServiceStatus(service);
 		if (latestStatus) {
@@ -3187,8 +3153,8 @@ function stopServiceById(id: string, force: boolean, reason?: string): {
 				result: {
 					stopped: true,
 					graceful: !force,
-					command: "(tmux target already exited)",
-					reason: "tmux target was already gone; registry refreshed from latest-status.json.",
+					command: "(host target already exited)",
+					reason: "host target was already gone; registry refreshed from latest-status.json.",
 				},
 			};
 		}
@@ -3204,14 +3170,14 @@ function stopServiceById(id: string, force: boolean, reason?: string): {
 				result: {
 					stopped: true,
 					graceful: false,
-					command: "(tmux target already missing)",
-					reason: reason?.trim() || "tmux target was already gone; registry marked stopped.",
+					command: "(host target already missing)",
+					reason: reason?.trim() || "host target was already gone; registry marked stopped.",
 				},
 			};
 		}
-		throw new Error(`Service ${service.id} no longer has a live tmux target. Use force=true or reconcile.`);
+		throw new Error(`Service ${service.id} no longer has a live host target. Use force=true or reconcile.`);
 	}
-	const result = stopTmuxTarget(target, force);
+	const result = await host.stop(target, { force });
 	if (force) {
 		updateService(db, service.id, {
 			state: "stopped",
@@ -3223,11 +3189,11 @@ function stopServiceById(id: string, force: boolean, reason?: string): {
 	return { service: getService(db, service.id) ?? service, result };
 }
 
-function reconcileServices(ctx: ExtensionContext, params: { scope?: "all" | "current_project" | "current_session"; activeOnly?: boolean; limit?: number }): {
+async function reconcileServices(ctx: ExtensionContext, params: { scope?: "all" | "current_project" | "current_session"; activeOnly?: boolean; limit?: number }): Promise<{
 	scope: string;
 	reconciled: number;
 	changed: Array<{ id: string; state: string; reason: string }>;
-} {
+}> {
 	const scope = params.scope ?? "current_project";
 	const filters = resolveServiceFilters(ctx, scope, {
 		activeOnly: params.activeOnly ?? true,
@@ -3235,19 +3201,12 @@ function reconcileServices(ctx: ExtensionContext, params: { scope?: "all" | "cur
 	});
 	const db = getTmuxAgentsDb();
 	const services = listServices(db, filters);
-	const inventory = getTmuxInventory();
+	const host = getProcessHost();
+	const inventory = await host.listInventory();
 	const changed: Array<{ id: string; state: string; reason: string }> = [];
 	for (const service of services) {
 		const latestStatus = readLatestServiceStatus(service);
-		const targetExists = tmuxTargetExists(
-			{
-				sessionId: service.tmuxSessionId,
-				sessionName: service.tmuxSessionName,
-				windowId: service.tmuxWindowId,
-				paneId: service.tmuxPaneId,
-			},
-			inventory,
-		);
+		const targetExists = await host.targetExists(hostTargetRefFromLegacy(service), inventory);
 		let patch: UpdateServiceInput = {};
 		let reason = "";
 		const readyMatchedAt = maybeDetectServiceReady(service);
@@ -3462,7 +3421,7 @@ async function chooseAgentForTaskAction(ctx: ExtensionContext, taskId: string, a
 	return linkedAgents.find((agent) => `${agent.id} · ${agent.profile} · ${agent.state} · lease=${taskLeaseKindForProfile(agent.profile)}` === selection) ?? linkedAgents[0] ?? null;
 }
 
-function spawnChildFromParams(pi: ExtensionAPI, ctx: ExtensionContext, params: {
+async function spawnChildFromParams(pi: ExtensionAPI, ctx: ExtensionContext, params: {
 	title: string;
 	task: string;
 	profile: string;
@@ -3473,7 +3432,7 @@ function spawnChildFromParams(pi: ExtensionAPI, ctx: ExtensionContext, params: {
 	parentAgentId?: string;
 	priority?: string;
 	allowDuplicateOwner?: boolean;
-}): SpawnSubagentResult {
+}): Promise<SpawnSubagentResult> {
 	const profile = requireProfile(params.profile);
 	const spawnCwd = resolveInputPath(ctx.cwd, params.cwd);
 	assertDirectory(spawnCwd);
@@ -3498,7 +3457,7 @@ function spawnChildFromParams(pi: ExtensionAPI, ctx: ExtensionContext, params: {
 	const tools = normalizeBuiltinTools(params.tools ?? profile.tools);
 	const hierarchyMode =
 		activeMeepoRuntime?.config.policies.hierarchy ?? loadMeepoConfig().policies.hierarchy;
-	const result = spawnSubagent({
+	const result = await spawnSubagent({
 		title: params.title,
 		task: params.task,
 		profile,
@@ -3553,11 +3512,11 @@ function getReadyTasksForDispatch(ctx: ExtensionContext, params: { scope?: "all"
 	return listTaskReadiness(getTmuxAgentsDb(), filters).filter((item) => item.ready);
 }
 
-function dispatchReadyTasks(pi: ExtensionAPI, ctx: ExtensionContext, items: TaskReadinessRecord[], options: { fallbackProfile?: string; maxDispatch?: number; dryRun?: boolean } = {}): {
+async function dispatchReadyTasks(pi: ExtensionAPI, ctx: ExtensionContext, items: TaskReadinessRecord[], options: { fallbackProfile?: string; maxDispatch?: number; dryRun?: boolean } = {}): Promise<{
 	dispatched: Array<{ taskId: string; profile: string; agentId: string; title: string }>;
 	skipped: Array<{ taskId: string; reason: string }>;
 	preview: Array<{ taskId: string; profile: string; title: string }>;
-} {
+}> {
 	const maxDispatch = Math.max(1, Math.min(options.maxDispatch ?? 5, 20));
 	const dispatched: Array<{ taskId: string; profile: string; agentId: string; title: string }> = [];
 	const skipped: Array<{ taskId: string; reason: string }> = [];
@@ -3577,7 +3536,7 @@ function dispatchReadyTasks(pi: ExtensionAPI, ctx: ExtensionContext, items: Task
 		}
 		preview.push({ taskId: item.task.id, profile: profileName, title: item.task.title });
 		if (options.dryRun) continue;
-		const result = spawnChildFromParams(pi, ctx, {
+		const result = await spawnChildFromParams(pi, ctx, {
 			title: item.task.title,
 			task: buildDispatchTaskPrompt(item.task),
 			profile: profileName,
@@ -3634,44 +3593,26 @@ async function chooseProfile(ctx: ExtensionContext): Promise<SubagentProfile | n
 	return profiles.find((profile) => profile.name === selected) ?? null;
 }
 
-function focusAgentById(id: string): { agent: AgentSummary; result: { focused: boolean; command: string; reason?: string } } {
+async function focusAgentById(id: string): Promise<{ agent: AgentSummary; result: { focused: boolean; command: string; reason?: string } }> {
 	const agent = getAgent(getTmuxAgentsDb(), id);
 	if (!agent) {
-		throw new Error(`Unknown agent id \"${id}\".`);
+		throw new Error(`Unknown agent id "${id}".`);
 	}
-	const result = focusTmuxTarget({
-		sessionId: agent.tmuxSessionId,
-		sessionName: agent.tmuxSessionName,
-		windowId: agent.tmuxWindowId,
-		paneId: agent.tmuxPaneId,
-	});
+	const result = await getProcessHost().focus(hostTargetRefFromLegacy(agent));
 	return { agent, result };
 }
 
-function captureAgentById(id: string, lines = 200): { agent: AgentSummary; content: string; command: string } {
+async function captureAgentById(id: string, lines = 200): Promise<{ agent: AgentSummary; content: string; command: string }> {
 	const agent = getAgent(getTmuxAgentsDb(), id);
 	if (!agent) {
-		throw new Error(`Unknown agent id \"${id}\".`);
+		throw new Error(`Unknown agent id "${id}".`);
 	}
-	if (
-		!tmuxTargetExists({
-			sessionId: agent.tmuxSessionId,
-			sessionName: agent.tmuxSessionName,
-			windowId: agent.tmuxWindowId,
-			paneId: agent.tmuxPaneId,
-		}, getTmuxInventory())
-	) {
-		throw new Error(`Cannot capture agent ${agent.id} because its tmux target is missing. Reconcile first.`);
+	const host = getProcessHost();
+	const target = hostTargetRefFromLegacy(agent);
+	if (!(await host.targetExists(target))) {
+		throw new Error(`Cannot capture agent ${agent.id} because its host target is missing. Reconcile first.`);
 	}
-	const result = captureTmuxTarget(
-		{
-			sessionId: agent.tmuxSessionId,
-			sessionName: agent.tmuxSessionName,
-			windowId: agent.tmuxWindowId,
-			paneId: agent.tmuxPaneId,
-		},
-		lines,
-	);
+	const result = await host.capture(target, { lines });
 	return { agent, content: result.content, command: result.command };
 }
 
@@ -4163,7 +4104,7 @@ function appendStandupUnblockOrderSection(
 	if (items.length > limit) lines.push(`- +${items.length - limit} more`);
 }
 
-function buildStandupText(ctx: ExtensionContext, scope: "all" | "current_project" | "current_session" | "descendants" = "current_project"): string {
+async function buildStandupText(ctx: ExtensionContext, scope: "all" | "current_project" | "current_session" | "descendants" = "current_project"): Promise<string> {
 	const board = buildBoardData(ctx);
 	const scopeData = board.scopes[scope];
 	const lanes = scopeData.lanes;
@@ -4172,7 +4113,7 @@ function buildStandupText(ctx: ExtensionContext, scope: "all" | "current_project
 	const review = lanes.in_review;
 	const activeWip = lanes.in_progress;
 	const ready = lanes.todo;
-	const cleanupCandidates = listCleanupCandidates(ctx, { scope, limit: 200 });
+	const cleanupCandidates = await listCleanupCandidates(ctx, { scope, limit: 200 });
 	const readiness = listTaskReadiness(getTmuxAgentsDb(), { ids: allTickets.map((ticket) => ticket.taskId), includeDone: false, limit: Math.max(allTickets.length, 1) });
 	const dependencyBlocked = readiness.filter((item) => item.unresolvedDependencies.length > 0);
 	const dependencyReady = readiness.filter((item) => item.ready && item.resolvedDependencies.length > 0);
@@ -4218,12 +4159,7 @@ async function runReplyFlow(ctx: ExtensionContext, agentId: string): Promise<voi
 		throw new Error(`Cannot message agent ${agent.id} because it is in terminal state ${agent.state}.`);
 	}
 	if (
-		!tmuxTargetExists({
-			sessionId: agent.tmuxSessionId,
-			sessionName: agent.tmuxSessionName,
-			windowId: agent.tmuxWindowId,
-			paneId: agent.tmuxPaneId,
-		}, getTmuxInventory())
+		!(await getProcessHost().targetExists(hostTargetRefFromLegacy(agent)))
 	) {
 		throw new Error(`Cannot message agent ${agent.id} because its tmux target is missing. Reconcile first.`);
 	}
@@ -4370,7 +4306,7 @@ async function runTaskSubtreeControlFlow(ctx: ExtensionContext, taskId: string):
 	};
 	const action = actionMap[selection] ?? "preview";
 	const reason = action === "preview" ? undefined : (await ctx.ui.input(`${selection} reason:`, ""))?.trim() || undefined;
-	const preview = buildTaskSubtreeControlPreview(ctx, taskId, action, { reason });
+	const preview = await buildTaskSubtreeControlPreview(ctx, taskId, action, { reason });
 	await ctx.ui.editor(`Subtree ${action} preview`, formatTaskSubtreeControlPreview(preview));
 	if (action === "preview") return;
 	const ok = await ctx.ui.confirm(`Confirm subtree ${action}`, formatTaskSubtreeControlConfirmation(preview));
@@ -4421,7 +4357,7 @@ async function runTaskSpawnWizard(pi: ExtensionAPI, ctx: ExtensionContext, taskI
 	const selectedTaskId = taskId ?? ((await ctx.ui.input("Existing task id (optional, blank = auto-create):", ""))?.trim() || undefined);
 	try {
 		const allowDuplicateOwner = await confirmTaskLeaseOverride(ctx, selectedTaskId, profile.name);
-		const result = spawnChildFromParams(pi, ctx, {
+		const result = await spawnChildFromParams(pi, ctx, {
 			title: title.trim(),
 			task: task.trim(),
 			profile: profile.name,
@@ -4452,7 +4388,7 @@ async function runAgentsDashboard(pi: ExtensionAPI, ctx: ExtensionContext, initi
 					break;
 				}
 				case "focus": {
-					const { agent, result } = focusAgentById(selectedId!);
+					const { agent, result } = await focusAgentById(selectedId!);
 					lastFocusedActiveAgentId = agent.id;
 					ctx.ui.notify(result.focused ? `Focused ${agent.id}.` : formatFocusResult(agent, result), result.focused ? "info" : "warning");
 					break;
@@ -4464,7 +4400,7 @@ async function runAgentsDashboard(pi: ExtensionAPI, ctx: ExtensionContext, initi
 					await runReplyFlow(ctx, selectedId!);
 					break;
 				case "capture": {
-					const capture = captureAgentById(selectedId!, 200);
+					const capture = await captureAgentById(selectedId!, 200);
 					await ctx.ui.editor(`Capture ${capture.agent.id}`, capture.content || "(empty capture)");
 					break;
 				}
@@ -4506,7 +4442,7 @@ async function runAgentsBoard(pi: ExtensionAPI, ctx: ExtensionContext, initialSt
 				case "focus": {
 					const agent = await chooseAgentForTaskAction(ctx, selectedId!, "Focus");
 					if (!agent) throw new Error(`Task ${selectedId!} has no linked active agents.`);
-					const { result } = focusAgentById(agent.id);
+					const { result } = await focusAgentById(agent.id);
 					lastFocusedActiveAgentId = agent.id;
 					ctx.ui.notify(result.focused ? `Focused ${agent.id}.` : formatFocusResult(agent, result), result.focused ? "info" : "warning");
 					break;
@@ -4526,7 +4462,7 @@ async function runAgentsBoard(pi: ExtensionAPI, ctx: ExtensionContext, initialSt
 				case "capture": {
 					const agent = await chooseAgentForTaskAction(ctx, selectedId!, "Capture");
 					if (!agent) throw new Error(`Task ${selectedId!} has no linked active agents.`);
-					const capture = captureAgentById(agent.id, 200);
+					const capture = await captureAgentById(agent.id, 200);
 					await ctx.ui.editor(`Capture ${capture.agent.id}`, capture.content || "(empty capture)");
 					break;
 				}
@@ -4620,7 +4556,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 		scope: "current_project",
 	};
 
-	function cycleActiveAgent(ctx: ExtensionContext, direction: 1 | -1): void {
+	async function cycleActiveAgent(ctx: ExtensionContext, direction: 1 | -1): Promise<void> {
 		const agents = listAgents(getTmuxAgentsDb(), { projectKey: getProjectKey(ctx.cwd), activeOnly: true, limit: 200 });
 		if (agents.length === 0) {
 			ctx.ui.notify("No active child agents to focus.", "warning");
@@ -4630,7 +4566,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 		const nextIndex = currentIndex === -1 ? 0 : (currentIndex + direction + agents.length) % agents.length;
 		const target = agents[nextIndex] ?? agents[0]!;
 		try {
-			const { result } = focusAgentById(target.id);
+			const { result } = await focusAgentById(target.id);
 			lastFocusedActiveAgentId = target.id;
 			ctx.ui.notify(result.focused ? `Focused ${target.id}.` : formatFocusResult(target, result), result.focused ? "info" : "warning");
 		} catch (error) {
@@ -4655,7 +4591,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const gateItems = listAttentionItems(getTmuxAgentsDb(), resolveAttentionFilters(ctx, "current_project", { limit: 5 }));
 			const gateAgents = new Map(listAgents(getTmuxAgentsDb(), { projectKey: getProjectKey(ctx.cwd), limit: 100 }).map((agent) => [agent.id, agent]));
-			const result = spawnChildFromParams(pi, ctx, params);
+			const result = await spawnChildFromParams(pi, ctx, params);
 			const warning = formatAttentionGateWarning(gateItems, gateAgents);
 			return {
 				content: [{ type: "text", text: `${warning ? `${warning}\n\n` : ""}${formatSpawnSuccess(result)}` }],
@@ -4674,7 +4610,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 		],
 		parameters: SubagentFocusParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const { agent, result } = focusAgentById(params.id);
+			const { agent, result } = await focusAgentById(params.id);
 			lastFocusedActiveAgentId = agent.id;
 			updateFleetUi(ctx);
 			return {
@@ -4764,12 +4700,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 				throw new Error(`Cannot message agent ${agent.id} because it is in terminal state ${agent.state}.`);
 			}
 			if (
-				!tmuxTargetExists({
-					sessionId: agent.tmuxSessionId,
-					sessionName: agent.tmuxSessionName,
-					windowId: agent.tmuxWindowId,
-					paneId: agent.tmuxPaneId,
-				}, getTmuxInventory())
+				!(await getProcessHost().targetExists(hostTargetRefFromLegacy(agent)))
 			) {
 				throw new Error(`Cannot message agent ${agent.id} because its tmux target is missing. Reconcile first.`);
 			}
@@ -4847,7 +4778,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 		],
 		parameters: SubagentCaptureParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const capture = captureAgentById(params.id, params.lines ?? 200);
+			const capture = await captureAgentById(params.id, params.lines ?? 200);
 			updateFleetUi(ctx);
 			return {
 				content: [{ type: "text", text: capture.content || "(empty capture)" }],
@@ -5083,7 +5014,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 			return args;
 		},
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const candidates = listCleanupCandidates(ctx, params);
+			const candidates = await listCleanupCandidates(ctx, params);
 			const dryRun = params.dryRun ?? false;
 			if (dryRun) {
 				updateFleetUi(ctx);
@@ -5094,7 +5025,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 			}
 			const ready = candidates.filter((candidate) => candidate.cleanupAllowed);
 			const skipped = candidates.filter((candidate) => !candidate.cleanupAllowed);
-			const results = ready.map((candidate) => cleanupAgentTarget(candidate, params.force ?? false));
+			const results = await Promise.all(ready.map((candidate) => cleanupAgentTarget(candidate, params.force ?? false)));
 			updateFleetUi(ctx);
 			return {
 				content: [{ type: "text", text: formatCleanupResults(results, skipped) }],
@@ -5311,7 +5242,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 				? listTaskReadiness(getTmuxAgentsDb(), { ids: dependentSourceIds, includeDone: false, limit: dependentSourceIds.length }).filter((item) => item.ready)
 				: [];
 			const dispatchResult = params.status === "done" && (params.autoDispatchReadyDependents ?? true) && readyDependents.length > 0
-				? dispatchReadyTasks(pi, ctx, readyDependents, { fallbackProfile: params.fallbackProfile, maxDispatch: params.maxDispatch, dryRun: false })
+				? await dispatchReadyTasks(pi, ctx, readyDependents, { fallbackProfile: params.fallbackProfile, maxDispatch: params.maxDispatch, dryRun: false })
 				: null;
 			const dependencyText = readyDependents.length > 0 ? `\n\nnewlyReadyDependents:\n${readyDependents.map(formatTaskReadinessLine).join("\n")}` : "";
 			const dispatchText = dispatchResult ? `\n\n${buildTaskDispatchText(dispatchResult, false)}` : "";
@@ -5534,7 +5465,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 		parameters: TaskDispatchReadyParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const ready = getReadyTasksForDispatch(ctx, { scope: params.scope, ids: params.ids, limit: params.ids?.length ?? 100 });
-			const result = dispatchReadyTasks(pi, ctx, ready, {
+			const result = await dispatchReadyTasks(pi, ctx, ready, {
 				fallbackProfile: params.fallbackProfile,
 				maxDispatch: params.maxDispatch,
 				dryRun: params.dryRun ?? false,
@@ -5608,7 +5539,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 		},
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const action = (params.action ?? "preview") as TaskSubtreeControlAction;
-			const preview = buildTaskSubtreeControlPreview(ctx, params.id, action, { includeRoot: params.includeRoot, reason: params.reason });
+			const preview = await buildTaskSubtreeControlPreview(ctx, params.id, action, { includeRoot: params.includeRoot, reason: params.reason });
 			if (action === "preview" || !(params.confirm ?? false)) {
 				const confirmationText = action === "preview" ? "" : `\n\nConfirmation required: rerun with confirm=true previewToken=${preview.previewToken} to apply this bulk action.`;
 				updateFleetUi(ctx);
@@ -5738,7 +5669,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 		],
 		parameters: TmuxServiceFocusParams,
 		async execute(_toolCallId, params) {
-			const { service, result } = focusServiceById(params.id);
+			const { service, result } = await focusServiceById(params.id);
 			return {
 				content: [{ type: "text", text: formatServiceFocusResult(service, result) }],
 				details: { service, ...result },
@@ -5757,7 +5688,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 		],
 		parameters: TmuxServiceStopParams,
 		async execute(_toolCallId, params) {
-			const { service, result } = stopServiceById(params.id, params.force ?? false, params.reason);
+			const { service, result } = await stopServiceById(params.id, params.force ?? false, params.reason);
 			return {
 				content: [{ type: "text", text: formatServiceStopResult(service, result, params.force ?? false) }],
 				details: { service, ...result, force: params.force ?? false },
@@ -5775,7 +5706,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 		],
 		parameters: TmuxServiceCaptureParams,
 		async execute(_toolCallId, params) {
-			const capture = captureServiceById(params.id, params.lines ?? 200);
+			const capture = await captureServiceById(params.id, params.lines ?? 200);
 			return {
 				content: [{ type: "text", text: capture.content || "(empty capture)" }],
 				details: { serviceId: capture.service.id, source: capture.source, command: capture.command, lines: params.lines ?? 200 },
@@ -5793,7 +5724,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 		],
 		parameters: TmuxServiceReconcileParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const result = reconcileServices(ctx, params);
+			const result = await reconcileServices(ctx, params);
 			return {
 				content: [{ type: "text", text: formatServiceReconcileResult(result) }],
 				details: result,
@@ -5826,7 +5757,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 				ctx.ui.notify("Usage: /standup [all|current_project|current_session|descendants]", "warning");
 				return;
 			}
-			const text = buildStandupText(ctx, scope);
+			const text = await buildStandupText(ctx, scope);
 			if (ctx.hasUI) await ctx.ui.editor("standup", text);
 			else ctx.ui.notify(text, "info");
 			updateFleetUi(ctx);
@@ -6013,7 +5944,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 			const previewToken = remaining.find((part) => part.startsWith("--preview-token="))?.slice("--preview-token=".length);
 			const reason = remaining.filter((part) => part !== "--confirm" && part !== "confirm" && !part.startsWith("--preview-token=")).join(" ").trim() || undefined;
 			try {
-				const preview = buildTaskSubtreeControlPreview(ctx, id, action, { reason });
+				const preview = await buildTaskSubtreeControlPreview(ctx, id, action, { reason });
 				const previewText = formatTaskSubtreeControlPreview(preview);
 				if (ctx.hasUI) await ctx.ui.editor(`Subtree ${action} preview`, previewText);
 				else ctx.ui.notify(previewText, "info");
@@ -6057,7 +5988,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 				return;
 			}
 			try {
-				const { agent, result } = focusAgentById(id);
+				const { agent, result } = await focusAgentById(id);
 				lastFocusedActiveAgentId = agent.id;
 				ctx.ui.notify(result.focused ? `Focused ${agent.id}.` : formatFocusResult(agent, result), result.focused ? "info" : "warning");
 			} catch (error) {
@@ -6083,12 +6014,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 				const agent = getAgent(getTmuxAgentsDb(), id);
 				if (!agent) throw new Error(`Unknown agent id \"${id}\".`);
 				if (
-					!tmuxTargetExists({
-						sessionId: agent.tmuxSessionId,
-						sessionName: agent.tmuxSessionName,
-						windowId: agent.tmuxWindowId,
-						paneId: agent.tmuxPaneId,
-					}, getTmuxInventory())
+					!(await getProcessHost().targetExists(hostTargetRefFromLegacy(agent)))
 				) {
 					throw new Error(`Cannot message agent ${agent.id} because its tmux target is missing. Reconcile first.`);
 				}
@@ -6116,7 +6042,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 				return;
 			}
 			try {
-				const capture = captureAgentById(id, Number.isFinite(lines) && lines > 0 ? lines : 200);
+				const capture = await captureAgentById(id, Number.isFinite(lines) && lines > 0 ? lines : 200);
 				await ctx.ui.editor(`Capture ${capture.agent.id}`, capture.content || "(empty capture)");
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
@@ -6194,7 +6120,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 				ctx.ui.notify("Usage: /agent-cleanup [<id>|all|current_project|current_session|descendants] [force]", "warning");
 				return;
 			}
-			const candidates = listCleanupCandidates(ctx, { scope: scope ?? "current_project", ids: id ? [id] : undefined, force, limit: 200 });
+			const candidates = await listCleanupCandidates(ctx, { scope: scope ?? "current_project", ids: id ? [id] : undefined, force, limit: 200 });
 			if (candidates.length === 0) {
 				ctx.ui.notify("No terminal agents matched for cleanup.", "info");
 				updateFleetUi(ctx);
@@ -6206,7 +6132,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 			}
 			const ready = candidates.filter((candidate) => candidate.cleanupAllowed);
 			const skipped = candidates.filter((candidate) => !candidate.cleanupAllowed);
-			const results = ready.map((candidate) => cleanupAgentTarget(candidate, force));
+			const results = await Promise.all(ready.map((candidate) => cleanupAgentTarget(candidate, force)));
 			const text = formatCleanupResults(results, skipped);
 			if (ctx.hasUI) await ctx.ui.editor("subagent cleanup", text);
 			else ctx.ui.notify(text, "info");
@@ -6246,7 +6172,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 				return;
 			}
 			try {
-				const { service, result } = focusServiceById(id);
+				const { service, result } = await focusServiceById(id);
 				ctx.ui.notify(result.focused ? `Focused ${service.id}.` : formatServiceFocusResult(service, result), result.focused ? "info" : "warning");
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
@@ -6265,7 +6191,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 				return;
 			}
 			try {
-				const capture = captureServiceById(id, Number.isFinite(lines) && lines > 0 ? lines : 200);
+				const capture = await captureServiceById(id, Number.isFinite(lines) && lines > 0 ? lines : 200);
 				await ctx.ui.editor(`Service capture ${capture.service.id}`, capture.content || "(empty capture)");
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
@@ -6284,7 +6210,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 				return;
 			}
 			try {
-				const { service, result } = stopServiceById(id, force);
+				const { service, result } = await stopServiceById(id, force);
 				ctx.ui.notify(formatServiceStopResult(service, result, force), force ? "warning" : "info");
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
@@ -6296,7 +6222,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 		description: "Refresh tmux service status from the global registry",
 		handler: async (_args, ctx) => {
 			try {
-				const result = reconcileServices(ctx, { scope: "current_project", activeOnly: false, limit: 200 });
+				const result = await reconcileServices(ctx, { scope: "current_project", activeOnly: false, limit: 200 });
 				ctx.ui.notify(formatServiceReconcileResult(result), "info");
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
@@ -6331,7 +6257,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 	pi.registerShortcut(Key.ctrlAlt("j"), {
 		description: "Focus next active child agent",
 		handler: async (ctx) => {
-			cycleActiveAgent(ctx, 1);
+			await cycleActiveAgent(ctx, 1);
 			updateFleetUi(ctx);
 		},
 	});
@@ -6339,7 +6265,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 	pi.registerShortcut(Key.ctrlAlt("k"), {
 		description: "Focus previous active child agent",
 		handler: async (ctx) => {
-			cycleActiveAgent(ctx, -1);
+			await cycleActiveAgent(ctx, -1);
 			updateFleetUi(ctx);
 		},
 	});
