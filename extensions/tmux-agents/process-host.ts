@@ -82,6 +82,12 @@ export interface HostNotifyInput {
 	title: string;
 	body?: string;
 	kind: "question" | "blocker" | "complete" | "info";
+	/**
+	 * Rate-limit key (typically Meepo agent id).
+	 * herdr: max 1 per key+kind per 30s; complete once per key per host lifetime.
+	 * When omitted, every call is delivered (still subject to info-off policy).
+	 */
+	rateKey?: string;
 }
 
 export interface ProcessHost {

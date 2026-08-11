@@ -272,4 +272,79 @@ describe("HerdProcessHost lifecycle (mocked CLI)", () => {
 		});
 		assert.equal(await host.getCurrentTarget(), null);
 	});
+
+	it("notify maps kinds to herdr notification show sounds", async () => {
+		const calls: string[][] = [];
+		const host = createHerdProcessHost({
+			isAvailableProbe: () => true,
+			runHerdr: (args) => {
+				calls.push(args);
+				return ok({ shown: true });
+			},
+		});
+		await host.notify({
+			kind: "question",
+			title: "Question: research-herdr",
+			body: "Need API shape",
+			rateKey: "sa_1",
+		});
+		await host.notify({
+			kind: "blocker",
+			title: "Blocked: research-herdr",
+			body: "Waiting on credentials",
+			rateKey: "sa_2",
+		});
+		await host.notify({
+			kind: "complete",
+			title: "Done: research-herdr",
+			body: "Handoff ready",
+			rateKey: "sa_3",
+		});
+		await host.notify({ kind: "info", title: "noise", rateKey: "sa_4" });
+
+		assert.equal(calls.length, 3);
+		assert.deepEqual(calls[0], [
+			"notification",
+			"show",
+			"Question: research-herdr",
+			"--sound",
+			"request",
+			"--body",
+			"Need API shape",
+		]);
+		assert.equal(calls[1][4], "request");
+		assert.equal(calls[2][4], "done");
+	});
+
+	it("notify rate-limits per agent+kind and complete-once", async () => {
+		const calls: string[][] = [];
+		const host = createHerdProcessHost({
+			isAvailableProbe: () => true,
+			runHerdr: (args) => {
+				calls.push(args);
+				return ok({ shown: true });
+			},
+		});
+		await host.notify({ kind: "question", title: "Question: a", body: "first", rateKey: "sa_x" });
+		await host.notify({ kind: "question", title: "Question: a", body: "second", rateKey: "sa_x" });
+		await host.notify({ kind: "complete", title: "Done: a", rateKey: "sa_x" });
+		await host.notify({ kind: "complete", title: "Done: a again", rateKey: "sa_x" });
+		// Different kind still allowed within the window.
+		await host.notify({ kind: "blocker", title: "Blocked: a", rateKey: "sa_x" });
+
+		assert.equal(calls.length, 3);
+		assert.equal(calls[0][2], "Question: a");
+		assert.equal(calls[1][2], "Done: a");
+		assert.equal(calls[2][2], "Blocked: a");
+	});
+
+	it("notify soft-fails when herdr CLI errors", async () => {
+		const host = createHerdProcessHost({
+			isAvailableProbe: () => true,
+			runHerdr: () => err("not_connected", "no server"),
+		});
+		await assert.doesNotReject(() =>
+			host.notify({ kind: "question", title: "Question: x", rateKey: "sa_y" }),
+		);
+	});
 });

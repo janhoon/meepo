@@ -1,6 +1,8 @@
 # tmux-agents extension
 
-Current implementation status: **task-first board + task registry + agent/runtime control foundation**, plus tracked tmux service launches for long-running commands and an in-progress RPC bridge control plane for child agents.
+> Extension directory name remains `tmux-agents` for install compatibility. The runtime is host-neutral via **ProcessHost** (`tmux` | `herdr`).
+
+Current implementation status: **task-first board + task registry + agent/runtime control foundation**, pluggable **ProcessHost** (tmux + herdr adapters), tracked service launches for long-running commands, RPC bridge control plane for child agents, and herdr desktop notifications for attention wakes.
 
 Implemented so far:
 - global SQLite bootstrap at `~/.pi/agent/subagents.db`
@@ -97,12 +99,17 @@ Implemented so far:
   - `metadata.json`
   - `latest-status.json`
   - `output.log`
-- tmux window spawning with stored tmux ids
-- tmux-side RPC bridge launch path for new subagent spawns:
-  - tmux runs a bridge entrypoint instead of invoking `pi` directly
+- ProcessHost spawn with stored host-neutral ids (`host_kind`, `host_primary_id`, `host_display_name`) plus legacy `tmux_*` columns
+  - selection: `runtime.processHost` / `MEEPO_PROCESS_HOST` = `auto|tmux|herdr` (auto prefers herdr on PATH)
+  - herdr: named agents, current workspace/active tab, `--no-focus`, durable `terminal_id`
+  - tmux: detached session / current session windows as before
+- host-side RPC bridge launch path for new subagent spawns (identical on tmux and herdr):
+  - ProcessHost runs a bridge entrypoint instead of invoking `pi` directly
   - the bridge launches `pi --mode rpc`
   - the bridge exposes a local Unix socket control endpoint for prompt/steer/follow_up/abort/get_state
-  - the bridge mirrors readable activity into the tmux pane while persisting machine-readable status/events
+  - the bridge mirrors readable activity into the host pane while persisting machine-readable status/events
+  - `subagent_message` never falls back to herdr/tmux PTY typing — degraded path is inbox/poll only
+- herdr attention toasts (`herdr notification show`) for question/blocker/complete on the herdr backend only
 - parent-session linkage entries appended into the current pi session
 - child-mode runtime support:
   - auto `started` event
@@ -163,16 +170,16 @@ Quick operator notes for the RPC path:
 - `subagent_get`, `subagent_list`, dashboard details, and reconcile output now expose transport state for bridge-backed children.
 - Transport state can be any of `legacy`, `launching`, `listening`, `live`, `fallback`, `disconnected`, `stopped`, `error`, or `lost`. `legacy` marks older records from before the RPC migration; everything else is reported by the bridge or by reconcile.
 - `subagent_message` now attempts live bridge delivery first and leaves queued mailbox rows in place when it must fall back.
-- Graceful `subagent_stop` prefers a bridge-delivered cancel before falling back to tmux `Ctrl+C`.
-- `subagent_reconcile` inspects both tmux state and bridge health to refresh transport metadata.
+- Graceful `subagent_stop` prefers a bridge-delivered cancel before falling back to host stop (tmux `Ctrl+C` / herdr pane close).
+- `subagent_reconcile` inspects both ProcessHost inventory and bridge health to refresh transport metadata.
 
 Manual validation / troubleshooting checklist:
 - Spawn a new child and confirm its run dir contains `bridge-config.json`, `bridge-status.json`, `bridge-events.jsonl`, `bridge.log`, and `bridge.pid`.
 - Use `subagent_get` or `/agents` to confirm the new child reports `transportKind=rpc_bridge`.
 - Watch the healthy launch progression: a freshly spawned child should move from `launching` (bridge entrypoint starting) to `listening` (socket accepting connections) to `live` (child runtime attached and exchanging RPC traffic). If it stalls at `launching` or `listening` for more than a few seconds, inspect `bridge.log` and `bridge-status.json`.
 - Send `subagent_message` to a live child and verify the message is either reported as delivered via the bridge or left queued with `transportState=fallback`.
-- Publish a child `question` or `blocked` update and verify the coordinator gets a wake-up message while the item also remains visible in attention surfaces.
-- Run `subagent_reconcile` after killing the bridge or closing the tmux target and confirm the transport state changes to something explicit like `fallback`, `disconnected`, `stopped`, or `lost`.
-- If transport is not `live`, inspect `bridge-status.json`, `bridge.log`, and the tmux pane before falling back to `subagent_capture`.
+- Publish a child `question` or `blocked` update and verify the coordinator gets a wake-up message while the item also remains visible in attention surfaces. On herdr, also expect a desktop toast (`Question:` / `Blocked:` / `Done:`).
+- Run `subagent_reconcile` after killing the bridge or closing the host target and confirm the transport state changes to something explicit like `fallback`, `disconnected`, `stopped`, or `lost`.
+- If transport is not `live`, inspect `bridge-status.json`, `bridge.log`, and the host pane (`subagent_capture` / `herdr agent read` / tmux capture) before treating capture as the primary control path.
 
 Use `/reload` in pi after changing files under `~/.pi/agent/extensions/tmux-agents/`.

@@ -199,6 +199,9 @@ export interface SpawnSubagentResult {
 	tmuxSessionName: string;
 	tmuxWindowId: string;
 	tmuxPaneId: string;
+	hostKind: string;
+	hostPrimaryId: string;
+	hostDisplayName: string | null;
 	sessionLinkData: SessionChildLinkEntryData;
 }
 

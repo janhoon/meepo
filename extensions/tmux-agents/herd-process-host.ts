@@ -149,14 +149,70 @@ function launchArgvFromCommand(launchCommand: string): string[] {
 	return ["bash", "-lc", launchCommand];
 }
 
+const NOTIFY_RATE_WINDOW_MS = 30_000;
+const NOTIFY_BODY_MAX = 200;
+
+/** Policy #19 sound map. info is off by default (no CLI call). */
+function notifySoundForKind(kind: HostNotifyInput["kind"]): "request" | "done" | null {
+	switch (kind) {
+		case "question":
+		case "blocker":
+			return "request";
+		case "complete":
+			return "done";
+		case "info":
+		default:
+			return null;
+	}
+}
+
+function truncateNotifyBody(body: string | undefined): string | undefined {
+	if (body == null) return undefined;
+	const trimmed = body.replace(/\s+/g, " ").trim();
+	if (!trimmed) return undefined;
+	if (trimmed.length <= NOTIFY_BODY_MAX) return trimmed;
+	return `${trimmed.slice(0, NOTIFY_BODY_MAX - 1)}…`;
+}
+
 export class HerdProcessHost implements ProcessHost {
 	readonly hostKind = "herdr" as const;
 	private readonly runHerdr: HerdrCliRunner;
 	private readonly isAvailableProbe: () => boolean;
+	/** rateKey → kind → last delivered at (ms). */
+	private readonly notifyLastAt = new Map<string, Map<HostNotifyInput["kind"], number>>();
+	/** rateKeys that already received a complete notification this host lifetime. */
+	private readonly notifyCompleteOnce = new Set<string>();
 
 	constructor(options: HerdProcessHostOptions = {}) {
 		this.runHerdr = options.runHerdr ?? defaultRunHerdr;
 		this.isAvailableProbe = options.isAvailableProbe ?? probeHerdrAvailable;
+	}
+
+	private shouldDeliverNotify(input: HostNotifyInput, now: number): boolean {
+		const key = input.rateKey?.trim();
+		if (!key) return true;
+		if (input.kind === "complete") {
+			if (this.notifyCompleteOnce.has(key)) return false;
+			return true;
+		}
+		const byKind = this.notifyLastAt.get(key);
+		const last = byKind?.get(input.kind);
+		if (last != null && now - last < NOTIFY_RATE_WINDOW_MS) return false;
+		return true;
+	}
+
+	private recordNotifyDelivery(input: HostNotifyInput, now: number): void {
+		const key = input.rateKey?.trim();
+		if (!key) return;
+		if (input.kind === "complete") {
+			this.notifyCompleteOnce.add(key);
+		}
+		let byKind = this.notifyLastAt.get(key);
+		if (!byKind) {
+			byKind = new Map();
+			this.notifyLastAt.set(key, byKind);
+		}
+		byKind.set(input.kind, now);
 	}
 
 	private invoke(args: string[]): HerdrEnvelope {
@@ -468,8 +524,34 @@ export class HerdProcessHost implements ProcessHost {
 		return { content, command };
 	}
 
-	async notify(_input: HostNotifyInput): Promise<void> {
-		// Notification policy + wiring lands with ticket #23.
+	/**
+	 * herdr notification show — policy #19.
+	 * question/blocker → sound request; complete → done; info → no-op.
+	 * Rate limit: 1 per rateKey+kind per 30s; complete once per rateKey per host lifetime.
+	 * Failures are swallowed (toast UX must not break attention wake).
+	 */
+	async notify(input: HostNotifyInput): Promise<void> {
+		const sound = notifySoundForKind(input.kind);
+		if (sound == null) return;
+
+		const title = input.title.replace(/\s+/g, " ").trim();
+		if (!title) return;
+
+		const now = Date.now();
+		if (!this.shouldDeliverNotify(input, now)) return;
+
+		const body = truncateNotifyBody(input.body);
+		const args = ["notification", "show", title, "--sound", sound];
+		if (body) {
+			args.push("--body", body);
+		}
+
+		try {
+			this.invoke(args);
+			this.recordNotifyDelivery(input, now);
+		} catch {
+			// Soft-fail: host toast is best-effort UX, not control-plane truth.
+		}
 	}
 }
 

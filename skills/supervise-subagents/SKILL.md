@@ -27,9 +27,10 @@ Always triage in this order:
 - Prefer answering questions and unblocking children before spawning new ones.
 - When a non-trivial task is `in_review`, expect multiple sibling reviewers and synthesize overlap versus unique findings before moving the task to `done`.
 - Treat `subagent_capture` as a debug fallback, not a normal supervision primitive.
-- After completion has been synthesized, use `subagent_cleanup` so old terminal child tmux windows do not pile up.
-- Use `subagent_reconcile` or `task_reconcile` if tmux state, task links, or registry state look stale.
-- Use `subagent_focus` to jump to a child tmux window when live inspection is useful.
+- After completion has been synthesized, use `subagent_cleanup` so old terminal child host windows/panes do not pile up.
+- Use `subagent_reconcile` or `task_reconcile` if host inventory, task links, or registry state look stale.
+- Use `subagent_focus` to jump to a child host window/pane when live inspection is useful.
+- On herdr, question/blocker/complete attention also fires desktop toasts; still treat inbox/attention tools as the source of truth.
 - Never use `bash` with `sleep`, `watch`, `tail -f`, `while`, or retry loops to wait for subagent progress, attention, or review output.
 - Treat inbox, attention, get, and capture tools as one-pass snapshots, not monitors.
 - After one supervision pass, either act on open items, continue with other ready tasks, or end the turn.

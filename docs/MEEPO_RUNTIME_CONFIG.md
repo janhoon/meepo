@@ -1,6 +1,6 @@
 # MeepoRuntime config contract
 
-Meepo is split into a **platform** (tmux subagents, registry, optional tasks/services) and optional **doctrine presets** (org chart, no-wait enforce, review-lease name compat, dense orchestration personas).
+Meepo is split into a **platform** (process-hosted subagents via **tmux or herdr**, registry, optional tasks/services) and optional **doctrine presets** (org chart, no-wait enforce, review-lease name compat, dense orchestration personas).
 
 The deep module is **MeepoRuntime**: it loads config, optionally seeds doctrine, and registers tools/commands through a capability filter.
 
@@ -57,10 +57,47 @@ Core is for consumers who want durable multi-agent process control without the c
   },
   runtime: {
     agentDir: string | null,  // reserved; null = Pi getAgentDir defaults
-    detachedSessionName: string, // default "pi-subagents"
+    detachedSessionName: string, // default "pi-subagents" (tmux agent pool)
+    serviceDetachedSessionName: string, // default "pi-services" (tmux service pool)
+    processHost: "auto" | "tmux" | "herdr", // default "auto"
   },
 }
 ```
+
+### Process host backend
+
+Meepo freezes **one** process host per primary session at `MeepoRuntime.start`:
+
+| Selection | Behavior |
+|---|---|
+| `auto` (default) | Prefer **herdr** when on `PATH` and `herdr --version` succeeds; else **tmux** |
+| `tmux` | Always use the tmux adapter |
+| `herdr` | Always use the herdr adapter (fails spawn if herdr unavailable) |
+
+**Precedence:** env `MEEPO_PROCESS_HOST` → config `runtime.processHost` → `auto`.
+
+Registry stores host-neutral `host_kind` / `host_primary_id` / `host_display_name` / `host_target_json` plus legacy `tmux_*` columns for compatibility.
+
+On the **herdr** backend only, user-facing attention wakes fire `herdr notification show` for:
+
+| Attention | Toast title | Sound |
+|---|---|---|
+| `question` / `question_for_user` | `Question: <displayName>` | `request` |
+| `blocked` | `Blocked: <displayName>` | `request` |
+| `complete` | `Done: <displayName>` | `done` |
+
+Rate limit: max one toast per agent per kind per 30s; `complete` once per agent per primary session. The **tmux** backend no-ops `notify` (Pi UI wake path still runs).
+
+### RPC / child control plane (host-agnostic)
+
+Parent↔child control uses the same **`rpc_bridge`** on every ProcessHost backend:
+
+- Spawn writes identical run-dir artifacts and a launch script whose main process is `rpc-bridge.mjs` (not bare `pi`).
+- ProcessHost only places that launch command (tmux window or herdr named agent); it does **not** carry send/ping APIs.
+- `subagent_message` delivery modes (`immediate` / `steer` / `follow_up` / `idle_only`) map to bridge commands (`prompt` / `steer` / `follow_up`) only.
+- Degraded path is inbox/poll + bridge status files — **not** herdr PTY typing or `agent send`.
+- Graceful stop: bridge cancel when possible, then ProcessHost `stop` (tmux kill / herdr pane close). Force stop is ProcessHost only.
+- Transport kind stays `rpc_bridge` (no `rpc_bridge_herdr`). Host identity lives in `host_*` fields.
 
 ### Loading
 
@@ -68,6 +105,7 @@ Core is for consumers who want durable multi-agent process control without the c
 
 1. Base from `options.preset` or env `MEEPO_PRESET` or **`full`**
 2. Optional overrides: `capabilities`, `policies`, `profiles`, `runtime`
+3. Env `MEEPO_PROCESS_HOST` overrides `runtime.processHost` when set
 
 ### Capabilities → tools
 

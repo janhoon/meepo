@@ -1,6 +1,6 @@
 ---
 name: dispatch-subagents
-description: Delegate work across tmux-backed child agents when tasks should be isolated by role, scope, or context window.
+description: Delegate work across process-hosted child agents (tmux or herdr) when tasks should be isolated by role, scope, or context window.
 ---
 
 # Dispatch Subagents

@@ -32,6 +32,7 @@ import type {
 import { getTmuxAgentsDb } from "./db.js";
 import { getProjectKey } from "./project.js";
 import { getProcessHost, hostFieldsFromTarget } from "./process-host.js";
+import { buildBridgeLaunchCommand } from "./rpc-bridge-control.js";
 
 const RPC_BRIDGE_ENTRY_SCRIPT = fileURLToPath(new URL("./rpc-bridge.mjs", import.meta.url));
 
@@ -220,12 +221,14 @@ function buildBridgeConfig(options: CreateRunArtifactsOptions, paths: SubagentRu
 }
 
 function buildLaunchScriptContent(options: CreateRunArtifactsOptions, paths: SubagentRunPaths): string {
-	return [
-		"#!/usr/bin/env bash",
-		"set -euo pipefail",
-		`cd ${shellQuote(options.spawnCwd)}`,
-		`exec ${shellQuote(process.execPath)} ${shellQuote(RPC_BRIDGE_ENTRY_SCRIPT)} --config ${shellQuote(paths.bridgeConfigFile)}`,
-	].join("\n");
+	// Identical launch contract on tmux and herdr (wayfinder #20/#24): bridge is pane main process.
+	const launch = buildBridgeLaunchCommand({
+		nodeExecutable: process.execPath,
+		bridgeEntryScript: RPC_BRIDGE_ENTRY_SCRIPT,
+		bridgeConfigFile: paths.bridgeConfigFile,
+		shellQuote,
+	});
+	return ["#!/usr/bin/env bash", "set -euo pipefail", `cd ${shellQuote(options.spawnCwd)}`, launch].join("\n");
 }
 
 function writeRunArtifacts(options: CreateRunArtifactsOptions): SubagentRunPaths {
@@ -698,6 +701,9 @@ export async function spawnSubagent(input: SpawnSubagentInput): Promise<SpawnSub
 		tmuxSessionName: fields.tmuxSessionName ?? "",
 		tmuxWindowId: fields.tmuxWindowId ?? "",
 		tmuxPaneId: fields.tmuxPaneId ?? "",
+		hostKind: fields.hostKind,
+		hostPrimaryId: fields.hostPrimaryId,
+		hostDisplayName: fields.hostDisplayName,
 		sessionLinkData,
 	};
 }

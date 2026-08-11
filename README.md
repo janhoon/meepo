@@ -1,11 +1,11 @@
 # meepo
 
 > One Pi agent, many replicas.
-> tmux-backed subagents, tracked services, and enough coordination to keep the whole pack moving together.
+> Process-hosted subagents (tmux or herdr), tracked services, and enough coordination to keep the whole pack moving together.
 
-`meepo` is a Pi package for running child agents in tracked tmux windows and managing long-running tmux services alongside them.
+`meepo` is a Pi package for running child agents in tracked host windows/panes and managing long-running services alongside them. The default process host is **auto**: use **herdr** when it is on `PATH`, otherwise **tmux**. Force a backend with `MEEPO_PROCESS_HOST=tmux|herdr|auto` or `runtime.processHost` in config.
 
-It is named after the Dota 2 hero for a very specific reason: Meepo is strongest when one becomes many, and this repo gives Pi that same trick. You can spawn focused replicas, keep each one in its own tmux context, let them report questions or blockers upward, and message them back without losing track of the squad.
+It is named after the Dota 2 hero for a very specific reason: Meepo is strongest when one becomes many, and this repo gives Pi that same trick. You can spawn focused replicas, keep each one in its own host context, let them report questions or blockers upward, and message them back without losing track of the squad.
 
 If you want the practical version: this package makes multi-agent Pi workflows feel less like "open a bunch of terminals and hope" and more like "replica control, but with receipts."
 
@@ -18,16 +18,17 @@ In this repo, the primary agent can:
 - keep tabs on them through a shared registry
 - read proactive updates through `subagent_inbox`
 - answer, redirect, reprioritize, or stop them with `subagent_message` and `subagent_stop`
-- jump into any replica's tmux window with `subagent_focus`
+- jump into any replica's host window/pane with `subagent_focus`
 - capture recent output with `subagent_capture`
+- on herdr, get desktop toasts for questions, blockers, and completions
 
 So yes: the repo is literally about coordinating a small army of Meepos.
 
 ## What this package adds to Pi
 
-### Task-first tmux-backed subagents
+### Task-first process-hosted subagents
 
-Capture work as tracked tasks first, then spawn focused child agents in isolated tmux windows to execute against those tasks. Agent lifecycle remains visible, but the board now reflects task lifecycle instead of agent lifecycle.
+Capture work as tracked tasks first, then spawn focused child agents in isolated host windows/panes (tmux or herdr) to execute against those tasks. Agent lifecycle remains visible, but the board now reflects task lifecycle instead of agent lifecycle.
 
 ### Replica-to-parent communication
 
@@ -35,11 +36,11 @@ Children report upward proactively instead of making the primary agent poll them
 
 ### RPC bridge-backed child control plane
 
-New child launches are moving to a tmux-side RPC bridge. That bridge runs visibly in the child tmux pane, launches `pi --mode rpc`, persists bridge status/events into the run directory, and gives the coordinator a live control path for prompt/steer/follow-up style child messaging.
+New child launches use an RPC bridge as the child main process (same on tmux and herdr). That bridge runs visibly in the child pane, launches `pi --mode rpc`, persists bridge status/events into the run directory, and gives the coordinator a live control path for prompt/steer/follow-up style child messaging.
 
 ### Tracked long-running services
 
-Launch API servers, frontend dev servers, watchers, or other long-running commands in tracked tmux windows and manage them with the same focus/capture/stop/reconcile workflow.
+Launch API servers, frontend dev servers, watchers, or other long-running commands in tracked host windows/panes and manage them with the same focus/capture/stop/reconcile workflow.
 
 ### Orchestration scaffolding
 
@@ -48,8 +49,8 @@ The package also includes reusable agent profiles, orchestration skills, and pro
 ## Included in the box
 
 - `extensions/tmux-agents/`
-  - subagent registry, spawn/runtime flow, messaging, reconcile, dashboard
-  - tracked tmux services for API servers, frontend dev servers, watchers, and other long-running commands
+  - subagent registry, ProcessHost (tmux + herdr adapters), spawn/runtime flow, messaging, reconcile, dashboard
+  - tracked services for API servers, frontend dev servers, watchers, and other long-running commands
 - `skills/`
   - `dispatch-subagents`
   - `communicate-subagents`
@@ -78,7 +79,7 @@ pi install /path/to/meepo
 
 ## Platform vs presets (MeepoRuntime)
 
-Meepo is a **platform** (tracked tmux subagents, registry, optional tasks/services) plus optional **doctrine** (org chart, no-wait enforce, review-pack personas).
+Meepo is a **platform** (tracked process-hosted subagents, registry, optional tasks/services) plus optional **doctrine** (org chart, no-wait enforce, review-pack personas).
 
 - **Default (full):** today’s full operator experience — all tools, hierarchy enforce, no-wait enforce, org role/edge seeds, package agent personas.
 - **Core consumer:** set `MEEPO_PRESET=core` for agents-core tools only, soft policies, and no org seeder.
@@ -87,7 +88,7 @@ Config keys, capability→tool maps, policy modes, profile frontmatter (`role` /
 
 - [`docs/MEEPO_RUNTIME_CONFIG.md`](docs/MEEPO_RUNTIME_CONFIG.md)
 
-Run unit tests (no tmux):
+Run unit tests (no live tmux/herdr required; adapters are mocked):
 
 ```bash
 npm test
@@ -122,7 +123,9 @@ npm test
 - `subagent_capture`
 - `subagent_reconcile`
 
-### Long-running tmux service tools
+### Long-running service tools
+
+Tool names still use the `tmux_service_*` prefix for compatibility; they run on the frozen ProcessHost (tmux or herdr).
 
 - `tmux_service_start`
 - `tmux_service_list`
@@ -173,7 +176,22 @@ npm test
 4. Reply with `subagent_message` and move the task with `task_move` when the real work state changes.
 5. Open `/task-board` when you want a Pi-native board view of `todo`, `blocked`, `in_progress`, `in_review`, and `done` work.
 6. Spin up a tracked service with `tmux_service_start` if the task needs an app server, watcher, or dev environment.
-7. Run `subagent_cleanup` or `/agent-cleanup` to remove finished tmux child windows once their work has been synthesized.
+7. Run `subagent_cleanup` or `/agent-cleanup` to remove finished child host windows/panes once their work has been synthesized.
+
+### Process host switch
+
+```bash
+# Prefer herdr when installed (default)
+export MEEPO_PROCESS_HOST=auto
+
+# Force tmux even if herdr is on PATH
+export MEEPO_PROCESS_HOST=tmux
+
+# Force herdr (spawn fails if herdr is unavailable)
+export MEEPO_PROCESS_HOST=herdr
+```
+
+Backend is frozen once per primary Pi session — restart Pi to switch. See [`docs/MEEPO_RUNTIME_CONFIG.md`](docs/MEEPO_RUNTIME_CONFIG.md).
 8. Focus, capture, reconcile, or stop anything in the pack as needed.
 
 In other words: split the work, keep the replicas coordinated, and avoid the classic "which terminal was doing the important thing?" problem.

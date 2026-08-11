@@ -83,7 +83,12 @@ import {
 import { getService, listServices, updateService } from "./service-registry.js";
 import { readServiceStatus, spawnService, tailFileLines } from "./service-spawn.js";
 import { spawnSubagent } from "./spawn.js";
+import { maybeNotifyHostAttention } from "./host-notify.js";
 import { getProcessHost, hostTargetRefFromLegacy } from "./process-host.js";
+import {
+	mapDeliveryModeToBridgeCommand,
+	missingHostTargetMessage,
+} from "./rpc-bridge-control.js";
 import type {
 	ListServicesFilters,
 	ServiceStatusSnapshot,
@@ -138,6 +143,8 @@ const liveBridgeDeliveryInFlight = new Set<string>();
 const scheduledBridgeDeliveryRetries = new Map<string, ReturnType<typeof setTimeout>>();
 const sentCoordinatorAttentionIds = new Set<string>();
 const notifiedUserAttentionIds = new Set<string>();
+/** Attention item ids that already triggered a ProcessHost toast (herdr). */
+const hostNotifiedAttentionIds = new Set<string>();
 
 const LIST_SCOPE = StringEnum(["all", "current_project", "current_session", "descendants"] as const, {
 	description: "Which slice of the global registry to inspect.",
@@ -176,12 +183,12 @@ const DOWNWARD_ACTION_POLICY = StringEnum(["fyi", "resume_if_blocked", "replan",
 });
 
 const SubagentFocusParams = Type.Object({
-	id: Type.String({ description: "Tracked child agent id to focus in tmux." }),
+	id: Type.String({ description: "Tracked child agent id to focus on the frozen ProcessHost (tmux or herdr)." }),
 });
 
 const SubagentStopParams = Type.Object({
 	id: Type.String({ description: "Tracked child agent id to stop." }),
-	force: Type.Optional(Type.Boolean({ description: "Kill the tmux pane/window immediately instead of queueing a graceful cancel.", default: false })),
+	force: Type.Optional(Type.Boolean({ description: "Kill the host pane/window immediately instead of queueing a graceful cancel.", default: false })),
 	reason: Type.Optional(Type.String({ description: "Optional reason shown to the child or event log." })),
 });
 
@@ -247,7 +254,7 @@ const SubagentCleanupParams = Type.Object({
 	scope: Type.Optional(LIST_SCOPE),
 	ids: Type.Optional(Type.Array(Type.String({ description: "Agent id" }), { minItems: 1, maxItems: 100 })),
 	force: Type.Optional(Type.Boolean({ description: "Clean terminal agents even if unresolved non-completion attention items still exist.", default: false })),
-	dryRun: Type.Optional(Type.Boolean({ description: "Preview cleanup candidates without killing tmux targets.", default: false })),
+	dryRun: Type.Optional(Type.Boolean({ description: "Preview cleanup candidates without killing host targets.", default: false })),
 	limit: Type.Optional(Type.Integer({ description: "Maximum number of agents to inspect for cleanup.", minimum: 1, maximum: 500, default: 100 })),
 });
 
@@ -483,12 +490,12 @@ const TmuxServiceGetParams = Type.Object({
 });
 
 const TmuxServiceFocusParams = Type.Object({
-	id: Type.String({ description: "Tracked service id to focus in tmux." }),
+	id: Type.String({ description: "Tracked service id to focus on the frozen ProcessHost." }),
 });
 
 const TmuxServiceStopParams = Type.Object({
 	id: Type.String({ description: "Tracked service id to stop." }),
-	force: Type.Optional(Type.Boolean({ description: "Kill the tmux pane/window immediately instead of sending Ctrl+C.", default: false })),
+	force: Type.Optional(Type.Boolean({ description: "Kill the host pane/window immediately instead of sending an interrupt.", default: false })),
 	reason: Type.Optional(Type.String({ description: "Optional reason shown in the result text." })),
 });
 
@@ -1446,6 +1453,15 @@ async function wakeCoordinatorFromAttention(pi: ExtensionAPI, ctx: ExtensionCont
 
 	for (const item of items) {
 		const agent = agents.get(item.agentId);
+		if (!hostNotifiedAttentionIds.has(item.id)) {
+			hostNotifiedAttentionIds.add(item.id);
+			void maybeNotifyHostAttention({
+				kind: item.kind,
+				agentId: item.agentId,
+				summary: item.summary,
+				displayName: agent?.hostDisplayName ?? agent?.title ?? null,
+			}).catch(() => {});
+		}
 		if (item.audience === "user") {
 			if (notifiedUserAttentionIds.has(item.id)) continue;
 			try {
@@ -2105,7 +2121,7 @@ async function cleanupAgentTarget(candidate: CleanupCandidate, force = false): P
 				updatedAt: now,
 				resolvedAt: now,
 				resolutionKind: "cleanup",
-				resolutionSummary: "Agent tmux target cleaned up after completion.",
+				resolutionSummary: "Agent host target cleaned up after completion.",
 			},
 			{ states: OPEN_ATTENTION_STATES, kinds: ["complete"] },
 		);
@@ -2121,7 +2137,7 @@ async function cleanupAgentTarget(candidate: CleanupCandidate, force = false): P
 					updatedAt: now,
 					resolvedAt: now,
 					resolutionKind: "cleanup_force",
-					resolutionSummary: "Agent tmux target force-cleaned while unresolved attention remained.",
+					resolutionSummary: "Agent host target force-cleaned while unresolved attention remained.",
 				},
 				{ states: OPEN_ATTENTION_STATES, kinds: ["question", "question_for_user", "blocked"] },
 			);
@@ -2131,7 +2147,7 @@ async function cleanupAgentTarget(candidate: CleanupCandidate, force = false): P
 		id: randomUUID(),
 		agentId: agent.id,
 		eventType: "cleaned_up",
-		summary: force ? "Cleaned up tmux target with force." : "Cleaned up tmux target after terminal state.",
+		summary: force ? "Cleaned up host target with force." : "Cleaned up host target after terminal state.",
 		payload: { command: result.command, force },
 	});
 	if (agent.taskId) {
@@ -2182,18 +2198,26 @@ function formatSpawnSuccess(result: SpawnSubagentResult): string {
 		`bridgeSocketPath: ${result.bridgeSocketPath ?? "-"}`,
 		`bridgeStatusFile: ${result.bridgeStatusFile ?? "-"}`,
 		`bridgeLogFile: ${result.bridgeLogFile ?? "-"}`,
-		`tmuxSession: ${result.tmuxSessionName} ${result.tmuxSessionId}`,
-		`tmuxWindow: ${result.tmuxWindowId}`,
-		`tmuxPane: ${result.tmuxPaneId}`,
+		`hostKind: ${result.hostKind}`,
+		`hostPrimaryId: ${result.hostPrimaryId}`,
+		`hostDisplayName: ${result.hostDisplayName ?? "-"}`,
+		// Legacy tmux_* fields remain when host is tmux (empty strings on herdr).
+		`tmuxSession: ${result.tmuxSessionName || "-"} ${result.tmuxSessionId || ""}`.trim(),
+		`tmuxWindow: ${result.tmuxWindowId || "-"}`,
+		`tmuxPane: ${result.tmuxPaneId || "-"}`,
 	].join("\n");
 }
 
 function formatFocusResult(agent: AgentSummary, result: { focused: boolean; command: string; reason?: string }): string {
+	const hostLabel = agent.hostKind ?? "host";
 	return [
 		result.focused
-			? `Focused ${agent.id} in tmux.`
+			? `Focused ${agent.id} on ${hostLabel}.`
 			: `Could not switch the current pi client automatically for ${agent.id}.`,
 		result.reason ? `reason: ${result.reason}` : null,
+		`hostKind: ${agent.hostKind ?? "-"}`,
+		`hostPrimaryId: ${agent.hostPrimaryId ?? "-"}`,
+		`hostDisplayName: ${agent.hostDisplayName ?? "-"}`,
 		`tmuxSession: ${agent.tmuxSessionName ?? agent.tmuxSessionId ?? "-"}`,
 		`tmuxWindow: ${agent.tmuxWindowId ?? "-"}`,
 		`tmuxPane: ${agent.tmuxPaneId ?? "-"}`,
@@ -2391,11 +2415,11 @@ async function deliverQueuedMessagesViaBridge(agentId: string): Promise<{ delive
 
 		let delivered = 0;
 		for (const message of queued) {
-			const bridgeCommand = !isStreaming
-				? { command: "prompt" as const, message: formatDownwardMessageForChild(message) }
-				: message.deliveryMode === "follow_up" || message.deliveryMode === "idle_only"
-					? { command: "follow_up" as const, message: formatDownwardMessageForChild(message) }
-					: { command: "steer" as const, message: formatDownwardMessageForChild(message) };
+			// Host-agnostic: delivery modes map to bridge commands only (wayfinder #20/#24).
+			const bridgeCommand = {
+				command: mapDeliveryModeToBridgeCommand(message.deliveryMode, { isStreaming }),
+				message: formatDownwardMessageForChild(message),
+			};
 			let response;
 			try {
 				response = await sendRpcBridgeCommand(socketPath, bridgeCommand, 5000);
@@ -2591,7 +2615,7 @@ function formatStopResult(
 		force ? `Force stop issued for ${agent.id}.` : `Stop requested for ${agent.id}.`,
 		`mode: ${force ? "force" : result.graceful ? "graceful" : "graceful-request"}`,
 		result.reason ? `reason: ${result.reason}` : null,
-		`tmux command: ${result.command}`,
+		`host command: ${result.command}`,
 	]
 		.filter((line): line is string => Boolean(line))
 		.join("\n");
@@ -2684,7 +2708,7 @@ async function stopAgentById(id: string, force: boolean, reason?: string): Promi
 					reason:
 						liveDelivery.delivered > 0
 							? "Cancel delivered via RPC bridge. Waiting for the child to stop gracefully."
-							: "Cancel is queued for graceful child delivery. Waiting for the child to stop before falling back to tmux kill.",
+							: "Cancel is queued for graceful child delivery. Waiting for the child to stop before falling back to host kill.",
 				},
 			};
 		}
@@ -2802,9 +2826,9 @@ async function reconcileAgents(ctx: ExtensionContext, params: { scope?: "all" | 
 				bridgeLastError:
 					bridgeStatus?.lastError ??
 					agent.bridgeLastError ??
-					(targetExists ? "RPC bridge health check failed." : "tmux target missing during reconcile"),
+					(targetExists ? "RPC bridge health check failed." : "host target missing during reconcile"),
 			};
-			reason = reason || (targetExists ? `RPC bridge not reachable; using ${inferredTransportState} transport state` : "tmux target missing during reconcile");
+			reason = reason || (targetExists ? `RPC bridge not reachable; using ${inferredTransportState} transport state` : "host target missing during reconcile");
 		}
 		if (latestStatus && latestStatus.updatedAt > agent.updatedAt) {
 			const preferLiveBridgeTransport = patch.transportKind === "rpc_bridge" && patch.transportState === "live";
@@ -2837,7 +2861,7 @@ async function reconcileAgents(ctx: ExtensionContext, params: { scope?: "all" | 
 					updatedAt: Date.now(),
 					finishedAt: latestStatus.finishedAt ?? Date.now(),
 				};
-				reason = reason || "tmux target exited after terminal latest-status update";
+				reason = reason || "host target exited after terminal latest-status update";
 			} else if (["launching", "running", "idle", "waiting", "blocked"].includes(agent.state)) {
 				patch = {
 					...patch,
@@ -2845,13 +2869,13 @@ async function reconcileAgents(ctx: ExtensionContext, params: { scope?: "all" | 
 					transportState: agent.transportKind === "rpc_bridge" ? "lost" : patch.transportState,
 					bridgeUpdatedAt: agent.transportKind === "rpc_bridge" ? Date.now() : patch.bridgeUpdatedAt,
 					updatedAt: Date.now(),
-					lastError: agent.lastError ?? "tmux target missing during reconcile",
+					lastError: agent.lastError ?? "host target missing during reconcile",
 					bridgeLastError:
 						agent.transportKind === "rpc_bridge"
-							? (bridgeStatus?.lastError ?? agent.bridgeLastError ?? "tmux target missing during reconcile")
+							? (bridgeStatus?.lastError ?? agent.bridgeLastError ?? "host target missing during reconcile")
 							: patch.bridgeLastError,
 				};
-				reason = reason || "tmux target missing during reconcile";
+				reason = reason || "host target missing during reconcile";
 			}
 		} else if (agent.state === "launching" && !latestStatus) {
 			patch = {
@@ -2859,7 +2883,7 @@ async function reconcileAgents(ctx: ExtensionContext, params: { scope?: "all" | 
 				state: "running",
 				updatedAt: Date.now(),
 			};
-			reason = reason || "tmux target exists and the child appears to be running";
+			reason = reason || "host target exists and the child appears to be running";
 		}
 		if (Object.keys(patch).length > 0) {
 			updateAgent(db, agent.id, patch);
@@ -3013,16 +3037,19 @@ function formatServiceStartResult(result: SpawnServiceResult): string {
 		`runDir: ${result.runDir}`,
 		`logFile: ${result.logFile}`,
 		`latestStatusFile: ${result.latestStatusFile}`,
-		`tmuxSession: ${result.tmuxSessionName} ${result.tmuxSessionId}`,
-		`tmuxWindow: ${result.tmuxWindowId}`,
-		`tmuxPane: ${result.tmuxPaneId}`,
+		`hostKind: ${result.hostKind}`,
+		`hostPrimaryId: ${result.hostPrimaryId}`,
+		`hostDisplayName: ${result.hostDisplayName ?? "-"}`,
+		`tmuxSession: ${result.tmuxSessionName || "-"} ${result.tmuxSessionId || ""}`.trim(),
+		`tmuxWindow: ${result.tmuxWindowId || "-"}`,
+		`tmuxPane: ${result.tmuxPaneId || "-"}`,
 	].join("\n");
 }
 
 function formatServiceFocusResult(service: ServiceSummary, result: { focused: boolean; command: string; reason?: string }): string {
 	return [
 		result.focused
-			? `Focused ${service.id} in tmux.`
+			? `Focused ${service.id} on ${service.hostKind ?? "host"}.`
 			: `Could not switch the current pi client automatically for ${service.id}.`,
 		result.reason ? `reason: ${result.reason}` : null,
 		`tmuxSession: ${service.tmuxSessionName ?? service.tmuxSessionId ?? "-"}`,
@@ -3043,7 +3070,7 @@ function formatServiceStopResult(
 		force ? `Force stop issued for ${service.id}.` : `Stop requested for ${service.id}.`,
 		`mode: ${force ? "force" : result.graceful ? "graceful" : "graceful-request"}`,
 		result.reason ? `reason: ${result.reason}` : null,
-		`tmux command: ${result.command}`,
+		`host command: ${result.command}`,
 	]
 		.filter((line): line is string => Boolean(line))
 		.join("\n");
@@ -3227,15 +3254,15 @@ async function reconcileServices(ctx: ExtensionContext, params: { scope?: "all" 
 					...patch,
 					...buildServicePatchFromStatus(service, latestStatus),
 				};
-				reason = reason || "tmux target exited after terminal latest-status update";
+				reason = reason || "host target exited after terminal latest-status update";
 			} else if (["launching", "running"].includes(service.state)) {
 				patch = {
 					...patch,
 					state: "lost",
 					updatedAt: Date.now(),
-					lastError: service.lastError ?? "tmux target missing during reconcile",
+					lastError: service.lastError ?? "host target missing during reconcile",
 				};
-				reason = reason || "tmux target missing during reconcile";
+				reason = reason || "host target missing during reconcile";
 			}
 		} else if (service.state === "launching" && !latestStatus) {
 			patch = {
@@ -3243,7 +3270,7 @@ async function reconcileServices(ctx: ExtensionContext, params: { scope?: "all" 
 				state: "running",
 				updatedAt: Date.now(),
 			};
-			reason = reason || "tmux target exists and the service appears to be running";
+			reason = reason || "host target exists and the service appears to be running";
 		}
 		if (Object.keys(patch).length > 0) {
 			updateService(db, service.id, patch);
@@ -4026,7 +4053,7 @@ function appendStandupInteractionsSection(lines: string[], scopeData: AgentsBoar
 function formatStandupCleanupLine(candidate: CleanupCandidate): string {
 	const taskText = candidate.agent.taskId ? ` · task=${candidate.agent.taskId}` : "";
 	const attentionText = candidate.attentionItems.length > 0 ? ` · ${candidate.attentionItems.length} attention` : "";
-	return `- ${candidate.agent.id} · ${candidate.agent.profile} · ${candidate.agent.state}${taskText}${attentionText}\n  next: ${candidate.cleanupAllowed ? "cleanup terminal tmux target" : "resolve attention before cleanup"} · ${candidate.reason}`;
+	return `- ${candidate.agent.id} · ${candidate.agent.profile} · ${candidate.agent.state}${taskText}${attentionText}\n  next: ${candidate.cleanupAllowed ? "cleanup terminal host target" : "resolve attention before cleanup"} · ${candidate.reason}`;
 }
 
 function appendStandupCleanupSection(lines: string[], candidates: CleanupCandidate[], limit = 6): void {
@@ -4161,7 +4188,7 @@ async function runReplyFlow(ctx: ExtensionContext, agentId: string): Promise<voi
 	if (
 		!(await getProcessHost().targetExists(hostTargetRefFromLegacy(agent)))
 	) {
-		throw new Error(`Cannot message agent ${agent.id} because its tmux target is missing. Reconcile first.`);
+		throw new Error(missingHostTargetMessage(agent.id));
 	}
 	const kind = await ctx.ui.select("Message kind:", ["answer", "note", "redirect", "cancel", "priority"]);
 	if (!kind) return;
@@ -4365,7 +4392,10 @@ async function runTaskSpawnWizard(pi: ExtensionAPI, ctx: ExtensionContext, taskI
 			cwd: cwd.trim(),
 			allowDuplicateOwner,
 		});
-		ctx.ui.notify(`Spawned ${result.agentId} in tmux ${result.tmuxSessionName}.`, "info");
+		ctx.ui.notify(
+			`Spawned ${result.agentId} on ${result.hostKind ?? "host"} (${result.hostDisplayName ?? result.hostPrimaryId ?? result.tmuxSessionName ?? "?"}).`,
+			"info",
+		);
 		await ctx.ui.editor(`Spawned ${result.agentId}`, formatSpawnSuccess(result));
 	} catch (error) {
 		ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
@@ -4515,7 +4545,10 @@ async function runServiceSpawnWizard(ctx: ExtensionContext): Promise<void> {
 			cwd: cwd.trim(),
 			readySubstring: readySubstring?.trim() || undefined,
 		});
-		ctx.ui.notify(`Started ${result.serviceId} in tmux ${result.tmuxSessionName}.`, "info");
+		ctx.ui.notify(
+			`Started ${result.serviceId} on ${result.hostKind ?? "host"} (${result.hostDisplayName ?? result.hostPrimaryId ?? result.tmuxSessionName ?? "?"}).`,
+			"info",
+		);
 		await ctx.ui.editor(`Started ${result.serviceId}`, formatServiceStartResult(result));
 	} catch (error) {
 		ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
@@ -4578,7 +4611,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 		name: "subagent_spawn",
 		label: "Subagent Spawn",
 		description: "Spawn a tracked tmux-backed child pi session with a run directory, session file, and global registry entry.",
-		promptSnippet: "Spawn a tracked tmux-backed child agent in a new window using a named profile, task, and optional cwd/model/tools overrides.",
+		promptSnippet: "Spawn a tracked child agent on the frozen ProcessHost (tmux or herdr) using a named profile, task, and optional cwd/model/tools overrides.",
 		promptGuidelines: [
 			"Use subagent_spawn when work should be delegated into an isolated child context.",
 			"Prefer attaching the child to an existing taskId. If taskId is omitted, a new task is auto-created.",
@@ -4603,8 +4636,8 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 	pi.registerTool({
 		name: "subagent_focus",
 		label: "Subagent Focus",
-		description: "Switch the current tmux client to a tracked child agent window, or return the exact manual tmux command when automatic focus is not possible.",
-		promptSnippet: "Focus a tracked tmux subagent window using its stored tmux ids.",
+		description: "Focus a tracked child agent window/pane on the frozen ProcessHost, or return the exact manual host command when automatic focus is not possible.",
+		promptSnippet: "Focus a tracked subagent window/pane using stored host ids.",
 		promptGuidelines: [
 			"Use subagent_focus when the user wants to jump directly into a child tmux window.",
 		],
@@ -4623,8 +4656,8 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 	pi.registerTool({
 		name: "subagent_stop",
 		label: "Subagent Stop",
-		description: "Request a graceful stop for a tracked child agent, or force-kill its tmux target.",
-		promptSnippet: "Stop a tracked tmux subagent gracefully or with force=true.",
+		description: "Request a graceful stop for a tracked child agent, or force-kill its host target.",
+		promptSnippet: "Stop a tracked subagent gracefully or with force=true.",
 		promptGuidelines: [
 			"Use graceful stop first so the child can publish a final handoff.",
 			"Use force=true only when the child is hung or the user explicitly wants an immediate kill.",
@@ -4702,7 +4735,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 			if (
 				!(await getProcessHost().targetExists(hostTargetRefFromLegacy(agent)))
 			) {
-				throw new Error(`Cannot message agent ${agent.id} because its tmux target is missing. Reconcile first.`);
+				throw new Error(missingHostTargetMessage(agent.id));
 			}
 			const messageResult = createMessageWithRecipients(db, {
 				actor,
@@ -4770,8 +4803,8 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 	pi.registerTool({
 		name: "subagent_capture",
 		label: "Subagent Capture",
-		description: "Debug-only: capture recent tmux pane output for a tracked child agent.",
-		promptSnippet: "Debug a tracked subagent by capturing recent tmux pane output only when structured reporting is insufficient.",
+		description: "Debug-only: capture recent host pane output for a tracked child agent.",
+		promptSnippet: "Debug a tracked subagent by capturing recent host pane output only when structured reporting is insufficient.",
 		promptGuidelines: [
 			"Prefer subagent_attention, subagent_inbox, subagent_get, and subagent_message for normal orchestration.",
 			"Use subagent_capture only when child reporting is stale, missing, or clearly inconsistent and you need raw transcript context.",
@@ -4790,7 +4823,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 	pi.registerTool({
 		name: "subagent_reconcile",
 		label: "Subagent Reconcile",
-		description: "Reconcile registry state against tmux target reality and latest child status snapshots.",
+		description: "Reconcile registry state against ProcessHost inventory and latest child status snapshots.",
 		promptSnippet: "Reconcile tracked tmux subagent registry state against tmux and run-directory snapshots.",
 		promptGuidelines: [
 			"Use subagent_reconcile when tmux windows disappear, status looks stale, or after restarting the primary session.",
@@ -4997,7 +5030,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 	pi.registerTool({
 		name: "subagent_cleanup",
 		label: "Subagent Cleanup",
-		description: "Remove finished child tmux targets after their work has been completed and synthesized.",
+		description: "Remove finished child host targets after their work has been completed and synthesized.",
 		promptSnippet: "Clean up terminal child tmux windows that no longer need to remain open.",
 		promptGuidelines: [
 			"Use subagent_cleanup after completion has been reviewed or synthesized so old tmux windows do not accumulate.",
@@ -5527,7 +5560,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 			"Use a dry-run first (target action with confirm=false, or action=preview for read-only inspection) to inspect the recursive parentTaskId subtree, linked agents, blockers, attention, and cleanup candidates.",
 			"Pause/resume/cancel require confirm=true plus the previewToken returned by the prior dry-run preview for that same action/selection.",
 			"If previewComplete is no, the tool refuses to apply so large task families are not partially controlled from truncated data.",
-			"Pause/cancel use graceful subagent stop requests for active linked agents and write durable task events; they never force-kill or cleanup tmux targets.",
+			"Pause/cancel use graceful subagent stop requests for active linked agents and write durable task events; they never force-kill or cleanup host targets.",
 			"Resume only unblocks tasks previously marked with [subtree paused] and does not spawn agents automatically.",
 		],
 		parameters: TaskSubtreeControlParams,
@@ -5662,7 +5695,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 	pi.registerTool({
 		name: "tmux_service_focus",
 		label: "tmux Service Focus",
-		description: "Switch the current tmux client to a tracked service window, or return the exact manual tmux command when automatic focus is not possible.",
+		description: "Focus a tracked service window/pane on the frozen ProcessHost, or return the exact manual host command when automatic focus is not possible.",
 		promptSnippet: "Focus a tracked tmux service window using its stored tmux ids.",
 		promptGuidelines: [
 			"Use tmux_service_focus when you want to jump directly into a running service window.",
@@ -5680,7 +5713,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 	pi.registerTool({
 		name: "tmux_service_stop",
 		label: "tmux Service Stop",
-		description: "Stop a tracked tmux service gracefully, or force-kill its tmux target.",
+		description: "Stop a tracked tmux service gracefully, or force-kill its host target.",
 		promptSnippet: "Stop a tracked tmux service gracefully or with force=true.",
 		promptGuidelines: [
 			"Use graceful stop first for dev servers and watchers so they can shut down cleanly.",
@@ -5717,7 +5750,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 	pi.registerTool({
 		name: "tmux_service_reconcile",
 		label: "tmux Service Reconcile",
-		description: "Reconcile tracked tmux service state against tmux target reality and persisted status snapshots.",
+		description: "Reconcile tracked tmux service state against ProcessHost inventory and persisted status snapshots.",
 		promptSnippet: "Reconcile tracked tmux service registry state against tmux and run-directory snapshots.",
 		promptGuidelines: [
 			"Use tmux_service_reconcile when service windows disappear, status looks stale, or after restarting the primary session.",
@@ -6016,7 +6049,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 				if (
 					!(await getProcessHost().targetExists(hostTargetRefFromLegacy(agent)))
 				) {
-					throw new Error(`Cannot message agent ${agent.id} because its tmux target is missing. Reconcile first.`);
+					throw new Error(missingHostTargetMessage(agent.id));
 				}
 				queueDownwardMessage(agent, kind, { summary }, "immediate");
 				const liveDelivery = await deliverQueuedMessagesViaBridge(agent.id);
@@ -6032,7 +6065,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 	});
 
 	pi.registerCommand("agent-capture", {
-		description: "Debug-capture recent tmux pane output for a tracked child",
+		description: "Debug-capture recent host pane output for a tracked child",
 		handler: async (args, ctx) => {
 			const parts = args?.trim().split(/\s+/) ?? [];
 			const id = parts[0];
@@ -6105,7 +6138,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 	});
 
 	pi.registerCommand("agent-cleanup", {
-		description: "Clean up completed/terminal child tmux targets",
+		description: "Clean up completed/terminal child host targets",
 		handler: async (args, ctx) => {
 			const parts = args?.trim().split(/\s+/).filter(Boolean) ?? [];
 			const force = parts.includes("force") || parts.includes("--force");
