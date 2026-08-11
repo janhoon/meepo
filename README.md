@@ -140,6 +140,7 @@ Canonical names are `service_*` (ProcessHost-neutral). Legacy `tmux_service_*` a
 
 ### Task and agent control
 
+- `/subagent:<profile>` — spawn a consumer agent profile (autocomplete lists installed profiles, same idea as `/skill:name`). Optional args become the child task text; with no args, an editor opens for the task.
 - `/task-board`
 - `/tasks [scope]`
 - `/task-new`

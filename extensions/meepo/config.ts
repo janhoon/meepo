@@ -441,6 +441,10 @@ export function shouldRegisterCoordinatorTool(config: MeepoConfig, toolName: str
 }
 
 export function shouldRegisterCoordinatorCommand(config: MeepoConfig, commandName: string): boolean {
+	// Dynamic BYO profile commands: /subagent:<profile-name> (mirrors /skill:name UX).
+	if (commandName.startsWith("subagent:")) {
+		return hasCapability(config, "agents.core");
+	}
 	if ((FULL_COORDINATOR_COMMAND_NAMES as readonly string[]).includes(commandName)) {
 		return hasCapability(config, COMMAND_CAPABILITY[commandName as FullCoordinatorCommandName]);
 	}

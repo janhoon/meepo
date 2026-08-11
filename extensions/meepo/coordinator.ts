@@ -41,6 +41,7 @@ import {
 import { register as registerAgentTools } from "./tools/agent-tools.js";
 import { register as registerTaskTools } from "./tools/task-tools.js";
 import { register as registerServiceTools } from "./tools/service-tools.js";
+import { registerSubagentProfileCommands } from "./subagent-commands.js";
 import {
 	ATTENTION_WAKE_POLL_MS,
 	attentionWakePoll,
@@ -148,9 +149,10 @@ export function registerMeepoCoordinatorTools(pi: ExtensionAPI, runtime: MeepoRu
 	registerAgentTools(registerTool, pi);
 	registerTaskTools(registerTool, pi);
 	registerServiceTools(registerTool, pi);
+	// BYO profiles → /subagent:<name> (autocomplete like /skill:name)
+	registerSubagentProfileCommands(pi);
 
-
-pi.registerCommand("agents", {
+	pi.registerCommand("agents", {
 		description: "Open the tmux subagents dashboard",
 		handler: async (_args, ctx) => {
 			dashboardState = await runAgentsDashboard(pi, ctx, dashboardState);
