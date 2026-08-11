@@ -105,6 +105,8 @@ Observed start result shape:
 - **A (minimal):** `agent start --workspace <current> --no-focus -- <pi argv>` and accept new panes in the primary tab, **or**
 - **B (recommended for many children):** `tab create --workspace … --label <title> --no-focus`, then start agent in tab and **close the unused root pane**—today start does not occupy root.
 
+**Meepo implemented B** in `HerdProcessHost.spawnWindow` (2026-08-11): one dedicated tab per child/service, orphan root shell pane closed after `agent start`, so the coordinator tab is not split. Closing the agent pane removes the last pane and herdr drops the tab.
+
 There is no CLI flag "use existing empty pane". Closest building blocks: `pane split`, `pane move --new-tab`, `tab create`, `agent start`.
 
 ### Other lifecycle ops
@@ -214,8 +216,8 @@ Notifications are **UI toasts**, not a durable inbox. Keep Meepo registry/attent
 ### Recommended minimal layout for a Meepo primary session
 
 1. Run primary Meepo/pi in the user's normal workspace (e.g. `meepo` workspace).
-2. On spawn (many children): `tab create --workspace <primary_workspace_id> --cwd <spawnCwd> --label <uniqueTitle> --no-focus`, then `agent start --tab <new_tab> --no-focus -- <bridge-or-pi argv>`, and cleanup the extra root pane **or** adopt a single-pane strategy once designed.
-3. **Simpler v1:** `agent start --workspace <id> --no-focus -- argv` into current workspace (today: new pane in active tab).
+2. On spawn (many children): `tab create --workspace <primary_workspace_id> --cwd <spawnCwd> --label <uniqueTitle> --no-focus`, then `agent start --tab <new_tab> --no-focus -- <bridge-or-pi argv>`, and cleanup the extra root pane — **this is Meepo's current layout**.
+3. ~~Simpler v1 pane-in-active-tab~~ — rejected; burns coordinator screen real estate.
 4. Do **not** create a new **workspace** per child by default (map preference: current workspace + no-focus).
 
 Remote: `herdr --remote <ssh-target>` attaches to remote server; sessions are server-local. Meepo ProcessHost should assume **one herdr server/socket per primary**, not mix remote children unless explicitly designed.
