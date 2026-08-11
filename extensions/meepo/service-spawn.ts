@@ -1,8 +1,8 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
-import { getTmuxAgentsDb } from "./db.js";
-import { ensureTmuxAgentsRuntimePaths } from "./paths.js";
+import { getMeepoDb } from "./db.js";
+import { ensureMeepoRuntimePaths } from "./paths.js";
 import { getProjectKey } from "./project.js";
 import { getProcessHost, hostFieldsFromTarget } from "./process-host.js";
 import { createService, updateService } from "./service-registry.js";
@@ -73,7 +73,7 @@ function writeRunArtifacts(options: {
 	spawnCwd: string;
 	env: Record<string, string>;
 }): ServiceRunArtifacts {
-	const { serviceRunsDir } = ensureTmuxAgentsRuntimePaths();
+	const { serviceRunsDir } = ensureMeepoRuntimePaths();
 	const runDir = join(serviceRunsDir, options.serviceId);
 	mkdirSync(runDir, { recursive: true });
 	const launchScript = join(runDir, "launch.sh");
@@ -206,7 +206,7 @@ export async function spawnService(input: SpawnServiceInput): Promise<SpawnServi
 		spawnCwd,
 		env,
 	});
-	const db = getTmuxAgentsDb();
+	const db = getMeepoDb();
 	const serviceRecord: CreateServiceInput = {
 		id: serviceId,
 		spawnSessionId: input.spawnSessionId,

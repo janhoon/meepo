@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { ensureTmuxAgentsRuntimePaths, getSubagentRunPaths, type SubagentRunPaths } from "./paths.js";
+import { ensureMeepoRuntimePaths, getSubagentRunPaths, type SubagentRunPaths } from "./paths.js";
 import {
 	createAgent,
 	createAgentEvent,
@@ -29,7 +29,7 @@ import type {
 	SpawnSubagentResult,
 	SubagentProfile,
 } from "./types.js";
-import { getTmuxAgentsDb } from "./db.js";
+import { getMeepoDb } from "./db.js";
 import { getProjectKey } from "./project.js";
 import { getProcessHost, hostFieldsFromTarget } from "./process-host.js";
 import { buildBridgeLaunchCommand } from "./rpc-bridge-control.js";
@@ -109,7 +109,7 @@ function buildTaskFileContent(options: CreateRunArtifactsOptions): string {
 
 function buildRuntimeAppendixContent(options: CreateRunArtifactsOptions, sessionFile: string, runDir: string): string {
 	return [
-		"# tmux-agents runtime appendix",
+		"# meepo runtime appendix",
 		"",
 		`Child id: ${options.agentId}`,
 		`Profile: ${options.profile.name}`,
@@ -232,7 +232,7 @@ function buildLaunchScriptContent(options: CreateRunArtifactsOptions, paths: Sub
 }
 
 function writeRunArtifacts(options: CreateRunArtifactsOptions): SubagentRunPaths {
-	const { runsDir } = ensureTmuxAgentsRuntimePaths();
+	const { runsDir } = ensureMeepoRuntimePaths();
 	const runDir = join(runsDir, options.agentId);
 	mkdirSync(runDir, { recursive: true });
 	const paths = getSubagentRunPaths(runDir);
@@ -307,7 +307,7 @@ function roleKeyForProfile(profileName: string, metadataRoleKey?: string | null)
 }
 
 function existingRoleKeyForProfile(profileName: string, metadataRoleKey?: string | null): string | null {
-	const db = getTmuxAgentsDb();
+	const db = getMeepoDb();
 	const roleKey = roleKeyForProfile(profileName, metadataRoleKey);
 	return getAgentRole(db, roleKey) ? roleKey : null;
 }
@@ -317,7 +317,7 @@ function deterministicOrgId(projectKey: string, spawnSessionId: string | null, s
 }
 
 function ensureSpawnOrg(input: SpawnSubagentInput, projectKey: string, parentAgentId: string | null): string {
-	const db = getTmuxAgentsDb();
+	const db = getMeepoDb();
 	const parent = parentAgentId ? getAgent(db, parentAgentId) : null;
 	const orgId = parent?.orgId ?? deterministicOrgId(projectKey, input.spawnSessionId, input.spawnSessionFile);
 	const existingOrg = getAgentOrg(db, orgId);
@@ -334,7 +334,7 @@ function ensureSpawnOrg(input: SpawnSubagentInput, projectKey: string, parentAge
 }
 
 function ensureAgentRoleKey(agentId: string): string | null {
-	const db = getTmuxAgentsDb();
+	const db = getMeepoDb();
 	const agent = getAgent(db, agentId);
 	if (!agent) throw new Error(`Unknown parent agent id "${agentId}".`);
 	if (agent.roleKey) return agent.roleKey;
@@ -348,7 +348,7 @@ function lookupReportsToEdgePolicy(
 	parentRoleKey: string,
 	childRoleKey: string,
 ): { id: string; allowSpawn: boolean } | null {
-	const db = getTmuxAgentsDb();
+	const db = getMeepoDb();
 	const row = db
 		.prepare(
 			`SELECT id, allow_spawn
@@ -394,7 +394,7 @@ export async function spawnSubagent(input: SpawnSubagentInput): Promise<SpawnSub
 	const agentId = input.agentId ?? `sa_${now.toString(36)}_${randomUUID().slice(0, 8)}`;
 	const spawnCwd = resolve(input.spawnCwd);
 	const tools = [...input.tools];
-	const db = getTmuxAgentsDb();
+	const db = getMeepoDb();
 	const projectKey = getProjectKey(spawnCwd);
 	const childRoleKey = existingRoleKeyForProfile(input.profile.name, input.profile.roleKey);
 	const hierarchyMode: HierarchyPolicyMode = input.hierarchyMode ?? "enforce";

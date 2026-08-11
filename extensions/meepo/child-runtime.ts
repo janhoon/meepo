@@ -7,7 +7,7 @@ import { Text } from "@mariozechner/pi-tui";
 import { StringEnum } from "@mariozechner/pi-ai";
 import { Type } from "@sinclair/typebox";
 import { randomUUID } from "node:crypto";
-import { getTmuxAgentsDb } from "./db.js";
+import { getMeepoDb } from "./db.js";
 import { getRpcBridgeSocketPath, readRpcBridgeStatus, sendRpcBridgeCommand } from "./rpc-client.js";
 import {
 	applyNoWaitSystemPrompt,
@@ -204,7 +204,7 @@ function getV2Payload(message: AgentMessageRecord): DownwardMessagePayload | nul
 }
 
 function markV2RecipientStatusForLegacyMessage(
-	db: ReturnType<typeof getTmuxAgentsDb>,
+	db: ReturnType<typeof getMeepoDb>,
 	message: AgentMessageRecord,
 	status: "read" | "acked",
 	recipientAgentId: string,
@@ -223,7 +223,7 @@ function markV2RecipientStatusForLegacyMessage(
 }
 
 async function deliverQueuedParentMessagesViaBridge(parentAgentId: string): Promise<ParentPublishDeliveryResult> {
-	const db = getTmuxAgentsDb();
+	const db = getMeepoDb();
 	const queued = listMessagesForRecipient(db, parentAgentId, { targetKind: "child", limit: 50 });
 	const legacyMessageIds = queued.map((message) => message.id);
 	const parent = getAgent(db, parentAgentId);
@@ -470,7 +470,7 @@ function publishThreadKind(kind: SubagentPublishPayload["kind"]): AgentThreadKin
 	}
 }
 
-function resolvePublishRecipient(db: ReturnType<typeof getTmuxAgentsDb>, environment: ChildRuntimeEnvironment, kind: SubagentPublishPayload["kind"]): AgentRecipientRef {
+function resolvePublishRecipient(db: ReturnType<typeof getMeepoDb>, environment: ChildRuntimeEnvironment, kind: SubagentPublishPayload["kind"]): AgentRecipientRef {
 	if (kind === "question_for_user") return { kind: "user" };
 	const parentEdge = listActiveAgentEdges(db, { childAgentId: environment.childId, edgeType: "reports_to", limit: 1 })[0] ?? null;
 	if (parentEdge) return { kind: "agent", agentId: parentEdge.parentAgentId };
@@ -515,7 +515,7 @@ function updateStatus(
 		};
 		writeLatestStatus(environment, preservedState);
 		// Do not touch the DB state/terminal columns in this branch; reconcile will sync from disk.
-		updateAgent(getTmuxAgentsDb(), environment.childId, {
+		updateAgent(getMeepoDb(), environment.childId, {
 			lastAssistantPreview: preservedState.lastAssistantPreview ?? null,
 			updatedAt: preservedState.updatedAt,
 		});
@@ -539,7 +539,7 @@ function updateStatus(
 		updatedAt,
 	};
 	writeLatestStatus(environment, nextState);
-	updateAgent(getTmuxAgentsDb(), environment.childId, {
+	updateAgent(getMeepoDb(), environment.childId, {
 		state: nextState.state,
 		transportKind: nextState.transportKind ?? undefined,
 		transportState: nextState.transportState ?? undefined,
@@ -566,7 +566,7 @@ function publishChildUpdate(
 	recipientRowIds: string[];
 	legacyMessageIds: string[];
 } {
-	const db = getTmuxAgentsDb();
+	const db = getMeepoDb();
 	const fullPayload: SubagentPublishPayload = { kind, ...payload };
 	const agent = getAgent(db, environment.childId);
 	if (!agent) throw new Error(`Cannot publish from unknown child agent ${environment.childId}.`);
@@ -752,10 +752,13 @@ export function registerChildRuntime(
 		downwardDeliveryMode,
 	};
 
-	pi.registerMessageRenderer("tmux-agents-downward", (message, _options, theme) => {
+	const renderDownwardMessage = (message: { content: string }, _options: unknown, theme: { fg: (name: string, text: string) => string; bold: (text: string) => string }) => {
 		const lines = [`${theme.fg("accent", theme.bold("↓ coordinator"))} ${message.content}`];
 		return new Text(lines.join("\n"), 0, 0);
-	});
+	};
+	pi.registerMessageRenderer("meepo-downward", renderDownwardMessage);
+	// Pre-rename sessions may still contain this custom type.
+	pi.registerMessageRenderer("tmux-agents-downward", renderDownwardMessage);
 
 	function syncDownwardDeliveryMode(ctx: ExtensionContext): ChildDownwardDeliveryMode {
 		const resolved = resolveDownwardDeliveryMode(environment);
@@ -778,7 +781,7 @@ export function registerChildRuntime(
 			},
 			statusSnapshot,
 		);
-		createAgentEvent(getTmuxAgentsDb(), {
+		createAgentEvent(getMeepoDb(), {
 			id: randomUUID(),
 			agentId: environment.childId,
 			eventType: "downward_transport_mode",
@@ -804,7 +807,7 @@ export function registerChildRuntime(
 	}
 
 	function ackPendingPollFallbackDeliveries(): void {
-		const db = getTmuxAgentsDb();
+		const db = getMeepoDb();
 		if (pendingAckIds.size > 0) {
 			markAgentMessages(db, [...pendingAckIds], "acked");
 			pendingAckIds.clear();
@@ -826,13 +829,13 @@ export function registerChildRuntime(
 	}
 
 	async function drainDownwardMessages(): Promise<void> {
-		const db = getTmuxAgentsDb();
+		const db = getMeepoDb();
 		const messages = listMessagesForRecipient(db, environment.childId, { targetKind: "child", limit: 25 });
 		for (const message of messages) {
 			try {
 				pi.sendMessage(
 					{
-						customType: "tmux-agents-downward",
+						customType: "meepo-downward",
 						content: formatDownwardMessage(message),
 						display: true,
 						details: message,
@@ -882,7 +885,7 @@ export function registerChildRuntime(
 	pi.registerTool({
 		name: "subagent_publish",
 		label: "Subagent Publish",
-		description: "Publish milestone, blocker, question, or completion updates from this child session to the global tmux-agents registry.",
+		description: "Publish milestone, blocker, question, or completion updates from this child session to the global meepo registry.",
 		promptSnippet: "Publish milestone/blocker/question/complete updates upward to the coordinator registry.",
 		promptGuidelines: [
 			"Use subagent_publish proactively for milestones, blockers, concrete questions, and final completion handoffs.",
@@ -976,7 +979,7 @@ export function registerChildRuntime(
 		const reason = noWaitBashBlockReason(command, noWaitMode);
 		if (!reason) return;
 		const violation = classifyNoWaitBashCommand(command);
-		createAgentEvent(getTmuxAgentsDb(), {
+		createAgentEvent(getMeepoDb(), {
 			id: randomUUID(),
 			agentId: environment.childId,
 			eventType: "policy_blocked_wait_command",
@@ -1008,7 +1011,7 @@ export function registerChildRuntime(
 			},
 			statusSnapshot,
 		);
-		ctx.ui.setStatus("tmux-agents-child", ctx.ui.theme.fg("accent", `child:${environment.childId}`));
+		ctx.ui.setStatus("meepo-child", ctx.ui.theme.fg("accent", `child:${environment.childId}`));
 		if (downwardPoll) clearInterval(downwardPoll);
 		downwardPoll = setInterval(() => {
 			void maybeDrainDownwardMessages(ctx);
@@ -1021,7 +1024,7 @@ export function registerChildRuntime(
 		ackPendingPollFallbackDeliveries();
 		if (startedPublished) return;
 		startedPublished = true;
-		createAgentEvent(getTmuxAgentsDb(), {
+		createAgentEvent(getMeepoDb(), {
 			id: randomUUID(),
 			agentId: environment.childId,
 			eventType: "started",
@@ -1103,7 +1106,7 @@ export function registerChildRuntime(
 		const finalText = getAssistantText(lastAssistant);
 		if (lastAssistant?.stopReason === "error") {
 			const errorSummary = truncateText(lastAssistant.errorMessage || finalText || "Subagent exited with an error.", 400);
-			createAgentEvent(getTmuxAgentsDb(), {
+			createAgentEvent(getMeepoDb(), {
 				id: randomUUID(),
 				agentId: environment.childId,
 				eventType: "error",
@@ -1173,6 +1176,6 @@ export function registerChildRuntime(
 			pendingV2AckRecipientRowIds.clear();
 			pendingV2AckMessageIds.clear();
 		}
-		ctx.ui.setStatus("tmux-agents-child", undefined);
+		ctx.ui.setStatus("meepo-child", undefined);
 	});
 }

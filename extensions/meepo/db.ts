@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { ensureTmuxAgentsRuntimePaths } from "./paths.js";
+import { ensureMeepoRuntimePaths } from "./paths.js";
 import { SERVICE_STATES } from "./service-types.js";
 import { TASK_LINK_STATES, TASK_LINK_TYPES, TASK_STATES, TASK_WAITING_ON_VALUES } from "./task-types.js";
 import {
@@ -1195,8 +1195,8 @@ function bootstrapDatabase(db: DatabaseSync): void {
 	}
 }
 
-export function getTmuxAgentsDb(): DatabaseSync {
-	const { databasePath } = ensureTmuxAgentsRuntimePaths();
+export function getMeepoDb(): DatabaseSync {
+	const { databasePath } = ensureMeepoRuntimePaths();
 	if (openConnection && openConnection.path === databasePath) {
 		return openConnection.db;
 	}
@@ -1217,7 +1217,7 @@ export function getTmuxAgentsDb(): DatabaseSync {
 	return db;
 }
 
-export function closeTmuxAgentsDb(): void {
+export function closeMeepoDb(): void {
 	if (!openConnection) return;
 	try {
 		openConnection.db.close();

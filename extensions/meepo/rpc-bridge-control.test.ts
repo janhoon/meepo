@@ -33,16 +33,15 @@ describe("rpc bridge control plane (host-agnostic, wayfinder #20/#24)", () => {
 	it("builds identical bridge launch command for every ProcessHost backend", () => {
 		const command = buildBridgeLaunchCommand({
 			nodeExecutable: "/usr/bin/node",
-			bridgeEntryScript: "/pkg/extensions/tmux-agents/rpc-bridge.mjs",
+			bridgeEntryScript: "/pkg/extensions/meepo/rpc-bridge.mjs",
 			bridgeConfigFile: "/tmp/runs/sa_1/bridge-config.json",
 		});
 		assert.equal(
 			command,
-			"exec '/usr/bin/node' '/pkg/extensions/tmux-agents/rpc-bridge.mjs' --config '/tmp/runs/sa_1/bridge-config.json'",
+			"exec '/usr/bin/node' '/pkg/extensions/meepo/rpc-bridge.mjs' --config '/tmp/runs/sa_1/bridge-config.json'",
 		);
 		assert.match(command, /rpc-bridge\.mjs/);
 		// Bridge is the main process — not bare `pi`, and not a host CLI wrapper.
-		// (Path may still contain the extension dir name `tmux-agents`.)
 		assert.doesNotMatch(command, /(^|[\s'"])pi([\s'"]|$)/);
 		assert.doesNotMatch(command, /(^|[\s'"])herdr([\s'"]|$)/);
 		assert.doesNotMatch(command, /(^|[\s'"])tmux([\s'"]|$)/);

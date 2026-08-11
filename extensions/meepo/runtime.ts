@@ -30,7 +30,7 @@ export interface MeepoRuntimeOptions {
 	registerCoordinatorTools?: RegisterCoordinatorTools;
 	/**
 	 * Optional DB accessor for preset seeders. Injected so unit tests need not open the real DB.
-	 * When omitted and full org preset applies, start() skips seeding (callers that need seeds pass getTmuxAgentsDb).
+	 * When omitted and full org preset applies, start() skips seeding (callers that need seeds pass getMeepoDb).
 	 */
 	getDb?: () => DatabaseSync;
 }

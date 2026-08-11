@@ -172,10 +172,10 @@ canSpawn: false
 ```bash
 npm test
 # or
-npx tsx --test extensions/tmux-agents/*.test.ts
+npx tsx --test extensions/meepo/*.test.ts
 ```
 
-Acceptance matrix: `extensions/tmux-agents/acceptance-matrix.test.ts` (no tmux).
+Acceptance matrix: `extensions/meepo/acceptance-matrix.test.ts` (no tmux).
 
 ## Related
 

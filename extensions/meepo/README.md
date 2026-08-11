@@ -1,6 +1,6 @@
-# tmux-agents extension
+# meepo extension
 
-> Extension directory name remains `tmux-agents` for install compatibility. The runtime is host-neutral via **ProcessHost** (`tmux` | `herdr`).
+> Package extension for Meepo orchestration. Host-neutral via **ProcessHost** (`tmux` | `herdr`).
 
 Current implementation status: **task-first board + task registry + agent/runtime control foundation**, pluggable **ProcessHost** (tmux + herdr adapters), tracked service launches for long-running commands, RPC bridge control plane for child agents, and herdr desktop notifications for attention wakes.
 
@@ -182,4 +182,4 @@ Manual validation / troubleshooting checklist:
 - Run `subagent_reconcile` after killing the bridge or closing the host target and confirm the transport state changes to something explicit like `fallback`, `disconnected`, `stopped`, or `lost`.
 - If transport is not `live`, inspect `bridge-status.json`, `bridge.log`, and the host pane (`subagent_capture` / `herdr agent read` / tmux capture) before treating capture as the primary control path.
 
-Use `/reload` in pi after changing files under `~/.pi/agent/extensions/tmux-agents/`.
+Use `/reload` in pi after changing files under the installed `extensions/meepo/` package path.

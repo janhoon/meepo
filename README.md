@@ -48,7 +48,7 @@ The package also includes reusable agent profiles, orchestration skills, and pro
 
 ## Included in the box
 
-- `extensions/tmux-agents/`
+- `extensions/meepo/`
   - subagent registry, ProcessHost (tmux + herdr adapters), spawn/runtime flow, messaging, reconcile, dashboard
   - tracked services for API servers, frontend dev servers, watchers, and other long-running commands
 - `skills/`

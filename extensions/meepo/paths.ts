@@ -2,7 +2,9 @@ import { mkdirSync } from "node:fs";
 import { basename, join } from "node:path";
 import { getAgentDir } from "@mariozechner/pi-coding-agent";
 
-export const SESSION_CHILD_LINK_ENTRY_TYPE = "tmux-agents-child-link";
+export const SESSION_CHILD_LINK_ENTRY_TYPE = "meepo-child-link";
+/** @deprecated Pre-rename session entries; still recognized on read. */
+export const LEGACY_SESSION_CHILD_LINK_ENTRY_TYPE = "tmux-agents-child-link";
 
 export interface SubagentRunPaths {
 	runDir: string;
@@ -21,7 +23,7 @@ export interface SubagentRunPaths {
 	bridgeSocketPath: string;
 }
 
-export interface TmuxAgentsRuntimePaths {
+export interface MeepoRuntimePaths {
 	agentDir: string;
 	databasePath: string;
 	subagentsDir: string;
@@ -30,7 +32,7 @@ export interface TmuxAgentsRuntimePaths {
 	serviceRunsDir: string;
 }
 
-export function getTmuxAgentsRuntimePaths(agentDir = getAgentDir()): TmuxAgentsRuntimePaths {
+export function getMeepoRuntimePaths(agentDir = getAgentDir()): MeepoRuntimePaths {
 	return {
 		agentDir,
 		databasePath: join(agentDir, "subagents.db"),
@@ -41,8 +43,8 @@ export function getTmuxAgentsRuntimePaths(agentDir = getAgentDir()): TmuxAgentsR
 	};
 }
 
-export function ensureTmuxAgentsRuntimePaths(agentDir = getAgentDir()): TmuxAgentsRuntimePaths {
-	const paths = getTmuxAgentsRuntimePaths(agentDir);
+export function ensureMeepoRuntimePaths(agentDir = getAgentDir()): MeepoRuntimePaths {
+	const paths = getMeepoRuntimePaths(agentDir);
 	mkdirSync(paths.agentDir, { recursive: true });
 	mkdirSync(paths.subagentsDir, { recursive: true });
 	mkdirSync(paths.runsDir, { recursive: true });

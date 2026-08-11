@@ -3,14 +3,19 @@
   "version": "0.1.0",
   "description": "Process-hosted Pi subagents (tmux or herdr) and tracked service tooling",
   "type": "module",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
   "scripts": {
-    "test": "npx --yes tsx --test 'extensions/tmux-agents/**/*.test.ts'"
+    "test": "npx --yes tsx --test 'extensions/meepo/**/*.test.ts'"
   },
   "pi": {
-    "extensions": ["./extensions"],
-    "skills": ["./skills"],
-    "prompts": ["./prompts"]
+    "extensions": [
+      "./extensions"
+    ],
+    "skills": [
+      "./skills"
+    ]
   },
   "peerDependencies": {
     "@mariozechner/pi-ai": "*",

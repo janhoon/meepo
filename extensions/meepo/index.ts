@@ -9,14 +9,14 @@ import { Type } from "@sinclair/typebox";
 import { openAgentsBoard, type AgentsBoardData, type AgentsBoardState, type BoardLaneId, type BoardTicket } from "./board.js";
 import { registerChildRuntime, getChildRuntimeEnvironment } from "./child-runtime.js";
 import { openAgentsDashboard, type AgentsDashboardData, type AgentsDashboardState } from "./dashboard.js";
-import { closeTmuxAgentsDb, getTmuxAgentsDb } from "./db.js";
+import { closeMeepoDb, getMeepoDb } from "./db.js";
 import { getRpcBridgeSocketPath, pingRpcBridge, readRpcBridgeStatus, sendRpcBridgeCommand } from "./rpc-client.js";
 import {
 	applyNoWaitSystemPrompt,
 	getBashCommandFromToolInput,
 	noWaitBashBlockReason,
 } from "./no-wait-policy.js";
-import { SESSION_CHILD_LINK_ENTRY_TYPE } from "./paths.js";
+import { LEGACY_SESSION_CHILD_LINK_ENTRY_TYPE, SESSION_CHILD_LINK_ENTRY_TYPE } from "./paths.js";
 import { getAllowedBuiltinToolNames, getSubagentProfile, listSubagentProfiles, normalizeBuiltinTools } from "./profiles.js";
 import { getProjectKey } from "./project.js";
 import {
@@ -647,7 +647,7 @@ function formatAgentDetails(agent: AgentSummary): string {
 }
 
 function getTaskHealthSnapshot(task: TaskRecord): TaskHealthSnapshot {
-	return listTaskHealth(getTmuxAgentsDb(), [task]).get(task.id) ?? deriveTaskHealth({ task });
+	return listTaskHealth(getMeepoDb(), [task]).get(task.id) ?? deriveTaskHealth({ task });
 }
 
 function formatTaskLine(task: TaskRecord, linkedAgents: AgentSummary[] = [], readiness?: TaskReadinessRecord, health: TaskHealthSnapshot = getTaskHealthSnapshot(task)): string {
@@ -823,7 +823,7 @@ async function buildTaskSubtreeControlPreview(
 	action: TaskSubtreeControlAction,
 	options: { includeRoot?: boolean; reason?: string } = {},
 ): Promise<TaskSubtreeControlPreview> {
-	const db = getTmuxAgentsDb();
+	const db = getMeepoDb();
 	const rootTask = getTask(db, rootTaskId);
 	if (!rootTask) throw new Error(`Unknown task id \"${rootTaskId}\".`);
 	const includeRoot = options.includeRoot ?? true;
@@ -1020,7 +1020,7 @@ async function applyTaskSubtreeControl(
 	action: Exclude<TaskSubtreeControlAction, "preview">,
 	options: { includeRoot?: boolean; reason?: string; previewToken?: string } = {},
 ): Promise<TaskSubtreeControlApplyResult> {
-	const db = getTmuxAgentsDb();
+	const db = getMeepoDb();
 	const preview = await buildTaskSubtreeControlPreview(ctx, rootTaskId, action, options);
 	if (!preview.isComplete) {
 		throw new Error(`Refusing to apply subtree ${action}: preview is incomplete. ${preview.truncationWarnings.join(" ")}`);
@@ -1249,7 +1249,13 @@ function getLinkedChildIds(ctx: ExtensionContext): string[] {
 	for (const entry of ctx.sessionManager.getEntries() as Array<
 		{ type?: string; customType?: string; data?: SessionChildLinkEntryData | undefined }
 	>) {
-		if (entry.type !== "custom" || entry.customType !== SESSION_CHILD_LINK_ENTRY_TYPE) continue;
+		if (
+			entry.type !== "custom" ||
+			(entry.customType !== SESSION_CHILD_LINK_ENTRY_TYPE &&
+				entry.customType !== LEGACY_SESSION_CHILD_LINK_ENTRY_TYPE)
+		) {
+			continue;
+		}
 		const childId = entry.data?.childId;
 		if (typeof childId === "string" && childId.length > 0) {
 			ids.add(childId);
@@ -1259,7 +1265,7 @@ function getLinkedChildIds(ctx: ExtensionContext): string[] {
 }
 
 function resolveToolActorContext(ctx: ExtensionContext): AgentActorContext {
-	const db = getTmuxAgentsDb();
+	const db = getMeepoDb();
 	if (childRuntimeEnvironment) {
 		return resolveAgentActorContext(db, { currentAgentId: childRuntimeEnvironment.childId });
 	}
@@ -1272,7 +1278,7 @@ function resolveToolActorContext(ctx: ExtensionContext): AgentActorContext {
 
 function applyHierarchyVisibilityToAgentFilters(ctx: ExtensionContext, filters: ListAgentsFilters): ListAgentsFilters {
 	if (!childRuntimeEnvironment) return filters;
-	const db = getTmuxAgentsDb();
+	const db = getMeepoDb();
 	const actor = resolveToolActorContext(ctx);
 	if (actor.kind === "root") return filters;
 	let requestedIds: string[] | undefined = filters.ids;
@@ -1293,7 +1299,7 @@ function getVisibleAgentIdsForTool(ctx: ExtensionContext, requestedIds?: string[
 	if (!childRuntimeEnvironment) return requestedIds ?? null;
 	const actor = resolveToolActorContext(ctx);
 	if (actor.kind === "root") return requestedIds ?? null;
-	const visibleIds = listHierarchyVisibleAgentIds(getTmuxAgentsDb(), actor, { projectKey: getProjectKey(ctx.cwd) });
+	const visibleIds = listHierarchyVisibleAgentIds(getMeepoDb(), actor, { projectKey: getProjectKey(ctx.cwd) });
 	if (!requestedIds) return visibleIds;
 	const visibleSet = new Set(visibleIds);
 	return requestedIds.filter((id) => visibleSet.has(id));
@@ -1355,7 +1361,7 @@ function resolveTaskFilters(
 				filters.ids = [];
 				break;
 			}
-			const db = getTmuxAgentsDb();
+			const db = getMeepoDb();
 			const taskIds = Array.from(new Set(listAgents(db, { ids, limit: 500 }).map((agent) => agent.taskId).filter((value): value is string => Boolean(value))));
 			filters.ids = taskIds;
 			break;
@@ -1441,7 +1447,7 @@ function formatAttentionWakeup(item: AttentionItemRecord, agent: AgentSummary | 
 
 async function wakeCoordinatorFromAttention(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
 	if (childRuntimeEnvironment) return;
-	const db = getTmuxAgentsDb();
+	const db = getMeepoDb();
 	const projectKey = getProjectKey(ctx.cwd);
 	const items = listAttentionItems(db, {
 		projectKey,
@@ -1491,15 +1497,15 @@ async function wakeCoordinatorFromAttention(pi: ExtensionAPI, ctx: ExtensionCont
 }
 
 function updateFleetUi(ctx: ExtensionContext): void {
-	const db = getTmuxAgentsDb();
+	const db = getMeepoDb();
 	const projectKey = getProjectKey(ctx.cwd);
 	const taskSummary = getTaskSummary(db, { projectKey });
 	const agentSummary = getFleetSummary(db, { projectKey });
-	ctx.ui.setStatus("tmux-agents", formatFleetSummary(taskSummary, agentSummary));
+	ctx.ui.setStatus("meepo", formatFleetSummary(taskSummary, agentSummary));
 	const taskItems = listTaskAttention(db, { projectKey, limit: 4 });
 	if (taskItems.length > 0) {
 		ctx.ui.setWidget(
-			"tmux-agents",
+			"meepo",
 			taskItems.map((item) => `${item.health === "stale" || item.health === "empty_or_no_progress" ? "⚠" : item.status === "blocked" ? "⛔" : "◍"} ${truncateText(item.title, 32)} · ${item.status} · health=${item.health}${item.waitingOn ? ` · ${item.waitingOn}` : ""}`),
 		);
 		return;
@@ -1510,7 +1516,7 @@ function updateFleetUi(ctx: ExtensionContext): void {
 		limit: 4,
 	});
 	if (attentionItems.length === 0) {
-		ctx.ui.setWidget("tmux-agents", undefined);
+		ctx.ui.setWidget("meepo", undefined);
 		return;
 	}
 	const agents = new Map(listAgents(db, { projectKey, limit: 100 }).map((agent) => [agent.id, agent]));
@@ -1519,7 +1525,7 @@ function updateFleetUi(ctx: ExtensionContext): void {
 		const title = agent ? truncateText(agent.title, 34) : item.agentId;
 		return `${attentionItemIcon(item)} ${title} · ${attentionItemLabel(item)} · ${item.agentId}`;
 	});
-	ctx.ui.setWidget("tmux-agents", lines);
+	ctx.ui.setWidget("meepo", lines);
 }
 
 const OPEN_ATTENTION_STATES: AttentionItemRecord["state"][] = ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user"];
@@ -1660,7 +1666,7 @@ function resolveAdminAttentionV2Filters(
 			filters.projectKey = getProjectKey(ctx.cwd);
 			break;
 		case "current_session":
-			filters.subjectAgentIds = listHierarchyVisibleAgentIds(getTmuxAgentsDb(), actor, {
+			filters.subjectAgentIds = listHierarchyVisibleAgentIds(getMeepoDb(), actor, {
 				spawnSessionId: ctx.sessionManager.getSessionId(),
 				spawnSessionFile: ctx.sessionManager.getSessionFile(),
 			});
@@ -1956,7 +1962,7 @@ function mergeAgentAttentionV2Items(...groups: AgentAttentionV2Record[][]): Agen
 
 function listTaskInteractionsForTaskIds(taskIds: string[]): Map<string, TaskInteractionRecord[]> {
 	if (taskIds.length === 0) return new Map();
-	const db = getTmuxAgentsDb();
+	const db = getMeepoDb();
 	const links = listTaskAgentLinks(db, { taskIds, limit: Math.max(1, Math.min(taskIds.length * 50, 500)) });
 	const agentIds = Array.from(new Set(links.map((link) => link.agentId)));
 	const agents = agentIds.length > 0 ? listAgents(db, { ids: agentIds, limit: agentIds.length }) : [];
@@ -2003,7 +2009,7 @@ function resolveTaskInteractionWithNote(taskId: string, interactionId: string, r
 	if (!sourceId || (source !== "legacy" && source !== "v2")) {
 		throw new Error(`Invalid task interaction id \"${interactionId}\". Expected legacy:<id> or v2:<id>.`);
 	}
-	const db = getTmuxAgentsDb();
+	const db = getMeepoDb();
 	const now = Date.now();
 	const state = resolvedInteractionState(resolutionKind);
 	if (source === "legacy") {
@@ -2063,7 +2069,7 @@ async function listCleanupCandidates(
 	ctx: ExtensionContext,
 	params: { scope?: "all" | "current_project" | "current_session" | "descendants"; ids?: string[]; force?: boolean; limit?: number },
 ): Promise<CleanupCandidate[]> {
-	const db = getTmuxAgentsDb();
+	const db = getMeepoDb();
 	const host = getProcessHost();
 	const inventory = await host.listInventory();
 	const agents = params.ids && params.ids.length > 0
@@ -2102,7 +2108,7 @@ async function listCleanupCandidates(
 }
 
 async function cleanupAgentTarget(candidate: CleanupCandidate, force = false): Promise<{ agentId: string; cleaned: boolean; reason: string; command: string }> {
-	const db = getTmuxAgentsDb();
+	const db = getMeepoDb();
 	const agent = candidate.agent;
 	const host = getProcessHost();
 	const target = hostTargetRefFromLegacy(agent);
@@ -2258,7 +2264,7 @@ function isCoalescableWake(kind: AgentMessageRecord["kind"], actionPolicy: Downw
 }
 
 function coalesceQueuedDownwardWakeMessages(
-	db: ReturnType<typeof getTmuxAgentsDb>,
+	db: ReturnType<typeof getMeepoDb>,
 	agent: AgentSummary,
 	kind: "answer" | "note" | "redirect" | "cancel" | "priority",
 	actionPolicy: DownwardMessageActionPolicy,
@@ -2364,7 +2370,7 @@ function scheduleBridgeDeliveryRetry(agentId: string, delayMs = 250): void {
 async function deliverQueuedMessagesViaBridge(agentId: string): Promise<{ delivered: number; deferred: number; transportState: string }> {
 	if (liveBridgeDeliveryInFlight.has(agentId)) {
 		scheduleBridgeDeliveryRetry(agentId, 300);
-		const queued = listMessagesForRecipient(getTmuxAgentsDb(), agentId, { targetKind: "child", limit: 50 });
+		const queued = listMessagesForRecipient(getMeepoDb(), agentId, { targetKind: "child", limit: 50 });
 		return { delivered: 0, deferred: queued.length, transportState: "busy" };
 	}
 	liveBridgeDeliveryInFlight.add(agentId);
@@ -2372,7 +2378,7 @@ async function deliverQueuedMessagesViaBridge(agentId: string): Promise<{ delive
 	let stateProbeFailed = false;
 	let stateProbeError: string | null = null;
 	try {
-		const db = getTmuxAgentsDb();
+		const db = getMeepoDb();
 		let agent = getAgent(db, agentId);
 		if (!agent) return { delivered: 0, deferred: 0, transportState: "missing" };
 		if (agent.transportKind !== "rpc_bridge") {
@@ -2468,7 +2474,7 @@ async function deliverQueuedMessagesViaBridge(agentId: string): Promise<{ delive
 		return { delivered, deferred: Math.max(0, queued.length - delivered), transportState: "live" };
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
-		const db = getTmuxAgentsDb();
+		const db = getMeepoDb();
 		const agent = getAgent(db, agentId);
 		if (agent && agent.transportKind === "rpc_bridge") {
 			updateAgent(db, agent.id, {
@@ -2493,7 +2499,7 @@ async function deliverQueuedMessagesViaBridge(agentId: string): Promise<{ delive
 		return { delivered: 0, deferred: queued.length, transportState: lastFailureWasTransport ? "fallback" : "live" };
 	} finally {
 		liveBridgeDeliveryInFlight.delete(agentId);
-		const queued = listMessagesForRecipient(getTmuxAgentsDb(), agentId, { targetKind: "child", limit: 1 });
+		const queued = listMessagesForRecipient(getMeepoDb(), agentId, { targetKind: "child", limit: 1 });
 		if (queued.length > 0) scheduleBridgeDeliveryRetry(agentId, 300);
 	}
 }
@@ -2505,7 +2511,7 @@ function queueDownwardMessage(
 	deliveryMode: DeliveryMode,
 	actor: AgentActorContext = createRootActorContext(),
 ): string {
-	const db = getTmuxAgentsDb();
+	const db = getMeepoDb();
 	const messageId = randomUUID();
 	const fullPayload: DownwardMessagePayload = {
 		...payload,
@@ -2625,7 +2631,7 @@ async function stopAgentById(id: string, force: boolean, reason?: string): Promi
 	agent: AgentSummary;
 	result: { stopped: boolean; graceful: boolean; command: string; reason?: string };
 }> {
-	const agent = getAgent(getTmuxAgentsDb(), id);
+	const agent = getAgent(getMeepoDb(), id);
 	if (!agent) {
 		throw new Error(`Unknown agent id \"${id}\".`);
 	}
@@ -2636,17 +2642,17 @@ async function stopAgentById(id: string, force: boolean, reason?: string): Promi
 	const target = hostTargetRefFromLegacy(agent);
 	const targetExists = await host.targetExists(target);
 	if (!targetExists && force) {
-		updateAgent(getTmuxAgentsDb(), agent.id, {
+		updateAgent(getMeepoDb(), agent.id, {
 			state: "stopped",
 			updatedAt: Date.now(),
 			finishedAt: Date.now(),
 			lastError: reason?.trim() || agent.lastError,
 		});
 		if (agent.taskId) {
-			unlinkTaskAgent(getTmuxAgentsDb(), agent.taskId, agent.id, reason?.trim() || "force_stop_missing_host_target");
+			unlinkTaskAgent(getMeepoDb(), agent.taskId, agent.id, reason?.trim() || "force_stop_missing_host_target");
 		}
 		updateAttentionItemsForAgent(
-			getTmuxAgentsDb(),
+			getMeepoDb(),
 			agent.id,
 			{
 				state: "cancelled",
@@ -2657,7 +2663,7 @@ async function stopAgentById(id: string, force: boolean, reason?: string): Promi
 			},
 			{ states: ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user"] },
 		);
-		createAgentEvent(getTmuxAgentsDb(), {
+		createAgentEvent(getMeepoDb(), {
 			id: randomUUID(),
 			agentId: agent.id,
 			eventType: "force_stopped",
@@ -2665,7 +2671,7 @@ async function stopAgentById(id: string, force: boolean, reason?: string): Promi
 			payload: { command: "(host target already missing)" },
 		});
 		return {
-			agent: getAgent(getTmuxAgentsDb(), agent.id) ?? agent,
+			agent: getAgent(getMeepoDb(), agent.id) ?? agent,
 			result: {
 				stopped: true,
 				graceful: false,
@@ -2688,11 +2694,11 @@ async function stopAgentById(id: string, force: boolean, reason?: string): Promi
 			"immediate",
 		);
 		const liveDelivery = await deliverQueuedMessagesViaBridge(agent.id);
-		const cancelStillQueued = listMessagesForRecipient(getTmuxAgentsDb(), agent.id, { targetKind: "child", limit: 50 }).some(
+		const cancelStillQueued = listMessagesForRecipient(getMeepoDb(), agent.id, { targetKind: "child", limit: 50 }).some(
 			(message) => message.id === cancelMessageId,
 		);
 		if (liveDelivery.delivered > 0 || cancelStillQueued || liveDelivery.deferred > 0 || liveDelivery.transportState === "busy") {
-			createAgentEvent(getTmuxAgentsDb(), {
+			createAgentEvent(getMeepoDb(), {
 				id: randomUUID(),
 				agentId: agent.id,
 				eventType: "graceful_stop_requested",
@@ -2700,7 +2706,7 @@ async function stopAgentById(id: string, force: boolean, reason?: string): Promi
 				payload: { liveDelivery, cancelMessageId, cancelStillQueued },
 			});
 			return {
-				agent: getAgent(getTmuxAgentsDb(), agent.id) ?? agent,
+				agent: getAgent(getMeepoDb(), agent.id) ?? agent,
 				result: {
 					stopped: false,
 					graceful: true,
@@ -2715,17 +2721,17 @@ async function stopAgentById(id: string, force: boolean, reason?: string): Promi
 	}
 	const result = await host.stop(target, { force });
 	if (force) {
-		updateAgent(getTmuxAgentsDb(), agent.id, {
+		updateAgent(getMeepoDb(), agent.id, {
 			state: "stopped",
 			updatedAt: Date.now(),
 			finishedAt: Date.now(),
 			lastError: reason?.trim() || agent.lastError,
 		});
 		if (agent.taskId) {
-			unlinkTaskAgent(getTmuxAgentsDb(), agent.taskId, agent.id, reason?.trim() || "force_stop");
+			unlinkTaskAgent(getMeepoDb(), agent.taskId, agent.id, reason?.trim() || "force_stop");
 		}
 		updateAttentionItemsForAgent(
-			getTmuxAgentsDb(),
+			getMeepoDb(),
 			agent.id,
 			{
 				state: "cancelled",
@@ -2736,7 +2742,7 @@ async function stopAgentById(id: string, force: boolean, reason?: string): Promi
 			},
 			{ states: ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user"] },
 		);
-		createAgentEvent(getTmuxAgentsDb(), {
+		createAgentEvent(getMeepoDb(), {
 			id: randomUUID(),
 			agentId: agent.id,
 			eventType: "force_stopped",
@@ -2744,7 +2750,7 @@ async function stopAgentById(id: string, force: boolean, reason?: string): Promi
 			payload: { command: result.command },
 		});
 	}
-	return { agent: getAgent(getTmuxAgentsDb(), agent.id) ?? agent, result };
+	return { agent: getAgent(getMeepoDb(), agent.id) ?? agent, result };
 }
 
 async function reconcileAgents(ctx: ExtensionContext, params: { scope?: "all" | "current_project" | "current_session" | "descendants"; activeOnly?: boolean; limit?: number }): Promise<{
@@ -2757,7 +2763,7 @@ async function reconcileAgents(ctx: ExtensionContext, params: { scope?: "all" | 
 		activeOnly: params.activeOnly ?? true,
 		limit: params.limit,
 	});
-	const db = getTmuxAgentsDb();
+	const db = getMeepoDb();
 	const agents = listAgents(db, filters);
 	const host = getProcessHost();
 	const inventory = await host.listInventory();
@@ -3126,7 +3132,7 @@ async function spawnServiceFromParams(ctx: ExtensionContext, params: {
 }
 
 async function focusServiceById(id: string): Promise<{ service: ServiceSummary; result: { focused: boolean; command: string; reason?: string } }> {
-	const service = getService(getTmuxAgentsDb(), id);
+	const service = getService(getMeepoDb(), id);
 	if (!service) {
 		throw new Error(`Unknown service id "${id}".`);
 	}
@@ -3135,7 +3141,7 @@ async function focusServiceById(id: string): Promise<{ service: ServiceSummary; 
 }
 
 async function captureServiceById(id: string, lines = 200): Promise<{ service: ServiceSummary; content: string; command: string; source: "host" | "log" }> {
-	const db = getTmuxAgentsDb();
+	const db = getMeepoDb();
 	const service = getService(db, id);
 	if (!service) {
 		throw new Error(`Unknown service id "${id}".`);
@@ -3163,7 +3169,7 @@ async function stopServiceById(id: string, force: boolean, reason?: string): Pro
 	service: ServiceSummary;
 	result: { stopped: boolean; graceful: boolean; command: string; reason?: string };
 }> {
-	const db = getTmuxAgentsDb();
+	const db = getMeepoDb();
 	const service = getService(db, id);
 	if (!service) {
 		throw new Error(`Unknown service id "${id}".`);
@@ -3226,7 +3232,7 @@ async function reconcileServices(ctx: ExtensionContext, params: { scope?: "all" 
 		activeOnly: params.activeOnly ?? true,
 		limit: params.limit,
 	});
-	const db = getTmuxAgentsDb();
+	const db = getMeepoDb();
 	const services = listServices(db, filters);
 	const host = getProcessHost();
 	const inventory = await host.listInventory();
@@ -3320,7 +3326,7 @@ function createTaskFromParams(ctx: ExtensionContext, params: {
 	blockedReason?: string;
 	waitingOn?: TaskWaitingOn;
 }): TaskRecord {
-	const db = getTmuxAgentsDb();
+	const db = getMeepoDb();
 	const now = Date.now();
 	const spawnCwd = resolveInputPath(ctx.cwd, params.cwd);
 	assertDirectory(spawnCwd);
@@ -3378,7 +3384,7 @@ function ensureTaskForSpawn(ctx: ExtensionContext, params: {
 	priority?: string;
 	allowDuplicateOwner?: boolean;
 }): TaskRecord {
-	const db = getTmuxAgentsDb();
+	const db = getMeepoDb();
 	const existingTaskId = params.taskId?.trim() || null;
 	if (existingTaskId) {
 		const task = getTask(db, existingTaskId);
@@ -3424,7 +3430,7 @@ function ensureTaskForSpawn(ctx: ExtensionContext, params: {
 }
 
 function getTaskLinkedAgents(taskId: string, activeOnly = false): AgentSummary[] {
-	const db = getTmuxAgentsDb();
+	const db = getMeepoDb();
 	const links = listTaskAgentLinks(db, { taskIds: [taskId], activeOnly, limit: 200 });
 	const ids = Array.from(new Set(links.map((link) => link.agentId)));
 	if (ids.length === 0) return [];
@@ -3536,7 +3542,7 @@ function getReadyTasksForDispatch(ctx: ExtensionContext, params: { scope?: "all"
 		limit: params.limit ?? 100,
 	});
 	if (params.ids && params.ids.length > 0) filters.ids = params.ids;
-	return listTaskReadiness(getTmuxAgentsDb(), filters).filter((item) => item.ready);
+	return listTaskReadiness(getMeepoDb(), filters).filter((item) => item.ready);
 }
 
 async function dispatchReadyTasks(pi: ExtensionAPI, ctx: ExtensionContext, items: TaskReadinessRecord[], options: { fallbackProfile?: string; maxDispatch?: number; dryRun?: boolean } = {}): Promise<{
@@ -3621,7 +3627,7 @@ async function chooseProfile(ctx: ExtensionContext): Promise<SubagentProfile | n
 }
 
 async function focusAgentById(id: string): Promise<{ agent: AgentSummary; result: { focused: boolean; command: string; reason?: string } }> {
-	const agent = getAgent(getTmuxAgentsDb(), id);
+	const agent = getAgent(getMeepoDb(), id);
 	if (!agent) {
 		throw new Error(`Unknown agent id "${id}".`);
 	}
@@ -3630,7 +3636,7 @@ async function focusAgentById(id: string): Promise<{ agent: AgentSummary; result
 }
 
 async function captureAgentById(id: string, lines = 200): Promise<{ agent: AgentSummary; content: string; command: string }> {
-	const agent = getAgent(getTmuxAgentsDb(), id);
+	const agent = getAgent(getMeepoDb(), id);
 	if (!agent) {
 		throw new Error(`Unknown agent id "${id}".`);
 	}
@@ -3644,7 +3650,7 @@ async function captureAgentById(id: string, lines = 200): Promise<{ agent: Agent
 }
 
 function buildDashboardData(ctx: ExtensionContext): AgentsDashboardData {
-	const db = getTmuxAgentsDb();
+	const db = getMeepoDb();
 	const all = listAgents(db, { limit: 200 });
 	const currentProject = listAgents(db, { projectKey: getProjectKey(ctx.cwd), limit: 200 });
 	const currentSession = listAgents(db, {
@@ -3684,7 +3690,7 @@ function buildBoardScopeData(
 	attentionItems: AttentionItemRecord[],
 	v2AttentionItems: AgentAttentionV2Record[] = [],
 ): AgentsBoardData["scopes"]["all"] {
-	const db = getTmuxAgentsDb();
+	const db = getMeepoDb();
 	const taskIds = tasks.map((task) => task.id);
 	const taskIdSet = new Set(taskIds);
 	const links = listTaskAgentLinks(db, { taskIds, limit: 500 });
@@ -3755,7 +3761,7 @@ function buildBoardScopeData(
 }
 
 function buildBoardData(ctx: ExtensionContext): AgentsBoardData {
-	const db = getTmuxAgentsDb();
+	const db = getMeepoDb();
 	const scopeTasks = {
 		all: listTasks(db, { includeDone: true, limit: 200 }),
 		current_project: listTasks(db, { projectKey: getProjectKey(ctx.cwd), includeDone: true, limit: 200 }),
@@ -4141,7 +4147,7 @@ async function buildStandupText(ctx: ExtensionContext, scope: "all" | "current_p
 	const activeWip = lanes.in_progress;
 	const ready = lanes.todo;
 	const cleanupCandidates = await listCleanupCandidates(ctx, { scope, limit: 200 });
-	const readiness = listTaskReadiness(getTmuxAgentsDb(), { ids: allTickets.map((ticket) => ticket.taskId), includeDone: false, limit: Math.max(allTickets.length, 1) });
+	const readiness = listTaskReadiness(getMeepoDb(), { ids: allTickets.map((ticket) => ticket.taskId), includeDone: false, limit: Math.max(allTickets.length, 1) });
 	const dependencyBlocked = readiness.filter((item) => item.unresolvedDependencies.length > 0);
 	const dependencyReady = readiness.filter((item) => item.ready && item.resolvedDependencies.length > 0);
 	const dependencyChains = buildStandupDependencyChains(dependencyBlocked);
@@ -4180,7 +4186,7 @@ async function buildStandupText(ctx: ExtensionContext, scope: "all" | "current_p
 }
 
 async function runReplyFlow(ctx: ExtensionContext, agentId: string): Promise<void> {
-	const agent = getAgent(getTmuxAgentsDb(), agentId);
+	const agent = getAgent(getMeepoDb(), agentId);
 	if (!agent) throw new Error(`Unknown agent id \"${agentId}\".`);
 	if (["done", "error", "stopped", "lost"].includes(agent.state)) {
 		throw new Error(`Cannot message agent ${agent.id} because it is in terminal state ${agent.state}.`);
@@ -4216,7 +4222,7 @@ async function runStopFlow(ctx: ExtensionContext, agentId: string): Promise<void
 }
 
 function moveTaskById(taskId: string, params: { status: TaskState; reason?: string; waitingOn?: TaskWaitingOn; blockedReason?: string; reviewSummary?: string; finalSummary?: string; force?: boolean }): TaskRecord {
-	const db = getTmuxAgentsDb();
+	const db = getMeepoDb();
 	const task = getTask(db, taskId);
 	if (!task) throw new Error(`Unknown task id \"${taskId}\".`);
 	if (task.status === "done" && params.status !== "done" && !params.force) {
@@ -4299,7 +4305,7 @@ async function runTaskCreateWizard(ctx: ExtensionContext): Promise<TaskRecord | 
 }
 
 async function runTaskMoveFlow(ctx: ExtensionContext, taskId: string): Promise<void> {
-	const task = getTask(getTmuxAgentsDb(), taskId);
+	const task = getTask(getMeepoDb(), taskId);
 	if (!task) throw new Error(`Unknown task id \"${taskId}\".`);
 	const status = (await ctx.ui.select("Move task to:", ["todo", "blocked", "in_progress", "in_review", "done"])) as TaskState | null;
 	if (!status) return;
@@ -4345,7 +4351,7 @@ async function runTaskSubtreeControlFlow(ctx: ExtensionContext, taskId: string):
 
 async function confirmTaskLeaseOverride(ctx: ExtensionContext, taskId: string | undefined, profileName: string): Promise<boolean> {
 	if (!taskId) return false;
-	const conflict = getTaskLeaseConflict(getTmuxAgentsDb(), { taskId, profile: profileName });
+	const conflict = getTaskLeaseConflict(getMeepoDb(), { taskId, profile: profileName });
 	if (!conflict) return false;
 	if (!ctx.hasUI) throw new Error(formatTaskLeaseConflict(conflict));
 	const ok = await ctx.ui.confirm(
@@ -4353,7 +4359,7 @@ async function confirmTaskLeaseOverride(ctx: ExtensionContext, taskId: string | 
 		`${formatTaskLeaseConflict(conflict)}\n\nSpawn/link another exclusive owner anyway?`,
 	);
 	if (ok) {
-		createTaskEvent(getTmuxAgentsDb(), {
+		createTaskEvent(getMeepoDb(), {
 			id: randomUUID(),
 			taskId,
 			eventType: "task_lease_override_confirmed",
@@ -4366,13 +4372,13 @@ async function confirmTaskLeaseOverride(ctx: ExtensionContext, taskId: string | 
 
 async function runTaskSpawnWizard(pi: ExtensionAPI, ctx: ExtensionContext, taskId?: string): Promise<void> {
 	if (!ctx.hasUI) return;
-	const gateItems = listAttentionItems(getTmuxAgentsDb(), resolveAttentionFilters(ctx, "current_project", { limit: 5 }));
+	const gateItems = listAttentionItems(getMeepoDb(), resolveAttentionFilters(ctx, "current_project", { limit: 5 }));
 	if (gateItems.length > 0) {
-		const gateAgents = new Map(listAgents(getTmuxAgentsDb(), { projectKey: getProjectKey(ctx.cwd), limit: 100 }).map((agent) => [agent.id, agent]));
+		const gateAgents = new Map(listAgents(getMeepoDb(), { projectKey: getProjectKey(ctx.cwd), limit: 100 }).map((agent) => [agent.id, agent]));
 		const ok = await ctx.ui.confirm("Open attention items", `${formatAttentionGateWarning(gateItems, gateAgents)}\n\nSpawn anyway?`);
 		if (!ok) return;
 	}
-	const linkedTask = taskId ? getTask(getTmuxAgentsDb(), taskId) : null;
+	const linkedTask = taskId ? getTask(getMeepoDb(), taskId) : null;
 	const profile = await chooseProfile(ctx);
 	if (!profile) return;
 	const title = await ctx.ui.input("Child title:", linkedTask?.title ?? `${profile.name} task`);
@@ -4413,7 +4419,7 @@ async function runAgentsDashboard(pi: ExtensionAPI, ctx: ExtensionContext, initi
 		try {
 			switch (action.type) {
 				case "inspect": {
-					const agent = getAgent(getTmuxAgentsDb(), selectedId!);
+					const agent = getAgent(getMeepoDb(), selectedId!);
 					if (agent) await ctx.ui.editor(`Agent ${agent.id}`, formatAgentDetails(agent));
 					break;
 				}
@@ -4439,7 +4445,7 @@ async function runAgentsDashboard(pi: ExtensionAPI, ctx: ExtensionContext, initi
 					break;
 				case "sync": {
 					const agentResult = await reconcileAgents(ctx, { scope: state.scope, activeOnly: false, limit: 200 });
-					const taskResult = reconcileTasks(getTmuxAgentsDb(), resolveTaskFilters(ctx, state.scope, { includeDone: true, limit: 200 }));
+					const taskResult = reconcileTasks(getMeepoDb(), resolveTaskFilters(ctx, state.scope, { includeDone: true, limit: 200 }));
 					ctx.ui.notify(`${formatReconcileResult(agentResult)}\nTasks: ${taskResult.backfilled} backfilled, ${taskResult.deactivatedLinks} links deactivated.`, "info");
 					break;
 				}
@@ -4465,8 +4471,8 @@ async function runAgentsBoard(pi: ExtensionAPI, ctx: ExtensionContext, initialSt
 		try {
 			switch (action.type) {
 				case "inspect": {
-					const task = getTask(getTmuxAgentsDb(), selectedId!);
-					if (task) await ctx.ui.editor(`Task ${task.id}`, formatTaskDetails(task, getTaskLinkedAgents(task.id), listTaskEvents(getTmuxAgentsDb(), { taskIds: [task.id], limit: 20 }), {}, getTaskInteractions(task.id)));
+					const task = getTask(getMeepoDb(), selectedId!);
+					if (task) await ctx.ui.editor(`Task ${task.id}`, formatTaskDetails(task, getTaskLinkedAgents(task.id), listTaskEvents(getMeepoDb(), { taskIds: [task.id], limit: 20 }), {}, getTaskInteractions(task.id)));
 					break;
 				}
 				case "focus": {
@@ -4510,7 +4516,7 @@ async function runAgentsBoard(pi: ExtensionAPI, ctx: ExtensionContext, initialSt
 					break;
 				case "sync": {
 					const agentResult = await reconcileAgents(ctx, { scope: state.scope, activeOnly: false, limit: 200 });
-					const taskResult = reconcileTasks(getTmuxAgentsDb(), resolveTaskFilters(ctx, state.scope, { includeDone: true, limit: 200 }));
+					const taskResult = reconcileTasks(getMeepoDb(), resolveTaskFilters(ctx, state.scope, { includeDone: true, limit: 200 }));
 					ctx.ui.notify(`${formatReconcileResult(agentResult)}\nTasks: ${taskResult.backfilled} backfilled, ${taskResult.deactivatedLinks} links deactivated.`, "info");
 					break;
 				}
@@ -4559,7 +4565,7 @@ async function runServiceSpawnWizard(ctx: ExtensionContext): Promise<void> {
  * Coordinator + shared tool/command registration (today's full surface).
  * Invoked by MeepoRuntime.start(); capability gating lands in a follow-up ticket.
  */
-function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
+function registerMeepoCoordinatorTools(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 	activeMeepoRuntime = runtime;
 	const noWaitMode = runtime.config.policies.noWait;
 	if (childRuntimeEnvironment) {
@@ -4590,7 +4596,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 	};
 
 	async function cycleActiveAgent(ctx: ExtensionContext, direction: 1 | -1): Promise<void> {
-		const agents = listAgents(getTmuxAgentsDb(), { projectKey: getProjectKey(ctx.cwd), activeOnly: true, limit: 200 });
+		const agents = listAgents(getMeepoDb(), { projectKey: getProjectKey(ctx.cwd), activeOnly: true, limit: 200 });
 		if (agents.length === 0) {
 			ctx.ui.notify("No active child agents to focus.", "warning");
 			return;
@@ -4622,8 +4628,8 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 		],
 		parameters: SubagentSpawnParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const gateItems = listAttentionItems(getTmuxAgentsDb(), resolveAttentionFilters(ctx, "current_project", { limit: 5 }));
-			const gateAgents = new Map(listAgents(getTmuxAgentsDb(), { projectKey: getProjectKey(ctx.cwd), limit: 100 }).map((agent) => [agent.id, agent]));
+			const gateItems = listAttentionItems(getMeepoDb(), resolveAttentionFilters(ctx, "current_project", { limit: 5 }));
+			const gateAgents = new Map(listAgents(getMeepoDb(), { projectKey: getProjectKey(ctx.cwd), limit: 100 }).map((agent) => [agent.id, agent]));
 			const result = await spawnChildFromParams(pi, ctx, params);
 			const warning = formatAttentionGateWarning(gateItems, gateAgents);
 			return {
@@ -4687,7 +4693,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 		],
 		parameters: SubagentMessageParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const db = getTmuxAgentsDb();
+			const db = getMeepoDb();
 			const actor = resolveToolActorContext(ctx);
 			const agent = getAgent(db, params.id);
 			if (!agent) throw new Error(`Unknown agent id \"${params.id}\".`);
@@ -4832,7 +4838,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const result = await reconcileAgents(ctx, params);
 			const taskFilters = resolveTaskFilters(ctx, params.scope ?? "current_project", { includeDone: true, limit: params.limit });
-			const taskResult = reconcileTasks(getTmuxAgentsDb(), { ids: taskFilters.ids, projectKey: taskFilters.projectKey, spawnSessionId: taskFilters.spawnSessionId, spawnSessionFile: taskFilters.spawnSessionFile, limit: params.limit });
+			const taskResult = reconcileTasks(getMeepoDb(), { ids: taskFilters.ids, projectKey: taskFilters.projectKey, spawnSessionId: taskFilters.spawnSessionId, spawnSessionFile: taskFilters.spawnSessionFile, limit: params.limit });
 			updateFleetUi(ctx);
 			return {
 				content: [{ type: "text", text: `${formatReconcileResult(result)}\nTasks: ${taskResult.backfilled} backfilled · ${taskResult.deactivatedLinks} stale links released.` }],
@@ -4854,7 +4860,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const scope = params.scope ?? "current_project";
 			const filters = applyHierarchyVisibilityToAgentFilters(ctx, resolveAgentFilters(ctx, scope, params));
-			const agents = listAgents(getTmuxAgentsDb(), filters);
+			const agents = listAgents(getMeepoDb(), filters);
 			const header = `scope=${summarizeFilters(scope, filters)}${childRuntimeEnvironment ? " · hierarchy-visible" : ""} · ${agents.length} agent${agents.length === 1 ? "" : "s"}`;
 			const body = agents.length === 0 ? "No agents matched." : agents.map(formatAgentLine).join("\n");
 			updateFleetUi(ctx);
@@ -4892,7 +4898,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 			const allowedIds = visibleSet ? params.ids.filter((id) => visibleSet.has(id)) : params.ids;
 			const deniedIds = visibleSet ? params.ids.filter((id) => !visibleSet.has(id)) : [];
 			const agents = allowedIds
-				.map((id) => getAgent(getTmuxAgentsDb(), id))
+				.map((id) => getAgent(getMeepoDb(), id))
 				.filter((agent): agent is AgentSummary => agent !== null);
 			const text =
 				agents.length === 0
@@ -4921,7 +4927,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const scope = params.scope ?? "current_project";
 			const agentFilters = applyHierarchyVisibilityToAgentFilters(ctx, resolveAgentFilters(ctx, scope, {}));
-			const db = getTmuxAgentsDb();
+			const db = getMeepoDb();
 			const actor = resolveToolActorContext(ctx);
 			const v2Messages = fetchAgentInboxV2(db, {
 				actor,
@@ -4979,7 +4985,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 		parameters: SubagentAttentionParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const scope = params.scope ?? "current_project";
-			const db = getTmuxAgentsDb();
+			const db = getMeepoDb();
 			const actor = resolveToolActorContext(ctx);
 			if (actor.kind === "agent") {
 				const visibleSubjectAgentIds = params.audience === "user" ? listHierarchyVisibleAgentIds(db, actor, { projectKey: getProjectKey(ctx.cwd) }) : undefined;
@@ -5118,9 +5124,9 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 				linkedAgentId: params.linkedAgentId,
 			});
 			if (params.ids && params.ids.length > 0) filters.ids = params.ids;
-			const tasks = sortTasksForList(listTasks(getTmuxAgentsDb(), filters), (params.sort ?? "priority") as "priority" | "updated" | "created" | "title" | "status");
-			const links = listTaskAgentLinks(getTmuxAgentsDb(), { taskIds: tasks.map((task) => task.id), limit: 500 });
-			const agents = listAgents(getTmuxAgentsDb(), { ids: [...new Set(links.map((link) => link.agentId))], limit: 500 });
+			const tasks = sortTasksForList(listTasks(getMeepoDb(), filters), (params.sort ?? "priority") as "priority" | "updated" | "created" | "title" | "status");
+			const links = listTaskAgentLinks(getMeepoDb(), { taskIds: tasks.map((task) => task.id), limit: 500 });
+			const agents = listAgents(getMeepoDb(), { ids: [...new Set(links.map((link) => link.agentId))], limit: 500 });
 			const agentsByTask = new Map<string, AgentSummary[]>();
 			const agentsById = new Map(agents.map((agent) => [agent.id, agent]));
 			for (const link of links) {
@@ -5130,8 +5136,8 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 				existing.push(agent);
 				agentsByTask.set(link.taskId, existing);
 			}
-			const readinessByTask = new Map(listTaskReadiness(getTmuxAgentsDb(), { ids: tasks.map((task) => task.id), includeDone: true, limit: Math.max(tasks.length, 1) }).map((item) => [item.task.id, item]));
-			const healthByTask = listTaskHealth(getTmuxAgentsDb(), tasks);
+			const readinessByTask = new Map(listTaskReadiness(getMeepoDb(), { ids: tasks.map((task) => task.id), includeDone: true, limit: Math.max(tasks.length, 1) }).map((item) => [item.task.id, item]));
+			const healthByTask = listTaskHealth(getMeepoDb(), tasks);
 			const header = `scope=${summarizeTaskFilters(scope, filters)} · ${tasks.length} task${tasks.length === 1 ? "" : "s"}`;
 			const body = tasks.length === 0 ? "No tasks matched." : tasks.map((task) => formatTaskLine(task, agentsByTask.get(task.id) ?? [], readinessByTask.get(task.id), healthByTask.get(task.id))).join("\n");
 			updateFleetUi(ctx);
@@ -5160,9 +5166,9 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 			return args;
 		},
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const tasks = params.ids.map((id) => getTask(getTmuxAgentsDb(), id)).filter((task): task is TaskRecord => task !== null);
-			const links = listTaskAgentLinks(getTmuxAgentsDb(), { taskIds: tasks.map((task) => task.id), limit: 500 });
-			const agents = listAgents(getTmuxAgentsDb(), { ids: [...new Set(links.map((link) => link.agentId))], limit: 500 });
+			const tasks = params.ids.map((id) => getTask(getMeepoDb(), id)).filter((task): task is TaskRecord => task !== null);
+			const links = listTaskAgentLinks(getMeepoDb(), { taskIds: tasks.map((task) => task.id), limit: 500 });
+			const agents = listAgents(getMeepoDb(), { ids: [...new Set(links.map((link) => link.agentId))], limit: 500 });
 			const agentsById = new Map(agents.map((agent) => [agent.id, agent]));
 			const agentsByTask = new Map<string, AgentSummary[]>();
 			for (const link of links) {
@@ -5175,12 +5181,12 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 			const eventsByTask = new Map<string, ReturnType<typeof listTaskEvents>>();
 			if (params.includeEvents ?? true) {
 				for (const task of tasks) {
-					eventsByTask.set(task.id, listTaskEvents(getTmuxAgentsDb(), { taskIds: [task.id], limit: params.eventLimit ?? 20 }));
+					eventsByTask.set(task.id, listTaskEvents(getMeepoDb(), { taskIds: [task.id], limit: params.eventLimit ?? 20 }));
 				}
 			}
-			const dependencyLinks = listTaskLinks(getTmuxAgentsDb(), { taskIds: tasks.map((task) => task.id), includeResolved: true, limit: 1000 });
+			const dependencyLinks = listTaskLinks(getMeepoDb(), { taskIds: tasks.map((task) => task.id), includeResolved: true, limit: 1000 });
 			const interactionsByTask = listTaskInteractionsForTaskIds(tasks.map((task) => task.id));
-			const healthByTask = listTaskHealth(getTmuxAgentsDb(), tasks);
+			const healthByTask = listTaskHealth(getMeepoDb(), tasks);
 			const text = tasks.length === 0
 				? "No matching tasks found."
 				: tasks
@@ -5209,7 +5215,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 		],
 		parameters: TaskUpdateParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const task = getTask(getTmuxAgentsDb(), params.id);
+			const task = getTask(getMeepoDb(), params.id);
 			if (!task) throw new Error(`Unknown task id \"${params.id}\".`);
 			const patch: UpdateTaskInput = {
 				title: params.title,
@@ -5230,18 +5236,18 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 				finalSummary: params.finalSummary,
 				updatedAt: Date.now(),
 			};
-			updateTask(getTmuxAgentsDb(), params.id, patch);
-			createTaskEvent(getTmuxAgentsDb(), {
+			updateTask(getMeepoDb(), params.id, patch);
+			createTaskEvent(getMeepoDb(), {
 				id: randomUUID(),
 				taskId: params.id,
 				eventType: "updated",
 				summary: `Updated task ${task.title}`,
 				payload: patch,
 			});
-			const updated = getTask(getTmuxAgentsDb(), params.id)!;
+			const updated = getTask(getMeepoDb(), params.id)!;
 			updateFleetUi(ctx);
 			return {
-				content: [{ type: "text", text: formatTaskDetails(updated, getTaskLinkedAgents(updated.id), listTaskEvents(getTmuxAgentsDb(), { taskIds: [updated.id], limit: 10 }), {}, getTaskInteractions(updated.id)) }],
+				content: [{ type: "text", text: formatTaskDetails(updated, getTaskLinkedAgents(updated.id), listTaskEvents(getMeepoDb(), { taskIds: [updated.id], limit: 10 }), {}, getTaskInteractions(updated.id)) }],
 				details: { task: updated },
 			};
 		},
@@ -5269,10 +5275,10 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 				force: params.force,
 			});
 			const dependentSourceIds = params.status === "done"
-				? [...new Set(listTaskLinks(getTmuxAgentsDb(), { targetTaskIds: [moved.id], linkTypes: ["depends_on"], includeResolved: true, limit: 500 }).map((link) => link.sourceTaskId))]
+				? [...new Set(listTaskLinks(getMeepoDb(), { targetTaskIds: [moved.id], linkTypes: ["depends_on"], includeResolved: true, limit: 500 }).map((link) => link.sourceTaskId))]
 				: [];
 			const readyDependents = dependentSourceIds.length > 0
-				? listTaskReadiness(getTmuxAgentsDb(), { ids: dependentSourceIds, includeDone: false, limit: dependentSourceIds.length }).filter((item) => item.ready)
+				? listTaskReadiness(getMeepoDb(), { ids: dependentSourceIds, includeDone: false, limit: dependentSourceIds.length }).filter((item) => item.ready)
 				: [];
 			const dispatchResult = params.status === "done" && (params.autoDispatchReadyDependents ?? true) && readyDependents.length > 0
 				? await dispatchReadyTasks(pi, ctx, readyDependents, { fallbackProfile: params.fallbackProfile, maxDispatch: params.maxDispatch, dryRun: false })
@@ -5281,7 +5287,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 			const dispatchText = dispatchResult ? `\n\n${buildTaskDispatchText(dispatchResult, false)}` : "";
 			updateFleetUi(ctx);
 			return {
-				content: [{ type: "text", text: `${formatTaskDetails(moved, getTaskLinkedAgents(moved.id), listTaskEvents(getTmuxAgentsDb(), { taskIds: [moved.id], limit: 10 }), {}, getTaskInteractions(moved.id))}${dependencyText}${dispatchText}` }],
+				content: [{ type: "text", text: `${formatTaskDetails(moved, getTaskLinkedAgents(moved.id), listTaskEvents(getMeepoDb(), { taskIds: [moved.id], limit: 10 }), {}, getTaskInteractions(moved.id))}${dependencyText}${dispatchText}` }],
 				details: { task: moved, readyDependents, dispatchResult },
 			};
 		},
@@ -5294,7 +5300,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 		promptSnippet: "Add a note to the task history without changing board state; pass resolveInteractionId to disposition a visible task interaction.",
 		parameters: TaskNoteParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const task = getTask(getTmuxAgentsDb(), params.id);
+			const task = getTask(getMeepoDb(), params.id);
 			if (!task) throw new Error(`Unknown task id \"${params.id}\".`);
 			const resolution = params.resolveInteractionId
 				? resolveTaskInteractionWithNote(params.id, params.resolveInteractionId, params.resolutionKind ?? "resolved", params.resolutionSummary ?? params.summary)
@@ -5302,7 +5308,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 			if (params.resolveInteractionId && resolution?.changes === 0) {
 				throw new Error(`No open task interaction ${params.resolveInteractionId} matched task ${params.id}.`);
 			}
-			createTaskEvent(getTmuxAgentsDb(), {
+			createTaskEvent(getMeepoDb(), {
 				id: randomUUID(),
 				taskId: params.id,
 				eventType: "note",
@@ -5316,7 +5322,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 					resolutionChanges: resolution?.changes ?? 0,
 				},
 			});
-			updateTask(getTmuxAgentsDb(), params.id, { updatedAt: Date.now(), files: params.files ? [...new Set([...task.files, ...params.files])] : task.files });
+			updateTask(getMeepoDb(), params.id, { updatedAt: Date.now(), files: params.files ? [...new Set([...task.files, ...params.files])] : task.files });
 			updateFleetUi(ctx);
 			const resolutionText = resolution ? ` and resolved ${resolution.changes} ${resolution.source} interaction(s)` : "";
 			return {
@@ -5334,12 +5340,12 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 		parameters: TaskLinkAgentParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			if (params.active ?? true) {
-				const unresolved = listUnresolvedTaskDependencies(getTmuxAgentsDb(), [params.taskId]).get(params.taskId) ?? [];
+				const unresolved = listUnresolvedTaskDependencies(getMeepoDb(), [params.taskId]).get(params.taskId) ?? [];
 				if (unresolved.length > 0) {
 					throw new Error(`Task ${params.taskId} has unresolved dependencies: ${unresolved.map((item) => item.targetTaskId).join(", ")}. Do not link an active agent until dependencies resolve.`);
 				}
 			}
-			const link = linkTaskAgent(getTmuxAgentsDb(), {
+			const link = linkTaskAgent(getMeepoDb(), {
 				taskId: params.taskId,
 				agentId: params.agentId,
 				role: params.role,
@@ -5347,9 +5353,9 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 				allowDuplicateOwner: params.allowDuplicateOwner,
 			});
 			if (params.active ?? true) {
-				const linkedTask = getTask(getTmuxAgentsDb(), params.taskId);
+				const linkedTask = getTask(getMeepoDb(), params.taskId);
 				const status: TaskState = taskLeaseKindForProfile(link.role) === "review" && linkedTask?.status === "in_review" ? "in_review" : "in_progress";
-				updateTask(getTmuxAgentsDb(), params.taskId, { status, waitingOn: null, blockedReason: null, updatedAt: Date.now() });
+				updateTask(getMeepoDb(), params.taskId, { status, waitingOn: null, blockedReason: null, updatedAt: Date.now() });
 			}
 			updateFleetUi(ctx);
 			return {
@@ -5366,7 +5372,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 		promptSnippet: "Remove the active task/agent link when execution ownership changes.",
 		parameters: TaskUnlinkAgentParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const changes = unlinkTaskAgent(getTmuxAgentsDb(), params.taskId, params.agentId, params.reason);
+			const changes = unlinkTaskAgent(getMeepoDb(), params.taskId, params.agentId, params.reason);
 			updateFleetUi(ctx);
 			return {
 				content: [{ type: "text", text: changes > 0 ? `Unlinked ${params.agentId} from ${params.taskId}.` : `No active link found for ${params.agentId} on ${params.taskId}.` }],
@@ -5388,7 +5394,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 		],
 		parameters: TaskLinkParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const link = createTaskLink(getTmuxAgentsDb(), {
+			const link = createTaskLink(getMeepoDb(), {
 				sourceTaskId: params.sourceTaskId,
 				targetTaskId: params.targetTaskId,
 				linkType: (params.linkType as TaskLinkType | undefined) ?? "depends_on",
@@ -5410,7 +5416,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 		promptSnippet: "Cancel a task dependency/relationship link when it no longer applies.",
 		parameters: TaskUnlinkParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const links = cancelTaskLink(getTmuxAgentsDb(), {
+			const links = cancelTaskLink(getMeepoDb(), {
 				id: params.id,
 				sourceTaskId: params.sourceTaskId,
 				targetTaskId: params.targetTaskId,
@@ -5437,7 +5443,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const scope = params.scope ?? "current_project";
 			const filters = resolveTaskFilters(ctx, scope, { includeDone: true, limit: params.limit });
-			const links = listTaskLinks(getTmuxAgentsDb(), {
+			const links = listTaskLinks(getMeepoDb(), {
 				taskIds: params.taskId ? [params.taskId] : filters.ids,
 				sourceTaskIds: params.sourceTaskId ? [params.sourceTaskId] : undefined,
 				targetTaskIds: params.targetTaskId ? [params.targetTaskId] : undefined,
@@ -5476,7 +5482,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 				limit: params.limit,
 			});
 			if (params.ids && params.ids.length > 0) filters.ids = params.ids;
-			const items = listTaskReadiness(getTmuxAgentsDb(), filters);
+			const items = listTaskReadiness(getMeepoDb(), filters);
 			updateFleetUi(ctx);
 			return {
 				content: [{ type: "text", text: buildTaskReadyText(items, params.includeBlocked ?? false) }],
@@ -5523,7 +5529,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const scope = params.scope ?? "current_project";
 			const filters = resolveTaskFilters(ctx, scope, { includeDone: true, limit: params.limit });
-			const items = listTaskAttention(getTmuxAgentsDb(), { ids: filters.ids, projectKey: filters.projectKey, spawnSessionId: filters.spawnSessionId, spawnSessionFile: filters.spawnSessionFile, limit: params.limit });
+			const items = listTaskAttention(getMeepoDb(), { ids: filters.ids, projectKey: filters.projectKey, spawnSessionId: filters.spawnSessionId, spawnSessionFile: filters.spawnSessionFile, limit: params.limit });
 			const interactionsByTask = listTaskInteractionsForTaskIds(items.map((item) => item.taskId));
 			updateFleetUi(ctx);
 			return {
@@ -5542,7 +5548,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const scope = params.scope ?? "current_project";
 			const filters = resolveTaskFilters(ctx, scope, { includeDone: true, limit: params.limit });
-			const result = reconcileTasks(getTmuxAgentsDb(), { ids: filters.ids, projectKey: filters.projectKey, spawnSessionId: filters.spawnSessionId, spawnSessionFile: filters.spawnSessionFile, limit: params.limit });
+			const result = reconcileTasks(getMeepoDb(), { ids: filters.ids, projectKey: filters.projectKey, spawnSessionId: filters.spawnSessionId, spawnSessionFile: filters.spawnSessionFile, limit: params.limit });
 			updateFleetUi(ctx);
 			return {
 				content: [{ type: "text", text: `Reconciled tasks · ${result.backfilled} backfilled · ${result.deactivatedLinks} links deactivated.` }],
@@ -5627,7 +5633,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 		parameters: TmuxServiceStartParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const result = await spawnServiceFromParams(ctx, params);
-			const service = getService(getTmuxAgentsDb(), result.serviceId);
+			const service = getService(getMeepoDb(), result.serviceId);
 			const extraOutput =
 				result.initialOutput && (result.state === "error" || result.readyTimedOut)
 					? `\n\nRecent output:\n${result.initialOutput.slice(-1200)}`
@@ -5652,7 +5658,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const scope = params.scope ?? "current_project";
 			const filters = resolveServiceFilters(ctx, scope, params);
-			const services = listServices(getTmuxAgentsDb(), filters);
+			const services = listServices(getMeepoDb(), filters);
 			const header = `scope=${summarizeServiceFilters(scope, filters)} · ${services.length} service${services.length === 1 ? "" : "s"}`;
 			const body = services.length === 0 ? "No services matched." : services.map(formatServiceLine).join("\n");
 			return {
@@ -5681,7 +5687,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 		},
 		async execute(_toolCallId, params) {
 			const services = params.ids
-				.map((id) => getService(getTmuxAgentsDb(), id))
+				.map((id) => getService(getMeepoDb(), id))
 				.filter((service): service is ServiceSummary => service !== null);
 			const text =
 				services.length === 0 ? "No matching services found." : services.map((service) => formatServiceDetails(service)).join("\n\n---\n\n");
@@ -5806,8 +5812,8 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 				return;
 			}
 			const filters = resolveTaskFilters(ctx, scope, { includeDone: true, limit: 200 });
-			const tasks = listTasks(getTmuxAgentsDb(), filters);
-			const healthByTask = listTaskHealth(getTmuxAgentsDb(), tasks);
+			const tasks = listTasks(getMeepoDb(), filters);
+			const healthByTask = listTaskHealth(getMeepoDb(), tasks);
 			const text = `${`scope=${summarizeTaskFilters(scope, filters)} · ${tasks.length} task${tasks.length === 1 ? "" : "s"}`}${tasks.length === 0 ? "\n\nNo tasks matched." : `\n\n${tasks.map((task) => formatTaskLine(task, getTaskLinkedAgents(task.id), undefined, healthByTask.get(task.id))).join("\n")}`}`;
 			if (ctx.hasUI) await ctx.ui.editor("tasks", text);
 			else ctx.ui.notify(text, "info");
@@ -5832,12 +5838,12 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 				ctx.ui.notify("Usage: /task-open <id>", "warning");
 				return;
 			}
-			const task = getTask(getTmuxAgentsDb(), id);
+			const task = getTask(getMeepoDb(), id);
 			if (!task) {
 				ctx.ui.notify(`Unknown task id \"${id}\".`, "error");
 				return;
 			}
-			const text = formatTaskDetails(task, getTaskLinkedAgents(task.id), listTaskEvents(getTmuxAgentsDb(), { taskIds: [task.id], limit: 20 }), {}, getTaskInteractions(task.id));
+			const text = formatTaskDetails(task, getTaskLinkedAgents(task.id), listTaskEvents(getMeepoDb(), { taskIds: [task.id], limit: 20 }), {}, getTaskInteractions(task.id));
 			if (ctx.hasUI) await ctx.ui.editor(`Task ${task.id}`, text);
 			else ctx.ui.notify(text, "info");
 			updateFleetUi(ctx);
@@ -5873,13 +5879,13 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 				ctx.ui.notify("Usage: /task-note <id> <message>", "warning");
 				return;
 			}
-			const task = getTask(getTmuxAgentsDb(), id);
+			const task = getTask(getMeepoDb(), id);
 			if (!task) {
 				ctx.ui.notify(`Unknown task id \"${id}\".`, "error");
 				return;
 			}
-			createTaskEvent(getTmuxAgentsDb(), { id: randomUUID(), taskId: id, eventType: "note", summary });
-			updateTask(getTmuxAgentsDb(), id, { updatedAt: Date.now() });
+			createTaskEvent(getMeepoDb(), { id: randomUUID(), taskId: id, eventType: "note", summary });
+			updateTask(getMeepoDb(), id, { updatedAt: Date.now() });
 			ctx.ui.notify(`Added note to ${task.id}.`, "info");
 			updateFleetUi(ctx);
 		},
@@ -5896,16 +5902,16 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 				ctx.ui.notify("Usage: /task-link-agent <task-id> <agent-id> [role]", "warning");
 				return;
 			}
-			const agent = getAgent(getTmuxAgentsDb(), agentId);
+			const agent = getAgent(getMeepoDb(), agentId);
 			if (!agent) {
 				ctx.ui.notify(`Unknown agent id \"${agentId}\".`, "error");
 				return;
 			}
 			const allowDuplicateOwner = await confirmTaskLeaseOverride(ctx, taskId, role || agent.profile);
-			const existingTask = getTask(getTmuxAgentsDb(), taskId);
-			const link = linkTaskAgent(getTmuxAgentsDb(), { taskId, agentId, role, isActive: true, allowDuplicateOwner });
+			const existingTask = getTask(getMeepoDb(), taskId);
+			const link = linkTaskAgent(getMeepoDb(), { taskId, agentId, role, isActive: true, allowDuplicateOwner });
 			const status: TaskState = taskLeaseKindForProfile(link.role) === "review" && existingTask?.status === "in_review" ? "in_review" : "in_progress";
-			updateTask(getTmuxAgentsDb(), taskId, { status, waitingOn: null, blockedReason: null, updatedAt: Date.now() });
+			updateTask(getMeepoDb(), taskId, { status, waitingOn: null, blockedReason: null, updatedAt: Date.now() });
 			ctx.ui.notify(`Linked ${link.agentId} to ${link.taskId}.`, "info");
 			updateFleetUi(ctx);
 		},
@@ -5921,7 +5927,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 				ctx.ui.notify("Usage: /task-unlink-agent <task-id> <agent-id>", "warning");
 				return;
 			}
-			const changes = unlinkTaskAgent(getTmuxAgentsDb(), taskId, agentId, "manual unlink");
+			const changes = unlinkTaskAgent(getMeepoDb(), taskId, agentId, "manual unlink");
 			ctx.ui.notify(changes > 0 ? `Unlinked ${agentId} from ${taskId}.` : `No active link found for ${agentId} on ${taskId}.`, changes > 0 ? "info" : "warning");
 			updateFleetUi(ctx);
 		},
@@ -5936,7 +5942,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 				return;
 			}
 			const filters = resolveTaskFilters(ctx, scope, { includeDone: true, limit: 200 });
-			const items = listTaskAttention(getTmuxAgentsDb(), { ids: filters.ids, projectKey: filters.projectKey, spawnSessionId: filters.spawnSessionId, spawnSessionFile: filters.spawnSessionFile, limit: 200 });
+			const items = listTaskAttention(getMeepoDb(), { ids: filters.ids, projectKey: filters.projectKey, spawnSessionId: filters.spawnSessionId, spawnSessionFile: filters.spawnSessionFile, limit: 200 });
 			const interactionsByTask = listTaskInteractionsForTaskIds(items.map((item) => item.taskId));
 			const text = buildTaskAttentionText(items, interactionsByTask);
 			if (ctx.hasUI) await ctx.ui.editor("task attention", text);
@@ -5954,7 +5960,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 				return;
 			}
 			const filters = resolveTaskFilters(ctx, scope, { includeDone: true, limit: 200 });
-			const result = reconcileTasks(getTmuxAgentsDb(), { ids: filters.ids, projectKey: filters.projectKey, spawnSessionId: filters.spawnSessionId, spawnSessionFile: filters.spawnSessionFile, limit: 200 });
+			const result = reconcileTasks(getMeepoDb(), { ids: filters.ids, projectKey: filters.projectKey, spawnSessionId: filters.spawnSessionId, spawnSessionFile: filters.spawnSessionFile, limit: 200 });
 			ctx.ui.notify(`Reconciled tasks · ${result.backfilled} backfilled · ${result.deactivatedLinks} links deactivated.`, "info");
 			updateFleetUi(ctx);
 		},
@@ -6044,7 +6050,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 				return;
 			}
 			try {
-				const agent = getAgent(getTmuxAgentsDb(), id);
+				const agent = getAgent(getMeepoDb(), id);
 				if (!agent) throw new Error(`Unknown agent id \"${id}\".`);
 				if (
 					!(await getProcessHost().targetExists(hostTargetRefFromLegacy(agent)))
@@ -6126,9 +6132,9 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 				return;
 			}
 			const filters = resolveAttentionFilters(ctx, scope, { limit: 200 });
-			const items = listAttentionItems(getTmuxAgentsDb(), filters);
+			const items = listAttentionItems(getMeepoDb(), filters);
 			const agentsById = new Map(
-				listAgents(getTmuxAgentsDb(), { ids: [...new Set(items.map((item) => item.agentId))], limit: 200 }).map((agent) => [agent.id, agent]),
+				listAgents(getMeepoDb(), { ids: [...new Set(items.map((item) => item.agentId))], limit: 200 }).map((agent) => [agent.id, agent]),
 			);
 			const text = buildAttentionText(items, agentsById, false);
 			if (ctx.hasUI) await ctx.ui.editor("subagent attention", text);
@@ -6189,7 +6195,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 				return;
 			}
 			const filters = resolveServiceFilters(ctx, scope, { activeOnly: false, limit: 200 });
-			const services = listServices(getTmuxAgentsDb(), filters);
+			const services = listServices(getMeepoDb(), filters);
 			const text = `${`scope=${summarizeServiceFilters(scope, filters)} · ${services.length} service${services.length === 1 ? "" : "s"}`}${services.length === 0 ? "\n\nNo services matched." : `\n\n${services.map(formatServiceLine).join("\n")}`}`;
 			if (ctx.hasUI) await ctx.ui.editor("tmux services", text);
 			else ctx.ui.notify(text, "info");
@@ -6304,7 +6310,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
-		const db = getTmuxAgentsDb();
+		const db = getMeepoDb();
 		await reconcileAgents(ctx, { scope: "current_project", activeOnly: false, limit: 200 }).catch(() => {});
 		reconcileTasks(db, { projectKey: getProjectKey(ctx.cwd), limit: 500 });
 		const activeAgents = listAgents(db, { projectKey: getProjectKey(ctx.cwd), activeOnly: true, limit: 200 });
@@ -6333,7 +6339,7 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 	pi.on("session_shutdown", async () => {
 		if (attentionWakePoll) clearInterval(attentionWakePoll);
 		attentionWakePoll = undefined;
-		closeTmuxAgentsDb();
+		closeMeepoDb();
 	});
 }
 
@@ -6343,9 +6349,9 @@ function registerTmuxAgents(pi: ExtensionAPI, runtime: MeepoRuntime): void {
  */
 export default function tmuxAgentsExtension(pi: ExtensionAPI): void {
 	const runtime = createMeepoRuntime({
-		registerCoordinatorTools: registerTmuxAgents,
+		registerCoordinatorTools: registerMeepoCoordinatorTools,
 		// Full preset seeds org role/edge doctrine; core skips (hierarchy off).
-		getDb: () => getTmuxAgentsDb(),
+		getDb: () => getMeepoDb(),
 	});
 	runtime.start(pi);
 }
