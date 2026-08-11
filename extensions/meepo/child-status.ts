@@ -1,17 +1,28 @@
 /**
  * Child runtime status snapshot (disk + DB).
  */
-import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { getMeepoDb } from "./db.js";
+import { readRpcBridgeStatus } from "./rpc-client.js";
 import { updateAgent } from "./registry.js";
 import type {
+	AgentTransportState,
 	ChildDownwardDeliveryMode,
 	ChildRuntimeEnvironment,
 	RuntimeStatusSnapshot,
 } from "./types.js";
 
+const BRIDGE_STATUS_STALE_MS = 10_000;
+const POLL_FALLBACK_TRANSPORT_STATES = new Set<AgentTransportState>([
+	"fallback",
+	"disconnected",
+	"stopped",
+	"error",
+	"lost",
+]);
 const BRIDGE_TERMINAL_STATES = new Set<RuntimeStatusSnapshot["state"]>(["error", "stopped"]);
 
 export function appendRunEvent(environment: ChildRuntimeEnvironment, eventType: string, summary: string, payload: unknown): void {
