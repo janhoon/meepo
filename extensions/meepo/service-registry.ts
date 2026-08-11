@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import { addSessionScopeFilter, makePlaceholders, safeJsonParse } from "./sql-util.js";
 import type {
 	CreateServiceInput,
 	ListServicesFilters,
@@ -36,42 +37,6 @@ const SERVICE_FIELD_TO_COLUMN: Record<keyof UpdateServiceInput, string> = {
 	updatedAt: "updated_at",
 	finishedAt: "finished_at",
 };
-
-function safeJsonParse<T>(value: string | null | undefined, fallback: T): T {
-	if (!value) return fallback;
-	try {
-		return JSON.parse(value) as T;
-	} catch {
-		return fallback;
-	}
-}
-
-function makePlaceholders(count: number): string {
-	return new Array(count).fill("?").join(", ");
-}
-
-function addSessionScopeFilter(
-	where: string[],
-	params: unknown[],
-	spawnSessionId: string | undefined,
-	spawnSessionFile: string | undefined,
-	alias = "s",
-): void {
-	if (spawnSessionId && spawnSessionFile) {
-		where.push(`(${alias}.spawn_session_id = ? OR ${alias}.spawn_session_file = ?)`);
-		params.push(spawnSessionId, spawnSessionFile);
-		return;
-	}
-	if (spawnSessionId) {
-		where.push(`${alias}.spawn_session_id = ?`);
-		params.push(spawnSessionId);
-		return;
-	}
-	if (spawnSessionFile) {
-		where.push(`${alias}.spawn_session_file = ?`);
-		params.push(spawnSessionFile);
-	}
-}
 
 function toServiceSummary(row: Record<string, unknown>): ServiceSummary {
 	return {

@@ -42,18 +42,18 @@ function registerAllKnownSurface(pi: ExtensionAPI): void {
 }
 
 describe("loadMeepoConfig", () => {
-	it("defaults to full preset with all coordinator capabilities (operator compatibility)", () => {
+	it("defaults to core preset (methodology-neutral platform)", () => {
 		const config = loadMeepoConfig({ env: {} });
-		assert.equal(config.preset, "full");
+		assert.equal(config.preset, "core");
 		assert.equal(config.version, 1);
-		assert.equal(config.policies.noWait, "enforce");
-		assert.equal(config.policies.hierarchy, "enforce");
-		assert.equal(config.policies.taskLeases, "on");
+		assert.equal(config.policies.noWait, "off");
+		assert.equal(config.policies.hierarchy, "off");
+		assert.equal(config.policies.taskLeases, "off");
 		assert.ok(config.capabilities.includes("agents.core"));
-		assert.ok(config.capabilities.includes("tasks.core"));
-		assert.ok(config.capabilities.includes("tasks.graph"));
-		assert.ok(config.capabilities.includes("services"));
-		assert.ok(config.capabilities.includes("ui"));
+		assert.ok(config.capabilities.includes("agents.attention"));
+		assert.ok(!config.capabilities.includes("tasks.core"));
+		assert.ok(!config.capabilities.includes("services"));
+		assert.ok(!config.capabilities.includes("ui"));
 	});
 
 	it("respects MEEPO_PRESET=core from env when options.preset is omitted", () => {
@@ -68,12 +68,15 @@ describe("loadMeepoConfig", () => {
 });
 
 describe("MeepoRuntime full-default tool surface", () => {
-	it("lists the full coordinator tool set for default/full config", () => {
-		const runtime = createMeepoRuntime({ loadOptions: { env: {} } });
+	it("lists the full coordinator tool set for explicit full config", () => {
+		const runtime = createMeepoRuntime({ loadOptions: { env: {}, preset: "full" } });
 		const names = runtime.listCoordinatorToolNames();
 
 		assert.deepEqual(names, [...FULL_COORDINATOR_TOOL_NAMES]);
 		assert.equal(names.length, FULL_COORDINATOR_TOOL_NAMES.length);
+		assert.ok(names.includes("service_start"));
+		assert.ok(names.includes("tmux_service_start"), "legacy service alias remains registered");
+		assert.equal(runtime.shouldRegisterTool("tmux_service_start"), true);
 
 		for (const required of [
 			"subagent_spawn",
@@ -82,8 +85,8 @@ describe("MeepoRuntime full-default tool surface", () => {
 			"task_create",
 			"task_dispatch_ready",
 			"task_subtree_control",
-			"tmux_service_start",
-			"tmux_service_reconcile",
+			"service_start",
+			"service_reconcile",
 		]) {
 			assert.ok(names.includes(required), `missing tool ${required}`);
 			assert.equal(runtime.shouldRegisterTool(required), true);
@@ -95,11 +98,18 @@ describe("MeepoRuntime full-default tool surface", () => {
 		assert.equal(runtime.shouldRegisterTool("subagent_publish"), true);
 	});
 
-	it("createFullDefaultConfig matches loadMeepoConfig() tool plan", () => {
+	it("createFullDefaultConfig matches loadMeepoConfig({ preset: full }) tool plan", () => {
 		const fromFactory = coordinatorToolNamesForConfig(createFullDefaultConfig());
-		const fromLoad = coordinatorToolNamesForConfig(loadMeepoConfig({ env: {} }));
+		const fromLoad = coordinatorToolNamesForConfig(loadMeepoConfig({ env: {}, preset: "full" }));
 		assert.deepEqual(fromFactory, fromLoad);
 		assert.deepEqual(fromFactory, [...FULL_COORDINATOR_TOOL_NAMES]);
+	});
+
+	it("default loadMeepoConfig is core and thinner than full", () => {
+		const coreNames = coordinatorToolNamesForConfig(loadMeepoConfig({ env: {} }));
+		assert.ok(coreNames.includes("subagent_spawn"));
+		assert.ok(!coreNames.includes("task_create"));
+		assert.ok(coreNames.length < FULL_COORDINATOR_TOOL_NAMES.length);
 	});
 
 	it("core config plans a thinner agents-only surface", () => {
@@ -108,6 +118,7 @@ describe("MeepoRuntime full-default tool surface", () => {
 		assert.ok(names.includes("subagent_spawn"));
 		assert.ok(names.includes("subagent_inbox"));
 		assert.ok(!names.includes("task_create"));
+		assert.ok(!names.includes("service_start"));
 		assert.ok(!names.includes("tmux_service_start"));
 		assert.ok(names.length < FULL_COORDINATOR_TOOL_NAMES.length);
 	});
@@ -144,6 +155,7 @@ describe("capability-gated registration", () => {
 		assert.ok(filter.registeredTools.includes("subagent_inbox"));
 		assert.ok(!filter.registeredTools.includes("task_create"));
 		assert.ok(!filter.registeredTools.includes("task_dispatch_ready"));
+		assert.ok(!filter.registeredTools.includes("service_start"));
 		assert.ok(!filter.registeredTools.includes("tmux_service_start"));
 
 		const plannedCommands = coordinatorCommandNamesForConfig(config);
@@ -167,6 +179,7 @@ describe("capability-gated registration", () => {
 		registerAllKnownSurface(filter.api);
 
 		assert.ok(filter.registeredTools.includes("subagent_spawn"));
+		assert.ok(filter.registeredTools.includes("service_start"));
 		assert.ok(filter.registeredTools.includes("tmux_service_start"));
 		assert.ok(!filter.registeredTools.includes("task_create"));
 		assert.ok(!filter.registeredTools.includes("subagent_inbox")); // attention not enabled
@@ -187,7 +200,7 @@ describe("capability-gated registration", () => {
 		assert.ok(snap);
 		assert.ok(snap!.tools.includes("subagent_spawn"));
 		assert.ok(!snap!.tools.includes("task_create"));
-		assert.ok(!snap!.tools.includes("tmux_service_start"));
+		assert.ok(!snap!.tools.includes("service_start"));
 		assert.equal(snap!.shortcutCount, 0);
 	});
 

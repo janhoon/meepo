@@ -73,10 +73,10 @@ afterEach(() => {
 	setActiveProfileLoadOptions({ dirs: [], extraTools: [], allowUnknownTools: false });
 });
 
-describe("acceptance matrix: full default", () => {
-	it(caseName("full default: tool surface + enforce policies + org seeder eligibility"), () => {
-		const config = loadMeepoConfig({ env: {} });
-		assert.equal(config.preset, "full", "full default preset");
+describe("acceptance matrix: full preset", () => {
+	it(caseName("full preset: tool surface + enforce policies + org seeder eligibility"), () => {
+		const config = loadMeepoConfig({ env: {}, preset: "full" });
+		assert.equal(config.preset, "full", "full preset");
 		assert.deepEqual(
 			coordinatorToolNamesForConfig(config),
 			[...FULL_COORDINATOR_TOOL_NAMES],
@@ -103,7 +103,7 @@ describe("acceptance matrix: core consumer", () => {
 		assert.ok(names.includes("subagent_spawn"), "core has spawn");
 		assert.ok(names.includes("subagent_inbox"), "core has inbox");
 		assert.ok(!names.includes("task_create"), "core omits tasks");
-		assert.ok(!names.includes("tmux_service_start"), "core omits services");
+		assert.ok(!names.includes("service_start"), "core omits services");
 		assert.equal(config.policies.noWait, "off", "core noWait off");
 		assert.equal(config.policies.hierarchy, "off", "core hierarchy off");
 		assert.equal(shouldApplyFullOrgPreset(config), false, "core skips org preset");
@@ -111,7 +111,7 @@ describe("acceptance matrix: core consumer", () => {
 		const filter = createCapabilityFilteredExtensionApi(recordingPi(), config);
 		registerAllTools(filter.api);
 		assert.ok(!filter.registeredTools.includes("task_create"), "core filter drops tasks");
-		assert.ok(!filter.registeredTools.includes("tmux_service_start"), "core filter drops services");
+		assert.ok(!filter.registeredTools.includes("service_start"), "core filter drops services");
 	});
 });
 

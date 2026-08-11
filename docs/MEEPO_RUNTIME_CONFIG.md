@@ -4,38 +4,39 @@ Meepo is split into a **platform** (process-hosted subagents via **tmux or herdr
 
 The deep module is **MeepoRuntime**: it loads config, optionally seeds doctrine, and registers tools/commands through a capability filter.
 
-## Defaults (operator compatibility)
+## Defaults (methodology-neutral platform)
 
-Unconfigured installs use the **full** preset:
+Unconfigured installs use the **core** preset:
 
-| Axis | Full default |
+| Axis | Core default |
 |---|---|
-| preset | `full` |
+| preset | `core` |
+| capabilities | `agents.core` + `agents.attention` only |
+| policies.noWait | `off` |
+| policies.hierarchy | `off` |
+| policies.taskLeases | `off` |
+| policies.searchGuidance | `null` |
+| profiles.dirs | `[]` → caller/project profile dirs only |
+| profiles.allowUnknownTools | `false` |
+| profiles.extraTools | `[]` |
+| org seeder | **not** applied |
+| profile name-compat | **not** registered |
+
+Core is durable multi-agent process control without company playbook or Kanban tool flood.
+
+## Full operator preset
+
+Set `MEEPO_PRESET=full` (or pass `preset: "full"` to `loadMeepoConfig`):
+
+| Axis | Full |
+|---|---|
 | capabilities | all (`agents.core`, `agents.attention`, `tasks.core`, `tasks.graph`, `tasks.ops`, `services`, `ui`) |
 | policies.noWait | `enforce` |
 | policies.hierarchy | `enforce` |
 | policies.taskLeases | `on` |
 | policies.searchGuidance | `rg-only` (guidance string; not a hard platform ban) |
-| profiles.dirs | `[]` → package `agents/` only |
-| profiles.allowUnknownTools | `false` |
-| profiles.extraTools | `[]` |
 | org seeder | applied (CEO/CTO/engineer edge chart) |
 | profile name-compat | registered (legacy review names / principal-engineer→reviewer) |
-
-## Core consumer preset
-
-Set `MEEPO_PRESET=core` (or pass `preset: "core"` to `loadMeepoConfig`):
-
-| Axis | Core |
-|---|---|
-| capabilities | `agents.core` + `agents.attention` only |
-| policies.noWait | `off` |
-| policies.hierarchy | `off` |
-| policies.taskLeases | `off` |
-| org seeder | **not** applied |
-| profile name-compat | **not** registered |
-
-Core is for consumers who want durable multi-agent process control without the company playbook or Kanban tool flood.
 
 ## Config shape
 
@@ -103,9 +104,13 @@ Parent↔child control uses the same **`rpc_bridge`** on every ProcessHost backe
 
 `loadMeepoConfig(options?)`:
 
-1. Base from `options.preset` or env `MEEPO_PRESET` or **`full`**
+1. Base from `options.preset` or env `MEEPO_PRESET` or **`core`**
 2. Optional overrides: `capabilities`, `policies`, `profiles`, `runtime`
 3. Env `MEEPO_PROCESS_HOST` overrides `runtime.processHost` when set
+
+### Messaging model
+
+New upward publishes (`subagent_publish`) write the hierarchy (v2) message + attention path only. Legacy `agent_messages` / `attention_items` rows remain readable for pre-migration data and for the downward delivery queue (`subagent_message` → child). Inbox/list/fleet readers merge v2 with non-shadow legacy rows.
 
 ### Capabilities → tools
 
@@ -116,7 +121,7 @@ Parent↔child control uses the same **`rpc_bridge`** on every ProcessHost backe
 | `tasks.core` | create, list, get, update, move, note |
 | `tasks.ops` | link_agent, unlink_agent, attention, reconcile |
 | `tasks.graph` | link, unlink, links, ready, dispatch_ready, subtree_control |
-| `services` | tmux_service_* |
+| `services` | `service_*` (plus legacy `tmux_service_*` aliases) |
 | `ui` | board/standup chrome + shortcuts |
 
 Slash commands and shortcuts are gated the same way (see `COMMAND_CAPABILITY` in config).

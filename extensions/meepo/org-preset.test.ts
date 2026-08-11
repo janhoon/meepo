@@ -45,9 +45,10 @@ function createMinimalOrgSchema(): DatabaseSync {
 }
 
 describe("shouldApplyFullOrgPreset", () => {
-	it("applies for full default config", () => {
+	it("applies for full preset config", () => {
 		assert.equal(shouldApplyFullOrgPreset(createFullDefaultConfig()), true);
-		assert.equal(shouldApplyFullOrgPreset(loadMeepoConfig({ env: {} })), true);
+		assert.equal(shouldApplyFullOrgPreset(loadMeepoConfig({ env: {}, preset: "full" })), true);
+		assert.equal(shouldApplyFullOrgPreset(loadMeepoConfig({ env: {} })), false);
 	});
 
 	it("does not apply for core config", () => {

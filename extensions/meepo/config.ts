@@ -1,7 +1,7 @@
 /**
  * MeepoRuntime configuration.
  *
- * Defaults preserve full Meepo operator behavior (all capabilities + enforce policies).
+ * Defaults preserve core platform behavior; full is explicit opt-in (all capabilities + enforce policies).
  * Later tickets gate registration and policy modes from this object; this ticket only
  * establishes the load surface and full-default tool catalog.
  */
@@ -75,7 +75,7 @@ export interface MeepoRuntimePathsConfig {
 
 export interface MeepoConfig {
 	version: typeof MEEPO_CONFIG_VERSION;
-	/** Named bundle. full = today's Meepo; core = platform-only (later tickets). */
+	/** Named bundle. core = platform default; full = operator doctrine pack. */
 	preset: MeepoPreset;
 	capabilities: MeepoCapability[];
 	policies: MeepoPoliciesConfig;
@@ -117,7 +117,14 @@ export const FULL_COORDINATOR_TOOL_NAMES = [
 	"task_ready",
 	"task_dispatch_ready",
 	"task_subtree_control",
-	// services
+	// services — canonical service_* names first; tmux_service_* are compatibility aliases
+	"service_start",
+	"service_list",
+	"service_get",
+	"service_focus",
+	"service_stop",
+	"service_capture",
+	"service_reconcile",
 	"tmux_service_start",
 	"tmux_service_list",
 	"tmux_service_get",
@@ -128,6 +135,27 @@ export const FULL_COORDINATOR_TOOL_NAMES = [
 ] as const;
 
 export type FullCoordinatorToolName = (typeof FULL_COORDINATOR_TOOL_NAMES)[number];
+
+/** Legacy tool name aliases → canonical service_* names. */
+export const LEGACY_SERVICE_TOOL_ALIASES = {
+	tmux_service_start: "service_start",
+	tmux_service_list: "service_list",
+	tmux_service_get: "service_get",
+	tmux_service_focus: "service_focus",
+	tmux_service_stop: "service_stop",
+	tmux_service_capture: "service_capture",
+	tmux_service_reconcile: "service_reconcile",
+} as const satisfies Record<string, FullCoordinatorToolName>;
+
+export const CANONICAL_SERVICE_TOOL_NAMES = [
+	"service_start",
+	"service_list",
+	"service_get",
+	"service_focus",
+	"service_stop",
+	"service_capture",
+	"service_reconcile",
+] as const;
 
 /** Map each coordinator tool to the capability that enables it. */
 export const TOOL_CAPABILITY: Record<FullCoordinatorToolName, MeepoCapability> = {
@@ -158,6 +186,13 @@ export const TOOL_CAPABILITY: Record<FullCoordinatorToolName, MeepoCapability> =
 	task_ready: "tasks.graph",
 	task_dispatch_ready: "tasks.graph",
 	task_subtree_control: "tasks.graph",
+	service_start: "services",
+	service_list: "services",
+	service_get: "services",
+	service_focus: "services",
+	service_stop: "services",
+	service_capture: "services",
+	service_reconcile: "services",
 	tmux_service_start: "services",
 	tmux_service_list: "services",
 	tmux_service_get: "services",
@@ -253,14 +288,15 @@ function resolvePresetBase(preset: MeepoPreset): MeepoConfig {
 /**
  * Load Meepo config.
  * Precedence: full/core base from preset → option overrides → MEEPO_PRESET env (when options.preset omitted).
- * Unconfigured installs resolve to **full** (operator compatibility).
+ * Unconfigured installs resolve to **core** (methodology-neutral platform default).
+ * Opt into the operator doctrine pack with MEEPO_PRESET=full.
  */
 export function loadMeepoConfig(options: LoadMeepoConfigOptions = {}): MeepoConfig {
 	const env = options.env ?? process.env;
 	const envPreset = env.MEEPO_PRESET?.trim();
 	const presetFromEnv =
 		envPreset === "core" || envPreset === "full" ? (envPreset as MeepoPreset) : undefined;
-	const preset = options.preset ?? presetFromEnv ?? "full";
+	const preset = options.preset ?? presetFromEnv ?? "core";
 	const base = resolvePresetBase(preset);
 	const processHostFromEnv = parseProcessHostEnv(env.MEEPO_PROCESS_HOST);
 
@@ -384,13 +420,21 @@ export function coordinatorCommandNamesForConfig(config: MeepoConfig): string[] 
 	return FULL_COORDINATOR_COMMAND_NAMES.filter((name) => enabled.has(COMMAND_CAPABILITY[name]));
 }
 
+export function canonicalCoordinatorToolName(toolName: string): string {
+	if (toolName in LEGACY_SERVICE_TOOL_ALIASES) {
+		return LEGACY_SERVICE_TOOL_ALIASES[toolName as keyof typeof LEGACY_SERVICE_TOOL_ALIASES];
+	}
+	return toolName;
+}
+
 export function shouldRegisterCoordinatorTool(config: MeepoConfig, toolName: string): boolean {
 	if (toolName === "subagent_publish") {
 		// Child-only tool; always allowed when child runtime registers it.
 		return true;
 	}
-	if ((FULL_COORDINATOR_TOOL_NAMES as readonly string[]).includes(toolName)) {
-		return hasCapability(config, TOOL_CAPABILITY[toolName as FullCoordinatorToolName]);
+	const canonical = canonicalCoordinatorToolName(toolName);
+	if ((FULL_COORDINATOR_TOOL_NAMES as readonly string[]).includes(canonical)) {
+		return hasCapability(config, TOOL_CAPABILITY[canonical as FullCoordinatorToolName]);
 	}
 	// Unknown tools: allow (forward-compatible; child/custom tools not in catalog).
 	return true;

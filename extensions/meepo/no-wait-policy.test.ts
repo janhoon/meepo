@@ -14,7 +14,8 @@ describe("no-wait policy modes", () => {
 	const okCmd = "rg -n pattern src";
 
 	it("full/default config uses enforce", () => {
-		assert.equal(loadMeepoConfig({ env: {} }).policies.noWait, "enforce");
+		assert.equal(loadMeepoConfig({ env: {}, preset: "full" }).policies.noWait, "enforce");
+		assert.equal(loadMeepoConfig({ env: {} }).policies.noWait, "off");
 		assert.equal(createFullDefaultConfig().policies.noWait, "enforce");
 	});
 

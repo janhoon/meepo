@@ -5,7 +5,8 @@ import { evaluateHierarchySpawn } from "./hierarchy-policy.js";
 
 describe("hierarchy policy config defaults", () => {
 	it("full/default uses enforce", () => {
-		assert.equal(loadMeepoConfig({ env: {} }).policies.hierarchy, "enforce");
+		assert.equal(loadMeepoConfig({ env: {}, preset: "full" }).policies.hierarchy, "enforce");
+		assert.equal(loadMeepoConfig({ env: {} }).policies.hierarchy, "off");
 		assert.equal(createFullDefaultConfig().policies.hierarchy, "enforce");
 	});
 });

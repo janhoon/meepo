@@ -1,185 +1,35 @@
 # meepo extension
 
-> Package extension for Meepo orchestration. Host-neutral via **ProcessHost** (`tmux` | `herdr`).
 
-Current implementation status: **task-first board + task registry + agent/runtime control foundation**, pluggable **ProcessHost** (tmux + herdr adapters), tracked service launches for long-running commands, RPC bridge control plane for child agents, and herdr desktop notifications for attention wakes.
+## Architecture notes (quality pass)
 
-Implemented so far:
-- global SQLite bootstrap at `~/.pi/agent/subagents.db`
-- schema + migrations for `agents`, `agent_messages`, `agent_events`, and `artifacts`
-- registry helper functions for create/update/list/get/message/event/artifact operations
-- model-callable coordinator tools:
-  - `task_create`
-  - `task_list`
-  - `task_get`
-  - `task_update`
-  - `task_move`
-  - `task_note`
-  - `task_link_agent`
-  - `task_unlink_agent`
-  - `task_link`
-  - `task_unlink`
-  - `task_links`
-  - `task_ready`
-  - `task_dispatch_ready`
-  - `task_attention`
-  - `task_reconcile`
-  - `task_subtree_control`
-  - `subagent_spawn`
-  - `subagent_focus`
-  - `subagent_stop`
-  - `subagent_message`
-  - `subagent_reconcile`
-  - `subagent_capture`
-  - `subagent_list`
-  - `subagent_get`
-  - `subagent_inbox`
-  - `subagent_attention`
-  - `subagent_cleanup`
-  - `tmux_service_start`
-  - `tmux_service_list`
-  - `tmux_service_get`
-  - `tmux_service_focus`
-  - `tmux_service_stop`
-  - `tmux_service_capture`
-  - `tmux_service_reconcile`
-- lightweight interactive commands and shortcuts:
-  - `/agents`
-  - `/task-board`
-  - `/standup [scope]`
-  - `/tasks`
-  - `/task-new`
-  - `/task-open <id>`
-  - `/task-move <id> [state]`
-  - `/task-note <id> <message>`
-  - `/task-link-agent <task-id> <agent-id> [role]`
-  - `/task-unlink-agent <task-id> <agent-id>`
-  - `/task-attention [scope]`
-  - `/task-sync [scope]`
-  - `/task-subtree <task-id> [preview|pause|resume|cancel] [--confirm] [--preview-token=<token>] [reason...]`
-  - `/task-spawn [task-id]`
-  - `/agent-open <id>`
-  - `/agent-stop <id> [force]`
-  - `/agent-message <id> <kind> <message>`
-  - `/agent-capture <id> [lines]`
-  - `/agent-sync`
-  - `/agent-attention [scope]`
-  - `/agent-cleanup [scope] [force]`
-  - `/service-start`
-  - `/services [scope]`
-  - `/service-open <id>`
-  - `/service-stop <id> [force]`
-  - `/service-capture <id> [lines]`
-  - `/service-sync`
-  - `Ctrl+Alt+A`
-  - `Ctrl+Alt+B`
-  - `Ctrl+Alt+N`
-  - `Ctrl+Alt+J`
-  - `Ctrl+Alt+K`
-- run directory creation under:
-  - `~/.pi/agent/subagents/runs/<agent-id>/`
-  - `~/.pi/agent/services/runs/<service-id>/`
-- generated child artifacts:
-  - `task.md`
-  - `runtime-appendix.md`
-  - `launch.sh`
-  - `session.jsonl` path reservation
-  - `latest-status.json`
-  - `events.jsonl`
-  - `debug.log`
-  - `bridge-config.json`
-  - `bridge-status.json`
-  - `bridge-events.jsonl`
-  - `bridge.log`
-  - `bridge.pid`
-  - `bridge.sock` path reservation
-- generated service artifacts:
-  - `command.txt`
-  - `launch.sh`
-  - `metadata.json`
-  - `latest-status.json`
-  - `output.log`
-- ProcessHost spawn with stored host-neutral ids (`host_kind`, `host_primary_id`, `host_display_name`) plus legacy `tmux_*` columns
-  - selection: `runtime.processHost` / `MEEPO_PROCESS_HOST` = `auto|tmux|herdr` (auto prefers herdr on PATH)
-  - herdr: named agents, current workspace/active tab, `--no-focus`, durable `terminal_id`
-  - tmux: detached session / current session windows as before
-- host-side RPC bridge launch path for new subagent spawns (identical on tmux and herdr):
-  - ProcessHost runs a bridge entrypoint instead of invoking `pi` directly
-  - the bridge launches `pi --mode rpc`
-  - the bridge exposes a local Unix socket control endpoint for prompt/steer/follow_up/abort/get_state
-  - the bridge mirrors readable activity into the host pane while persisting machine-readable status/events
-  - `subagent_message` never falls back to herdr/tmux PTY typing — degraded path is inbox/poll only
-- herdr attention toasts (`herdr notification show`) for question/blocker/complete on the herdr backend only
-- parent-session linkage entries appended into the current pi session
-- child-mode runtime support:
-  - auto `started` event
-  - auto completion fallback on `agent_end`
-  - `subagent_publish` tool for milestone/blocker/question/question_for_user/complete updates
-  - first-class attention items for question/blocker/completion events
-  - downward child message delivery from registry into the live child session
-  - action-policy-aware downward messages (`fyi`, `resume_if_blocked`, `replan`, `interrupt_and_replan`, `stop`)
-  - delivered/acked transitions for downward child messages
-  - live registry + `latest-status.json` preview updates while the child runs
-  - live RPC bridge delivery for queued child messages when the bridge is healthy
-  - fallback transport-state classification when the bridge is unavailable
-  - coordinator wake-up routing from unresolved attention items
-- interactive dashboard behavior:
-  - list view with scope/filter/sort controls
-  - detail pane with parent/child relationships
-  - in-dashboard focus/stop/reply/capture/spawn/sync actions
-- Pi-native task board behavior:
-  - Kanban-style TUI lanes for todo, blocked, in-progress, in-review, and done
-  - board cards represent tasks, not agents
-  - attention-first selection and sorting so blocked/review/user-waiting work is surfaced before new dispatch
-  - board hotlist showing blocked tasks, user waits, review queue, open attention, active agents, and soft WIP warnings
-  - card badges for priority, waiting target, linked active agents, linked profiles, and open attention
-  - first-class task dependency links: `task_link` records `sourceTaskId depends_on targetTaskId`, blocks dispatch while prerequisites are unresolved, and resolves links when prerequisites move to `done`
-  - dependency-ready dispatch: `task_ready` lists tickets with no unresolved dependencies and `task_dispatch_ready` launches one agent per ready ticket using `recommendedProfile`
-  - selected-task next-action guidance for unblock/reply/spawn/review/cleanup decisions
-  - derived task health/liveness (`healthy`, `stale`, `blocked_external`, `approval_required`, `empty_or_no_progress`, `owner_active`, `needs_review`) shown alongside, but separate from, the Kanban lane
-  - `/standup` digest for user waits, dependency-blocked/newly-ready tickets, coordinator blockers, review queue, active WIP, stale/no-progress health, ready work, and cleanup candidates
-  - linked agents remain available for focus/reply/stop/capture from the selected task
-  - advanced/later subtree control preview: `/task-subtree`, `task_subtree_control`, and board key `u` select the root task plus recursive `parentTaskId` descendants, then preview affected tasks, linked active agents, blockers/open attention, and terminal cleanup candidates before any pause/resume/cancel-like action
-  - subtree pause/cancel actions require explicit confirmation, write durable task events, and request graceful subagent stops for active linked agents without force-killing or cleaning tmux targets; resume only clears tasks marked `[subtree paused]` and never spawns agents automatically
-  - keyboard navigation across lanes and tasks
-  - per-task inspect/focus/reply/stop/capture/spawn/move/sync actions
-- terminal agent cleanup behavior:
-  - cleanup candidates come from terminal agents with live tmux targets
-  - unresolved completion attention can be resolved during cleanup
-  - unresolved blocker/question attention prevents cleanup unless force is intentional
-- initial agent profile prompts under `~/.pi/agent/agents/`
-- orchestration skills under `~/.pi/agent/skills/`
-- workflow prompt templates under `~/.pi/agent/prompts/`
-- child profile tool allowlist now includes `web_search` and `code_search` for research-oriented roles when explicitly declared in agent frontmatter
+### Entry & coordinator
+- `index.ts` (~20) — `MeepoRuntime` boot
+- `coordinator.ts` (~700) — wires tool modules, commands, shortcuts, lifecycle
+- `coordinator-helpers.ts` — barrel for helper modules:
+  - `coordinator-session` — session state, wake, filters
+  - `task-interactions` — task interaction projection
+  - `agent-lifecycle` — stop/cleanup/reconcile agents
+  - `service-ops` — service start/stop/reconcile
+  - `spawn-ops` — spawn/dispatch
+  - `board-ops` — dashboard/board data
+  - `standup` — standup digest builders
+- `tools/agent-tools.ts` / `task-tools.ts` / `service-tools.ts`
+- `formatters.ts`, `subtree-control.ts`, `bridge-delivery.ts`, `tool-schemas.ts`
 
-Not implemented yet:
-- richer task decomposition / subtask UX
-- richer attention-queue UI and coordinator routing polish
-- stronger bridge reconnect/recovery automation across more edge cases
-- richer child reply/ack UI polish
-- more capture/transcript options, but keep capture debug-only relative to the message/inbox control plane
-- stronger rg-only guard enforcement inside the extension runtime
+### Registry barrels
+- `registry.ts` → `agent-store`, `message-store`, `hierarchy-store` (barrel), `registry-shared`, `registry-types`
+  - hierarchy: `hierarchy-actors`, `hierarchy-edges-read`, `hierarchy-routing`, `message-v2-store`, `hierarchy-org`
+- `task-registry.ts` → `task-store`, `task-graph`, `task-health`, `task-leases`, `task-links-agents`, `task-ops`, `task-shared`
 
-Task health and Kanban lane semantics:
-- `task.status` remains the durable board lane (`todo`, `blocked`, `in_progress`, `in_review`, `done`). It is still the only value used for board columns, dependency state transitions, dispatch eligibility, and acceptance/done semantics.
-- Health is derived at read/render time from task metadata, task events, dependency links, open attention/interactions, and linked-agent activity. No task-health columns are persisted, so existing registries need no migration or backfill.
-- Health can add operational liveness without changing the lane: for example an `in_progress` task can be `owner_active`, a `todo` task can be `empty_or_no_progress`, a `blocked` task waiting on a user/service/external party can be `blocked_external`, and an `in_review` task can be `needs_review`/`approval_required`.
-- `lastUsefulUpdate` is the newest useful signal found from task events, linked-agent updates, task update timestamps, or creation time. `/standup`, `task_list`, `task_get`, `task_attention`, and `/task-board` show this with a derived `nextAction` so stale sessions are visible without moving their Kanban lane.
+### Child runtime
+- `child-runtime.ts` — register + env
+- `child-publish.ts` — upward publish
+- `child-downward.ts` — parent→child delivery
+- `child-status.ts` — status snapshot disk/DB
 
-Quick operator notes for the RPC path:
-- `subagent_get`, `subagent_list`, dashboard details, and reconcile output now expose transport state for bridge-backed children.
-- Transport state can be any of `legacy`, `launching`, `listening`, `live`, `fallback`, `disconnected`, `stopped`, `error`, or `lost`. `legacy` marks older records from before the RPC migration; everything else is reported by the bridge or by reconcile.
-- `subagent_message` now attempts live bridge delivery first and leaves queued mailbox rows in place when it must fall back.
-- Graceful `subagent_stop` prefers a bridge-delivered cancel before falling back to host stop (tmux `Ctrl+C` / herdr pane close).
-- `subagent_reconcile` inspects both ProcessHost inventory and bridge health to refresh transport metadata.
+### Platform defaults
+- Messaging: v2 canonical upward publish; legacy mailbox for downward + read-compat
+- Default preset: **core** (`MEEPO_PRESET=full` for doctrine)
+- Services: `service_*` + legacy `tmux_service_*` aliases
 
-Manual validation / troubleshooting checklist:
-- Spawn a new child and confirm its run dir contains `bridge-config.json`, `bridge-status.json`, `bridge-events.jsonl`, `bridge.log`, and `bridge.pid`.
-- Use `subagent_get` or `/agents` to confirm the new child reports `transportKind=rpc_bridge`.
-- Watch the healthy launch progression: a freshly spawned child should move from `launching` (bridge entrypoint starting) to `listening` (socket accepting connections) to `live` (child runtime attached and exchanging RPC traffic). If it stalls at `launching` or `listening` for more than a few seconds, inspect `bridge.log` and `bridge-status.json`.
-- Send `subagent_message` to a live child and verify the message is either reported as delivered via the bridge or left queued with `transportState=fallback`.
-- Publish a child `question` or `blocked` update and verify the coordinator gets a wake-up message while the item also remains visible in attention surfaces. On herdr, also expect a desktop toast (`Question:` / `Blocked:` / `Done:`).
-- Run `subagent_reconcile` after killing the bridge or closing the host target and confirm the transport state changes to something explicit like `fallback`, `disconnected`, `stopped`, or `lost`.
-- If transport is not `live`, inspect `bridge-status.json`, `bridge.log`, and the host pane (`subagent_capture` / `herdr agent read` / tmux capture) before treating capture as the primary control path.
-
-Use `/reload` in pi after changing files under the installed `extensions/meepo/` package path.

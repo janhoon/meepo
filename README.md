@@ -42,28 +42,20 @@ New child launches use an RPC bridge as the child main process (same on tmux and
 
 Launch API servers, frontend dev servers, watchers, or other long-running commands in tracked host windows/panes and manage them with the same focus/capture/stop/reconcile workflow.
 
-### Orchestration scaffolding
+### Optional doctrine (not core)
 
-The package also includes reusable agent profiles, orchestration skills, and prompt templates for splitting work across both legacy scout/planner/worker/reviewer flows and newer org-style role flows.
+Org-chart roles, review-lease name compat, Kanban task tools, and dense orchestration skills are **optional**. They ship behind the `full` preset / capability flags so the platform stays methodology-neutral by default.
 
 ## Included in the box
 
 - `extensions/meepo/`
-  - subagent registry, ProcessHost (tmux + herdr adapters), spawn/runtime flow, messaging, reconcile, dashboard
-  - tracked services for API servers, frontend dev servers, watchers, and other long-running commands
-- `skills/`
-  - `dispatch-subagents`
-  - `communicate-subagents`
-  - `handoff-subagents`
-  - `supervise-subagents`
-  - `manage-tasks`
-- `prompts/`
-  - `implement`
-  - `implement-and-review`
-  - `scout-and-plan`
-- `agents/`
-  - org-style roles: `coo`, `ceo`, `cto`, `engineer`, `principal-engineer`, `qa-lead`, `design-lead`, `cso`
-  - legacy helpers: `worker`, `scout`, `planner`, `reviewer`, `coordinator-helper`
+  - ProcessHost (tmux + herdr), registry, RPC bridge control plane, spawn/runtime, messaging, reconcile
+  - optional task board + tracked services (capability-gated)
+  - module layout: `index.ts` (entry), `coordinator-ops.ts`, `coordinator-tools.ts`, `tool-schemas.ts`, `registry.ts`, hosts, policies
+- `skills/` (optional operator playbooks; not required for core process control)
+  - `dispatch-subagents`, `communicate-subagents`, `handoff-subagents`, `supervise-subagents`, `manage-tasks`
+
+Profiles and prompts are **not** bundled in this package. Point `profiles.dirs` at your own agent markdown, or use plain Pi children with no profile doctrine.
 
 ## Install with Pi
 
@@ -81,8 +73,8 @@ pi install /path/to/meepo
 
 Meepo is a **platform** (tracked process-hosted subagents, registry, optional tasks/services) plus optional **doctrine** (org chart, no-wait enforce, review-pack personas).
 
-- **Default (full):** today’s full operator experience — all tools, hierarchy enforce, no-wait enforce, org role/edge seeds, package agent personas.
-- **Core consumer:** set `MEEPO_PRESET=core` for agents-core tools only, soft policies, and no org seeder.
+- **Default (core):** methodology-neutral process control — `agents.core` + `agents.attention`, soft policies, no org seeder.
+- **Full operator pack:** set `MEEPO_PRESET=full` for tasks/services/ui tools, hierarchy enforce, no-wait enforce, org role/edge seeds, and profile name-compat.
 
 Config keys, capability→tool maps, policy modes, profile frontmatter (`role` / `lease`), and DB upgrade notes live in:
 
@@ -125,15 +117,15 @@ npm test
 
 ### Long-running service tools
 
-Tool names still use the `tmux_service_*` prefix for compatibility; they run on the frozen ProcessHost (tmux or herdr).
+Canonical names are `service_*` (ProcessHost-neutral). Legacy `tmux_service_*` aliases remain registered for compatibility.
 
-- `tmux_service_start`
-- `tmux_service_list`
-- `tmux_service_get`
-- `tmux_service_focus`
-- `tmux_service_stop`
-- `tmux_service_capture`
-- `tmux_service_reconcile`
+- `service_start` (alias: `tmux_service_start`)
+- `service_list` (alias: `tmux_service_list`)
+- `service_get` (alias: `tmux_service_get`)
+- `service_focus` (alias: `tmux_service_focus`)
+- `service_stop` (alias: `tmux_service_stop`)
+- `service_capture` (alias: `tmux_service_capture`)
+- `service_reconcile` (alias: `tmux_service_reconcile`)
 
 ## Interactive commands
 
