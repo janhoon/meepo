@@ -38,7 +38,7 @@ describe("HerdProcessHost lifecycle (mocked CLI)", () => {
 		assert.equal(host.hostKind, "herdr");
 	});
 
-	it("spawnWindow starts a named agent in current workspace with --no-focus", async () => {
+	it("spawnWindow creates a dedicated tab then starts agent with --no-focus", async () => {
 		const calls: string[][] = [];
 		const host = createHerdProcessHost({
 			isAvailableProbe: () => true,
@@ -64,12 +64,31 @@ describe("HerdProcessHost lifecycle (mocked CLI)", () => {
 						},
 					});
 				}
+				if (args[0] === "tab" && args[1] === "create") {
+					assert.ok(args.includes("--no-focus"));
+					assert.equal(args[args.indexOf("--workspace") + 1], "w4");
+					assert.equal(args[args.indexOf("--label") + 1], "Research herdr");
+					return ok({
+						type: "tab_created",
+						tab: {
+							tab_id: "w4:t9",
+							workspace_id: "w4",
+							label: "Research herdr",
+						},
+						root_pane: {
+							pane_id: "w4:pRoot",
+							terminal_id: "term_root",
+							tab_id: "w4:t9",
+							workspace_id: "w4",
+						},
+					});
+				}
 				if (args[0] === "agent" && args[1] === "start") {
 					assert.equal(args[2], "research-herdr");
 					assert.ok(args.includes("--no-focus"));
-					assert.ok(args.includes("--workspace"));
-					assert.equal(args[args.indexOf("--workspace") + 1], "w4");
-					assert.ok(!args.includes("--tab"));
+					assert.ok(args.includes("--tab"));
+					assert.equal(args[args.indexOf("--tab") + 1], "w4:t9");
+					assert.ok(!args.includes("--workspace"));
 					assert.ok(!args.includes("--split"));
 					assert.ok(args.includes("--cwd"));
 					const dash = args.indexOf("--");
@@ -82,10 +101,14 @@ describe("HerdProcessHost lifecycle (mocked CLI)", () => {
 							name: "research-herdr",
 							terminal_id: "term_child",
 							pane_id: "w4:p9",
-							tab_id: "w4:t1",
+							tab_id: "w4:t9",
 							workspace_id: "w4",
 						},
 					});
+				}
+				if (args[0] === "pane" && args[1] === "close") {
+					assert.equal(args[2], "w4:pRoot");
+					return ok({ type: "ok" });
 				}
 				return err("unexpected", `unexpected args ${args.join(" ")}`);
 			},
@@ -104,8 +127,11 @@ describe("HerdProcessHost lifecycle (mocked CLI)", () => {
 		assert.equal(target.displayName, "research-herdr");
 		assert.equal(target.refs.terminalId, "term_child");
 		assert.equal(target.refs.paneId, "w4:p9");
+		assert.equal(target.refs.tabId, "w4:t9");
 		assert.equal(target.refs.workspaceId, "w4");
+		assert.ok(calls.some((c) => c[0] === "tab" && c[1] === "create"));
 		assert.ok(calls.some((c) => c[0] === "agent" && c[1] === "start"));
+		assert.ok(calls.some((c) => c[0] === "pane" && c[1] === "close" && c[2] === "w4:pRoot"));
 	});
 
 	it("spawnWindow prefixes services with svc- and retries on agent_name_taken", async () => {
@@ -126,11 +152,19 @@ describe("HerdProcessHost lifecycle (mocked CLI)", () => {
 						pane: { terminal_id: "term_p", pane_id: "w4:p1", workspace_id: "w4", tab_id: "w4:t1" },
 					});
 				}
+				if (args[0] === "tab" && args[1] === "create") {
+					return ok({
+						type: "tab_created",
+						tab: { tab_id: "w4:tSvc", workspace_id: "w4", label: "API server" },
+						root_pane: { pane_id: "w4:pSvcRoot", tab_id: "w4:tSvc", workspace_id: "w4" },
+					});
+				}
 				if (args[0] === "agent" && args[1] === "start") {
 					startAttempts += 1;
 					const name = args[2];
 					startedNames.push(name);
 					assert.ok(name.startsWith("svc-"), `expected svc- name, got ${name}`);
+					assert.equal(args[args.indexOf("--tab") + 1], "w4:tSvc");
 					if (startAttempts === 1) {
 						return err("agent_name_taken", `agent name ${name} is already used`);
 					}
@@ -140,10 +174,14 @@ describe("HerdProcessHost lifecycle (mocked CLI)", () => {
 							name,
 							terminal_id: "term_svc_new",
 							pane_id: "w4:p8",
-							tab_id: "w4:t1",
+							tab_id: "w4:tSvc",
 							workspace_id: "w4",
 						},
 					});
+				}
+				if (args[0] === "pane" && args[1] === "close") {
+					assert.equal(args[2], "w4:pSvcRoot");
+					return ok({ type: "ok" });
 				}
 				return err("unexpected", args.join(" "));
 			},

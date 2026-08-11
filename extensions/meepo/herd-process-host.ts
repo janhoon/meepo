@@ -2,8 +2,10 @@
  * HerdProcessHost — ProcessHost adapter for herdr named agents.
  *
  * Policy: wayfinder #18 (port), #19 (naming/layout/stop), research herdr 0.7.x lifecycle.
- * Layout: current workspace, active tab (no tab create), always --no-focus, no split.
- * Durable host id: terminal_id. Stop: pane close. Capture: agent read.
+ * Layout: **one new tab per child/service** in the current workspace (not a split pane in the
+ * coordinator tab — panes burn screen real estate). Flow: `tab create --no-focus` →
+ * `agent start --tab … --no-focus` → close the unused tab root shell pane so the agent is alone.
+ * Durable host id: terminal_id. Stop: pane close (last pane removes the tab). Capture: agent read.
  *
  * Small-model English namer is fog until model/flags are specified; slug fallback is used.
  */
@@ -147,6 +149,40 @@ function launchArgvFromCommand(launchCommand: string): string[] {
 	// Meepo spawn paths pass a shell fragment (e.g. exec '/path/launch.sh').
 	// herdr agent start takes real argv after `--`.
 	return ["bash", "-lc", launchCommand];
+}
+
+/** Tab label for herdr UI; keep short and shell-safe-ish. */
+export function herdrTabLabelForSpawn(title: string, hostName: string): string {
+	const raw = (title.trim() || hostName).replace(/\s+/g, " ");
+	const max = 48;
+	if (raw.length <= max) return raw;
+	return `${raw.slice(0, max - 1)}…`;
+}
+
+interface HerdrTabCreated {
+	tabId: string;
+	rootPaneId: string | null;
+	workspaceId: string | null;
+}
+
+function tabCreatedFromUnknown(value: unknown): HerdrTabCreated | null {
+	if (!value || typeof value !== "object") return null;
+	const record = value as Record<string, unknown>;
+	const tab = (record.tab && typeof record.tab === "object" ? record.tab : record) as Record<
+		string,
+		unknown
+	>;
+	const tabId = typeof tab.tab_id === "string" ? tab.tab_id : null;
+	if (!tabId) return null;
+	const root =
+		record.root_pane && typeof record.root_pane === "object"
+			? (record.root_pane as Record<string, unknown>)
+			: null;
+	const rootPaneId = typeof root?.pane_id === "string" ? root.pane_id : null;
+	const workspaceId =
+		(typeof tab.workspace_id === "string" ? tab.workspace_id : null) ??
+		(typeof root?.workspace_id === "string" ? root.workspace_id : null);
+	return { tabId, rootPaneId, workspaceId };
 }
 
 const NOTIFY_RATE_WINDOW_MS = 30_000;
@@ -342,6 +378,26 @@ export class HerdProcessHost implements ProcessHost {
 		return false;
 	}
 
+	/** Best-effort close of the empty shell pane created with a new tab. */
+	private closeOrphanRootPane(rootPaneId: string | null | undefined, agentPaneId: string | null | undefined): void {
+		if (!rootPaneId) return;
+		if (agentPaneId && rootPaneId === agentPaneId) return;
+		try {
+			this.invoke(["pane", "close", rootPaneId]);
+		} catch {
+			// Agent still runs; leftover shell pane is annoying but non-fatal.
+		}
+	}
+
+	private closeTabBestEffort(tabId: string | null | undefined): void {
+		if (!tabId) return;
+		try {
+			this.invoke(["tab", "close", tabId]);
+		} catch {
+			// ignore cleanup failure
+		}
+	}
+
 	async spawnWindow(input: HostSpawnWindowInput): Promise<HostTarget> {
 		if (!(await this.isAvailable())) {
 			throw new Error("herdr is not installed or not available (probe failed).");
@@ -355,8 +411,19 @@ export class HerdProcessHost implements ProcessHost {
 
 		const current = await this.getCurrentTarget();
 		const workspaceId = current?.refs.workspaceId;
-		// Active tab of current workspace — omit --tab so herdr uses active tab (policy #19).
 		const argv = launchArgvFromCommand(input.launchCommand);
+
+		// One tab per child so the coordinator pane is not split into oblivion.
+		const tabArgs = ["tab", "create", "--no-focus"];
+		if (workspaceId) tabArgs.push("--workspace", workspaceId);
+		if (input.cwd) tabArgs.push("--cwd", input.cwd);
+		tabArgs.push("--label", herdrTabLabelForSpawn(input.title, desiredName));
+		const tabEnvelope = this.invoke(tabArgs);
+		const createdTab = tabCreatedFromUnknown(tabEnvelope.result);
+		if (!createdTab?.tabId) {
+			throw new Error(`herdr tab create returned no tab_id: ${JSON.stringify(tabEnvelope)}`);
+		}
+		const { tabId, rootPaneId } = createdTab;
 
 		const tryNames = [desiredName];
 		// Precompute a few collision retries in case of races with concurrent spawns.
@@ -373,9 +440,8 @@ export class HerdProcessHost implements ProcessHost {
 			if (input.cwd) {
 				args.push("--cwd", input.cwd);
 			}
-			if (workspaceId) {
-				args.push("--workspace", workspaceId);
-			}
+			// Place in the dedicated tab (not a split of the coordinator tab).
+			args.push("--tab", tabId);
 			args.push("--no-focus");
 			if (input.env) {
 				for (const [key, value] of Object.entries(input.env)) {
@@ -393,17 +459,21 @@ export class HerdProcessHost implements ProcessHost {
 				}
 				// Ensure name is present on target even if server omits it.
 				if (!agent.name) agent.name = name;
+				if (!agent.tab_id) agent.tab_id = tabId;
+				this.closeOrphanRootPane(rootPaneId, agent.pane_id);
 				return toHostTarget(agent, name);
 			} catch (error) {
 				const err = error as Error & { herdrCode?: string };
 				lastError = err;
 				if (err.herdrCode === "agent_name_taken") {
-					// Retry with next candidate name.
+					// Retry with next candidate name; keep the dedicated tab.
 					continue;
 				}
+				this.closeTabBestEffort(tabId);
 				throw error;
 			}
 		}
+		this.closeTabBestEffort(tabId);
 		throw lastError ?? new Error(`herdr agent start failed for all name candidates near ${desiredName}`);
 	}
 
