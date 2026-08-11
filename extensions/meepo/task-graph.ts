@@ -3,8 +3,9 @@
  */
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import { makePlaceholders, runImmediateTransaction } from "./sql-util.js";
-import { getTask, updateTask } from "./task-store.js";
+import { ACTIVE_AGENT_STATES } from "./registry-shared.js";
+import { addSessionScopeFilter, makePlaceholders, runImmediateTransaction } from "./sql-util.js";
+import { createTaskEvent, getTask, updateTask } from "./task-store.js";
 import { toTaskLinkRecord } from "./task-shared.js";
 import type {
 	CreateTaskLinkInput,

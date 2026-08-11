@@ -53,7 +53,6 @@ import type {
 	AgentUnreadSummaryRecord,
 	CanSendMessageDecision,
 } from "./types.js";
-import { toAgentActiveEdgeRecord, toAgentAccessGrantRecord } from "./registry-shared.js";
 
 export type {
 	ResolveAgentActorContextInput,

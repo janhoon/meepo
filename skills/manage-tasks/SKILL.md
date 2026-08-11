@@ -22,7 +22,7 @@ Use this skill whenever work should first be captured, updated, or triaged as a 
 - Planners may create follow-on tasks when one request decomposes into multiple independently executable work items.
 - When planning creates follow-on tasks, capture dependency order explicitly: each child ticket must either declare its prerequisite tickets or state that it is dependency-free and ready to dispatch.
 - Use first-class task links for dependencies: `task_link` with `sourceTaskId=A`, `targetTaskId=B`, `linkType=depends_on` means A cannot dispatch until B is done.
-- Set `recommendedProfile` on executable tickets so `task_dispatch_ready` can launch the right agent as soon as dependencies clear.
+- Set `recommendedProfile` on executable tickets to a **consumer-installed** profile name so `task_dispatch_ready` can launch the right agent as soon as dependencies clear. Meepo does not ship profiles.
 - Keep acceptance criteria, plan steps, validation steps, and relevant files up to date.
 
 ## Suggested flow
@@ -35,6 +35,6 @@ Use this skill whenever work should first be captured, updated, or triaged as a 
 6. Use `task_move` when the lifecycle state changes.
 7. Use `task_note` for durable handoffs or important context that should stay on the ticket.
 8. Use `task_attention` to triage blocked and in-review work.
-9. When a planner has created follow-on tasks, run `task_ready`/`task_dispatch_ready`, spawn one appropriate agent for each dependency-free ticket, and leave dependency-blocked tickets unowned until their prerequisites resolve.
+9. When planning has created follow-on tasks, run `task_ready`/`task_dispatch_ready`, spawn one appropriate **available** agent profile for each dependency-free ticket, and leave dependency-blocked tickets unowned until their prerequisites resolve.
 10. After moving a task to `done`, use the newly-ready dependents returned by `task_move`; with auto-dispatch enabled, agents are spawned immediately for ready dependents with `recommendedProfile`.
 11. Use `task_reconcile` if legacy agents or stale links make the board inconsistent.

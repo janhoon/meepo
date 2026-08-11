@@ -3,6 +3,7 @@
  */
 import { truncateText } from "./text-util.js";
 import { deriveTaskHealth, taskLeaseKindForProfile } from "./task-registry.js";
+// Keep formatters free of DB access: callers that need live health pass a snapshot.
 import type {
 	AgentAttentionV2Record,
 	AgentInboxMessageV2Record,
@@ -145,7 +146,7 @@ export function formatAgentDetails(agent: AgentSummary): string {
 }
 
 export function getTaskHealthSnapshot(task: TaskRecord): TaskHealthSnapshot {
-	return listTaskHealth(getMeepoDb(), [task]).get(task.id) ?? deriveTaskHealth({ task });
+	return deriveTaskHealth({ task });
 }
 
 export function formatTaskLine(task: TaskRecord, linkedAgents: AgentSummary[] = [], readiness?: TaskReadinessRecord, health: TaskHealthSnapshot = getTaskHealthSnapshot(task)): string {
@@ -386,6 +387,28 @@ export function formatCleanupResults(
 		...cleaned.map((result) => `✓ ${result.agentId} · ${result.reason} · ${result.command}`),
 		...skipped.map((candidate) => `- ${candidate.agent.id} · ${candidate.reason}`),
 	];
+	return lines.join("\n");
+}
+
+export function buildTaskDispatchText(
+	result: {
+		preview: Array<{ taskId: string; title: string; profile: string }>;
+		dispatched: Array<{ taskId: string; agentId: string; profile: string }>;
+		skipped: Array<{ taskId: string; reason: string }>;
+	},
+	dryRun: boolean,
+): string {
+	const lines = [dryRun ? "# Ready dispatch preview" : "# Ready dispatch result"];
+	if (result.preview.length > 0) {
+		lines.push("", "Dispatchable:", ...result.preview.map((item) => `- ${item.taskId} · ${truncateText(item.title, 60)} · profile=${item.profile}`));
+	}
+	if (result.dispatched.length > 0) {
+		lines.push("", "Dispatched:", ...result.dispatched.map((item) => `- ${item.taskId} · ${item.agentId} · profile=${item.profile}`));
+	}
+	if (result.skipped.length > 0) {
+		lines.push("", "Skipped:", ...result.skipped.map((item) => `- ${item.taskId} · ${item.reason}`));
+	}
+	if (result.preview.length === 0 && result.skipped.length === 0) lines.push("", "No dependency-ready tasks found.");
 	return lines.join("\n");
 }
 

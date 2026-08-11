@@ -1,10 +1,19 @@
 /**
  * Coordinator tool registrations.
  */
+import { randomUUID } from "node:crypto";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import {
+	buildTaskAttentionText,
+	buildTaskDispatchText,
+	buildTaskLinksText,
+	buildTaskReadyText,
 	createTaskFromParams,
 	dispatchReadyTasks,
+	formatTaskDetails,
+	formatTaskLine,
+	formatTaskLinkLine,
+	formatTaskReadinessLine,
 	getReadyTasksForDispatch,
 	getTaskInteractions,
 	getTaskLinkedAgents,
@@ -13,8 +22,46 @@ import {
 	resolveTaskFilters,
 	resolveTaskInteractionWithNote,
 	sortTasksForList,
+	summarizeTaskFilters,
 	updateFleetUi,
 } from "../coordinator-helpers.js";
+import { getMeepoDb } from "../db.js";
+import { listAgents } from "../registry.js";
+import {
+	applyTaskSubtreeControl,
+	buildTaskSubtreeControlPreview,
+	formatTaskSubtreeControlApplyResult,
+	formatTaskSubtreeControlPreview,
+	type TaskSubtreeControlAction,
+} from "../subtree-control.js";
+import {
+	cancelTaskLink,
+	createTaskEvent,
+	createTaskLink,
+	getTask,
+	linkTaskAgent,
+	listTaskAgentLinks,
+	listTaskAttention,
+	listTaskEvents,
+	listTaskHealth,
+	listTaskLinks,
+	listTaskReadiness,
+	listTasks,
+	listUnresolvedTaskDependencies,
+	reconcileTasks,
+	taskLeaseKindForProfile,
+	unlinkTaskAgent,
+	updateTask,
+} from "../task-registry.js";
+import type {
+	TaskLinkState,
+	TaskLinkType,
+	TaskRecord,
+	TaskState,
+	TaskWaitingOn,
+	UpdateTaskInput,
+} from "../task-types.js";
+import type { AgentSummary } from "../types.js";
 import {
 	TaskAttentionParams,
 	TaskCreateParams,

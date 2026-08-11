@@ -25,7 +25,7 @@ Always triage in this order:
 - Use `task_list` and `task_get` to understand the current task board.
 - Use `subagent_list` to understand the current fleet and ownership.
 - Prefer answering questions and unblocking children before spawning new ones.
-- When a non-trivial task is `in_review`, expect multiple sibling reviewers and synthesize overlap versus unique findings before moving the task to `done`.
+- When a non-trivial task is `in_review` and the consumer attached multiple sibling review-lease agents, synthesize overlap versus unique findings before moving the task to `done`. Meepo does not define a built-in review pack.
 - Treat `subagent_capture` as a debug fallback, not a normal supervision primitive.
 - After completion has been synthesized, use `subagent_cleanup` so old terminal child host windows/panes do not pile up.
 - Use `subagent_reconcile` or `task_reconcile` if host inventory, task links, or registry state look stale.
@@ -44,9 +44,9 @@ Always triage in this order:
 4. List current tasks/children with `task_list` and `subagent_list`.
 5. Triage highest-priority unresolved items.
 6. Send `subagent_message` replies with explicit action policies where appropriate.
-7. When multiple reviewers are attached to the same task, synthesize agreed findings, unique findings, and remaining gates before deciding on follow-up.
+7. When multiple review-lease children are attached to the same task, synthesize agreed findings, unique findings, and remaining gates before deciding on follow-up.
 8. Move tasks between `blocked`, `in_progress`, `in_review`, and `done` as the real work state changes.
-9. When a task reaches `done`, check for dependent tickets; if all of a ticket's prerequisites are resolved, spawn the next appropriate agent immediately.
+9. When a task reaches `done`, check for dependent tickets; if all of a ticket's prerequisites are resolved, spawn the next appropriate **consumer** profile immediately (via `recommendedProfile` / dispatch).
 10. If other dependency-free ready tasks exist, continue with them instead of waiting on one child.
 11. If nothing else is actionable, end the turn with a brief pending-status summary instead of using `sleep`.
 12. Use `subagent_capture` only if published reporting is stale, missing, or obviously inconsistent.

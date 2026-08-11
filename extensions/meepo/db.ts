@@ -1,12 +1,6 @@
-import { createRequire } from "node:module";
 import { DatabaseSync } from "node:sqlite";
 import { MIGRATIONS, type Migration } from "./migrations/index.js";
-
-const require = createRequire(import.meta.url);
-
-function loadPaths(): { ensureMeepoRuntimePaths: () => { databasePath: string } } {
-	return require("./paths.js") as { ensureMeepoRuntimePaths: () => { databasePath: string } };
-}
+import { ensureMeepoRuntimePaths } from "./paths.js";
 
 function applyPragmas(db: DatabaseSync): void {
 	db.exec("PRAGMA journal_mode = WAL;");
@@ -73,8 +67,6 @@ export function bootstrapMeepoDatabase(db: DatabaseSync): void {
 let openConnection: { path: string; db: DatabaseSync } | undefined;
 
 export function getMeepoDb(): DatabaseSync {
-	// Lazy import keeps migration bootstrap usable in unit tests without Pi package resolution.
-	const { ensureMeepoRuntimePaths } = loadPaths();
 	const { databasePath } = ensureMeepoRuntimePaths();
 	if (openConnection && openConnection.path === databasePath) {
 		return openConnection.db;

@@ -5,16 +5,29 @@ import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { addSessionScopeFilter, makePlaceholders, safeJsonParse } from "./sql-util.js";
 import { getTask, listTasks, updateTask, createTask, createTaskEvent, listTaskEvents } from "./task-store.js";
-import { listTaskAgentLinks, linkTaskAgent, unlinkTaskAgent } from "./task-links-agents.js";
+import { linkTaskAgent, unlinkTaskAgent } from "./task-links-agents.js";
+import { listTaskAgentLinks } from "./task-leases.js";
 import { listUnresolvedTaskDependencies, refreshTaskDependencyBlockState } from "./task-graph.js";
 import { deriveTaskHealth, listTaskHealth } from "./task-health.js";
-import { deriveDefaultTaskStatus, toTaskRecord } from "./task-shared.js";
+import {
+	ACTIVE_AGENT_STATES,
+	OPEN_AGENT_ATTENTION_V2_STATES,
+	OPEN_ATTENTION_STATES,
+} from "./registry-shared.js";
+import {
+	deriveDefaultTaskStatus,
+	mergeStringArrays,
+	normalizeStringArray,
+	taskLeaseKindForProfile,
+	toTaskRecord,
+} from "./task-shared.js";
 import type {
 	ListTasksFilters,
 	TaskAttentionRecord,
 	TaskRecord,
 	TaskState,
 } from "./task-types.js";
+import type { AgentState } from "./types.js";
 
 export function listTaskAttention(
 	db: DatabaseSync,
@@ -288,7 +301,7 @@ function backfillStatusFromLegacy(row: {
 			finalSummary: null,
 		};
 	}
-	if (row.profile === "reviewer" && row.state === "done") {
+	if (taskLeaseKindForProfile(row.profile) === "review" && row.state === "done") {
 		return {
 			status: "done",
 			waitingOn: null,

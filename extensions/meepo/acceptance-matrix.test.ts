@@ -186,9 +186,9 @@ describe("acceptance matrix: capability independence", () => {
 });
 
 describe("acceptance matrix: profile dir merge + tool allowlist", () => {
-	it(caseName("later dir shadows package profile by name"), () => {
+	it(caseName("later consumer dir shadows earlier profile by name"), () => {
 		const merged = mergeProfilesByName([
-			[stubProfile("worker", "/pkg/worker.md")],
+			[stubProfile("worker", "/base/worker.md")],
 			[{ ...stubProfile("worker", "/proj/worker.md"), description: "project override" }],
 		]);
 		assert.equal(merged.find((p) => p.name === "worker")?.description, "project override");

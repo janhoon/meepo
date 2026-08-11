@@ -231,8 +231,17 @@ import {
 	TmuxServiceStopParams,
 } from "./tool-schemas.js";
 import type { CleanupCandidate } from "./cleanup-types.js";
-import { truncateText } from "./text-util.js";
-
+import {
+	ACTIVE_AGENT_STATES,
+	OPEN_AGENT_ATTENTION_V2_STATES,
+	OPEN_ATTENTION_STATES,
+	TERMINAL_AGENT_STATES,
+} from "./registry-shared.js";
+import {
+	buildTaskInteractionsByTask,
+	mergeAgentAttentionV2Items,
+} from "./task-interactions.js";
+import { getLinkedChildIds, resolveTaskFilters } from "./session-scope.js";
 
 /** Active Meepo config for this extension process (set on register). */
 export async function focusAgentById(id: string): Promise<{ agent: AgentSummary; result: { focused: boolean; command: string; reason?: string } }> {

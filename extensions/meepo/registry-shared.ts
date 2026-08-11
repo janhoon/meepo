@@ -27,6 +27,20 @@ import type {
 } from "./types.js";
 
 export const ACTIVE_STATES: AgentState[] = ["launching", "running", "idle", "waiting", "blocked"];
+/** Alias used by task/health modules. */
+export const ACTIVE_AGENT_STATES: AgentState[] = ACTIVE_STATES;
+export const TERMINAL_AGENT_STATES: AgentState[] = ["done", "error", "stopped", "lost"];
+export const OPEN_ATTENTION_STATES: AttentionItemRecord["state"][] = [
+	"open",
+	"acknowledged",
+	"waiting_on_coordinator",
+	"waiting_on_user",
+];
+export const OPEN_AGENT_ATTENTION_V2_STATES: AgentAttentionV2Record["state"][] = [
+	"open",
+	"acknowledged",
+	"waiting_on_owner",
+];
 
 export const AGENT_FIELD_TO_COLUMN: Record<keyof UpdateAgentInput, string> = {
 	parentAgentId: "parent_agent_id",

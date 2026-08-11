@@ -4,25 +4,66 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import {
 	applyHierarchyVisibilityToAgentFilters,
+	buildAdminAttentionText,
+	buildAttentionV2Text,
+	buildInboxText,
+	buildInboxV2Text,
 	captureAgentById,
 	childRuntimeEnvironment,
 	cleanupAgentTarget,
+	defaultDownwardActionPolicy,
 	focusAgentById,
+	formatAgentDetails,
+	formatAgentLine,
+	formatAttentionGateWarning,
+	formatCleanupCandidates,
+	formatCleanupResults,
+	formatFocusResult,
 	formatReconcileResult,
+	formatSpawnSuccess,
+	formatStopResult,
 	getVisibleAgentIdsForTool,
-	lastFocusedActiveAgentId,
 	listCleanupCandidates,
 	reconcileAgents,
 	resolveAdminAttentionV2Filters,
 	resolveAgentFilters,
+	resolveAttentionFilters,
 	resolveTaskFilters,
 	resolveToolActorContext,
 	setLastFocusedActiveAgentId,
 	spawnChildFromParams,
 	stopAgentById,
+	summarizeFilters,
 	suppressDuplicateLegacyAttentionItems,
 	updateFleetUi,
 } from "../coordinator-helpers.js";
+import { getMeepoDb } from "../db.js";
+import {
+	deliverQueuedMessagesViaBridge,
+	queueDownwardMessage,
+} from "../bridge-delivery.js";
+import { getProcessHost, hostTargetRefFromLegacy } from "../process-host.js";
+import { getProjectKey } from "../project.js";
+import { missingHostTargetMessage } from "../rpc-bridge-control.js";
+import {
+	AgentMessagePermissionError,
+	canSendMessage,
+	createMessageWithRecipients,
+	fetchAgentInboxV2,
+	getAgent,
+	listAgentAttentionItemsV2,
+	listAgents,
+	listAttentionItems,
+	listHierarchyVisibleAgentIds,
+	listInboxMessages,
+	markAgentMessages,
+} from "../registry.js";
+import { reconcileTasks } from "../task-registry.js";
+import type {
+	AgentAttentionV2Record,
+	AgentRecipientRef,
+	AgentSummary,
+} from "../types.js";
 import {
 	SubagentAttentionParams,
 	SubagentCaptureParams,

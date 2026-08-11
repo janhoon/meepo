@@ -3,10 +3,16 @@
  */
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import { makePlaceholders, runImmediateTransaction } from "./sql-util.js";
-import { assertTaskLeaseAvailable } from "./task-leases.js";
+import { addSessionScopeFilter, runImmediateTransaction } from "./sql-util.js";
+import { assertTaskLeaseAvailable, deactivateActiveLinksForAgent } from "./task-leases.js";
+import { createTaskEvent, getTask, updateTask } from "./task-store.js";
 import { taskLeaseKindForProfile, toTaskAgentLinkRecord } from "./task-shared.js";
-import type { LinkTaskAgentInput, ListTaskAgentLinksFilters, TaskAgentLinkRecord } from "./task-types.js";
+import type {
+	LinkTaskAgentInput,
+	ListTasksFilters,
+	TaskAgentLinkRecord,
+	TaskSummaryCounts,
+} from "./task-types.js";
 
 export function linkTaskAgent(db: DatabaseSync, input: LinkTaskAgentInput): TaskAgentLinkRecord {
 	return runImmediateTransaction(db, () => {

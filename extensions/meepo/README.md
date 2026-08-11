@@ -32,4 +32,5 @@
 - Messaging: v2 canonical upward publish; legacy mailbox for downward + read-compat
 - Default preset: **core** (`MEEPO_PRESET=full` for doctrine)
 - Services: `service_*` + legacy `tmux_service_*` aliases
+- **BYO agents:** profiles load from consumer dirs only (`~/.pi/agent/agents` and/or `profiles.dirs`). Meepo does not ship `agents/` role prompts.
 

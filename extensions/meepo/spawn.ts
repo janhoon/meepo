@@ -302,7 +302,7 @@ function appendRunEvent(runDir: string, eventType: string, summary: string, payl
 }
 
 function roleKeyForProfile(profileName: string, metadataRoleKey?: string | null): string {
-	// Expand: metadata role wins; legacy principal-engineer→reviewer alias remains in resolveProfileRoleKey.
+	// Metadata role wins; optional full-preset name aliases (if registered) are consumer-compat only.
 	return resolveProfileRoleKey(profileName, metadataRoleKey);
 }
 

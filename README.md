@@ -42,9 +42,18 @@ New child launches use an RPC bridge as the child main process (same on tmux and
 
 Launch API servers, frontend dev servers, watchers, or other long-running commands in tracked host windows/panes and manage them with the same focus/capture/stop/reconcile workflow.
 
+### Bring your own agents (required)
+
+**Meepo does not ship subagent profiles or role prompts.** It only orchestrates plain Pi child sessions against profile names **you** provide.
+
+- Put agent markdown in `~/.pi/agent/agents/*.md` (default), and/or
+- Point `profiles.dirs` at project- or package-specific agent directories
+
+Without at least one consumer profile on disk, `subagent_spawn` has nothing to launch.
+
 ### Optional doctrine (not core)
 
-Org-chart roles, review-lease name compat, Kanban task tools, and dense orchestration skills are **optional**. They ship behind the `full` preset / capability flags so the platform stays methodology-neutral by default.
+Hierarchy policy knobs, optional org-chart **seed data** (role keys/edges — still not agent prompts), Kanban task tools, and orchestration skills are **optional**. They ship behind the `full` preset / capability flags so the platform stays methodology-neutral by default.
 
 ## Included in the box
 
@@ -52,10 +61,10 @@ Org-chart roles, review-lease name compat, Kanban task tools, and dense orchestr
   - ProcessHost (tmux + herdr), registry, RPC bridge control plane, spawn/runtime, messaging, reconcile
   - optional task board + tracked services (capability-gated)
   - module layout: `index.ts` (entry), `coordinator-ops.ts`, `coordinator-tools.ts`, `tool-schemas.ts`, `registry.ts`, hosts, policies
-- `skills/` (optional operator playbooks; not required for core process control)
+- `skills/` (optional operator playbooks; profile-agnostic; not a role catalog)
   - `dispatch-subagents`, `communicate-subagents`, `handoff-subagents`, `supervise-subagents`, `manage-tasks`
 
-Profiles and prompts are **not** bundled in this package. Point `profiles.dirs` at your own agent markdown, or use plain Pi children with no profile doctrine.
+**Not included:** `agents/`, scout/worker/reviewer packs, org persona prompts, or review-pack profiles. Those belong in consumer config or a separate agent package.
 
 ## Install with Pi
 
@@ -71,7 +80,7 @@ pi install /path/to/meepo
 
 ## Platform vs presets (MeepoRuntime)
 
-Meepo is a **platform** (tracked process-hosted subagents, registry, optional tasks/services) plus optional **doctrine** (org chart, no-wait enforce, review-pack personas).
+Meepo is a **platform** (tracked process-hosted subagents, registry, optional tasks/services) plus optional **doctrine knobs** (hierarchy/org seed data, no-wait enforce). Agent personas stay consumer-owned.
 
 - **Default (core):** methodology-neutral process control — `agents.core` + `agents.attention`, soft policies, no org seeder.
 - **Full operator pack:** set `MEEPO_PRESET=full` for tasks/services/ui tools, hierarchy enforce, no-wait enforce, org role/edge seeds, and profile name-compat.
@@ -162,13 +171,14 @@ Canonical names are `service_*` (ProcessHost-neutral). Legacy `tmux_service_*` a
 
 ## A typical flow
 
-1. Create or locate a task with `task_create` / `task_list`.
-2. Spawn a scout, planner, worker, or reviewer against that `taskId`.
-3. Let the child report back with a question, blocker, or completion.
-4. Reply with `subagent_message` and move the task with `task_move` when the real work state changes.
-5. Open `/task-board` when you want a Pi-native board view of `todo`, `blocked`, `in_progress`, `in_review`, and `done` work.
-6. Spin up a tracked service with `tmux_service_start` if the task needs an app server, watcher, or dev environment.
-7. Run `subagent_cleanup` or `/agent-cleanup` to remove finished child host windows/panes once their work has been synthesized.
+1. Install at least one consumer agent profile under `~/.pi/agent/agents/` (see [Bring your own agents](#bring-your-own-agents-required)).
+2. Create or locate a task with `task_create` / `task_list` (when tasks capability is enabled).
+3. `subagent_spawn` with a **profile name that exists on disk**, a concrete `task`, and optional `taskId`.
+4. Let the child report back with a question, blocker, or completion.
+5. Reply with `subagent_message` and move the task with `task_move` when the real work state changes.
+6. Open `/task-board` when you want a Pi-native board view of `todo`, `blocked`, `in_progress`, `in_review`, and `done` work.
+7. Spin up a tracked service with `service_start` if the task needs an app server, watcher, or dev environment.
+8. Run `subagent_cleanup` or `/agent-cleanup` to remove finished child host windows/panes once their work has been synthesized.
 
 ### Process host switch
 
@@ -193,12 +203,29 @@ In other words: split the work, keep the replicas coordinated, and avoid the cla
 - Child agents report upward proactively through the registry instead of relying on status polling.
 - Bridge-backed children expose transport state in operator-facing surfaces. The full vocabulary is `legacy`, `launching`, `listening`, `live`, `fallback`, `disconnected`, `stopped`, `error`, and `lost`. A healthy launch progresses `launching → listening → live`.
 - The coordinator can now attempt live downward child delivery through the RPC bridge before falling back to the child-side mailbox poll path.
-- Browser-facing acceptance work should go to roles such as `qa-lead` and `design-lead`.
+- Specialist acceptance (browser QA, design, security, harsh maintainability review, …) is entirely defined by **your** profiles and skills — not by Meepo core.
 - The task board is task-first. Agents are linked executors, not the board cards themselves.
 - Task health/liveness is derived separately from the Kanban lane: `task.status` controls columns and workflow state, while health flags such as `owner_active`, `stale`, `blocked_external`, `approval_required`, `empty_or_no_progress`, and `needs_review` explain operational liveness and next action.
 - Search policy is ripgrep-first. `find` is intentionally excluded from the normal workflow.
-- Agent profiles live in `agents/` because the extension resolves them relative to its package layout.
+- Default profile load path is the consumer Pi agents dir (`~/.pi/agent/agents`). Use `profiles.dirs` for additional packs; Meepo package layout does not supply role prompts.
 - The real superpower here is not just spawning more agents. It is keeping the task graph legible.
+
+## Consumer agent profile sketch
+
+```markdown
+---
+name: implementer
+description: Focused implementer for a single small task.
+tools: read, bash, edit, write, grep
+lease: exclusive
+---
+
+You complete the assigned task, keep changes small, and publish completion upward.
+```
+
+Save as `~/.pi/agent/agents/implementer.md`, then `subagent_spawn` with `profile: "implementer"`.
+
+Optional review-pack patterns (still consumer-owned): [`docs/REVIEW_PACKS.md`](docs/REVIEW_PACKS.md).
 
 ## Docs
 

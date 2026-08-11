@@ -2,12 +2,28 @@
  * Derived task health (read-time liveness, not Kanban lane).
  */
 import type { DatabaseSync } from "node:sqlite";
+import {
+	ACTIVE_AGENT_STATES,
+	OPEN_AGENT_ATTENTION_V2_STATES,
+	OPEN_ATTENTION_STATES,
+} from "./registry-shared.js";
 import { addSessionScopeFilter, makePlaceholders } from "./sql-util.js";
 import { listTaskEvents, listTasks } from "./task-store.js";
-import { listTaskAgentLinks } from "./task-links-agents.js";
+import { listTaskAgentLinks } from "./task-leases.js";
 import { listUnresolvedTaskDependencies } from "./task-graph.js";
-import { taskHasUsefulBody, toTaskRecord } from "./task-shared.js";
-import type { ListTasksFilters, TaskHealthSnapshot, TaskHealthSignal, TaskRecord } from "./task-types.js";
+import {
+	TASK_HEALTH_DEFAULT_STALE_AFTER_MS,
+	taskHasUsefulBody,
+	toTaskEventRecord,
+	toTaskRecord,
+} from "./task-shared.js";
+import type {
+	ListTasksFilters,
+	TaskEventRecord,
+	TaskHealthSnapshot,
+	TaskHealthSignal,
+	TaskRecord,
+} from "./task-types.js";
 import type { AgentAttentionV2State, AgentState, AttentionItemState } from "./types.js";
 
 // Note: listTaskHealth may query attention via raw SQL; keep self-contained where possible.
@@ -45,20 +61,6 @@ function normalizeHealthSignals(signals: TaskHealthSignal[]): TaskHealthSignal[]
 		normalized.push(signal);
 	}
 	return normalized.length > 0 ? normalized : ["healthy"];
-}
-
-function taskHasUsefulBody(task: TaskRecord): boolean {
-	return Boolean(
-		task.summary?.trim() ||
-			task.description?.trim() ||
-			task.blockedReason?.trim() ||
-			task.reviewSummary?.trim() ||
-			task.finalSummary?.trim() ||
-			task.acceptanceCriteria.length > 0 ||
-			task.planSteps.length > 0 ||
-			task.validationSteps.length > 0 ||
-			task.files.length > 0,
-	);
 }
 
 function healthDuration(valueMs: number): string {

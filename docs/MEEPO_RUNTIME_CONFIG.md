@@ -16,7 +16,7 @@ Unconfigured installs use the **core** preset:
 | policies.hierarchy | `off` |
 | policies.taskLeases | `off` |
 | policies.searchGuidance | `null` |
-| profiles.dirs | `[]` → caller/project profile dirs only |
+| profiles.dirs | `[]` → consumer `~/.pi/agent/agents` only (Meepo ships **no** agent profiles) |
 | profiles.allowUnknownTools | `false` |
 | profiles.extraTools | `[]` |
 | org seeder | **not** applied |
@@ -144,25 +144,39 @@ Slash commands and shortcuts are gated the same way (see `COMMAND_CAPABILITY` in
 | `advisory` | allow spawn + `hierarchy_policy_advisory` event |
 | `enforce` | **deny** spawn (historical behavior) |
 
-## Profiles
+## Profiles (bring your own)
 
-Frontmatter fields (package agents already declare these under full preset):
+**Meepo does not ship agent profiles, role prompts, or a default org of subagents.** Spawn requires a consumer-provided profile name that resolves from markdown on disk.
+
+Default load path when `profiles.dirs` is empty:
+
+1. `getAgentDir()/agents` (usually `~/.pi/agent/agents/*.md`)
+
+Optional extra dirs (project packs, private agent packages) go in `profiles.dirs` — later dirs shadow earlier ones by profile `name`.
+
+Example consumer profile:
 
 ```yaml
 ---
-name: principal-engineer
-description: ...
+name: my-reviewer
+description: Strict code review for this team
 tools: read, bash, grep
 role: reviewer
 lease: review
 canSpawn: false
 ---
+
+You are a reviewer. Follow our team review checklist…
 ```
 
-- **lease**: `exclusive` | `review` | `shared` | `none` — metadata wins; full preset may also register name-compat fallbacks.
-- **role**: hierarchy role key — metadata wins; full preset may alias `principal-engineer` → `reviewer` via compat registry.
-- **profiles.dirs**: ordered merge; later dir replaces same `name`. Empty → package `agents/` only (resolved via extension `import.meta.url`, install-safe).
+Frontmatter fields consumers may set:
+
+- **lease**: `exclusive` | `review` | `shared` | `none` — metadata wins; full preset may also register optional name-compat fallbacks for installs that still use historical names without frontmatter.
+- **role**: hierarchy role key — metadata wins; full preset may register optional aliases (still not agent prompts).
+- **profiles.dirs**: ordered consumer dirs; empty → user Pi agents dir only.
 - **extraTools / allowUnknownTools**: extend closed child tool allowlist.
+
+If no profiles are installed, `subagent_spawn` fails with a clear BYO error listing available names as `(none)`.
 
 ## Upgrade notes (existing `subagents.db`)
 

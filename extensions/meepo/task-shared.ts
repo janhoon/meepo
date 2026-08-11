@@ -5,7 +5,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { resolveProfileLeaseKind, toTaskLeaseKind } from "./profile-metadata.js";
 import { getSubagentProfile } from "./profiles.js";
 import { addSessionScopeFilter, makePlaceholders, safeJsonParse } from "./sql-util.js";
-import type { ProfileLeaseKind } from "./types.js";
+import type { AgentState, ProfileLeaseKind } from "./types.js";
 import type {
 	TaskAgentLinkRecord,
 	TaskEventRecord,
@@ -44,7 +44,7 @@ export interface TaskLeaseConflictRecord {
 	conflictingOwners: TaskLeaseOwnerRecord[];
 }
 
-const TASK_FIELD_TO_COLUMN: Record<keyof UpdateTaskInput, string> = {
+export const TASK_FIELD_TO_COLUMN: Record<keyof UpdateTaskInput, string> = {
 	parentTaskId: "parent_task_id",
 	spawnSessionId: "spawn_session_id",
 	spawnSessionFile: "spawn_session_file",
@@ -72,6 +72,20 @@ const TASK_FIELD_TO_COLUMN: Record<keyof UpdateTaskInput, string> = {
 	finishedAt: "finished_at",
 };
 
+
+export function taskHasUsefulBody(task: TaskRecord): boolean {
+	return Boolean(
+		task.summary?.trim() ||
+			task.description?.trim() ||
+			task.blockedReason?.trim() ||
+			task.reviewSummary?.trim() ||
+			task.finalSummary?.trim() ||
+			task.acceptanceCriteria.length > 0 ||
+			task.planSteps.length > 0 ||
+			task.validationSteps.length > 0 ||
+			task.files.length > 0,
+	);
+}
 
 export function normalizeStringArray(values: string[] | null | undefined): string[] {
 	const seen = new Set<string>();
@@ -211,17 +225,9 @@ export function deriveDefaultTaskStatus(profile: string, kind: "milestone" | "bl
 	if (kind === "blocked" || kind === "question" || kind === "question_for_user") return "blocked";
 	if (kind === "milestone" || kind === "note") return "in_progress";
 	if (kind !== "complete") return null;
-	switch (profile) {
-		case "worker":
-			return "in_review";
-		case "reviewer":
-			return "done";
-		case "scout":
-		case "planner":
-			return "todo";
-		default:
-			return "in_review";
-	}
+	// Lease metadata is consumer-owned (frontmatter). Review-lease completions close the task;
+	// exclusive/shared workers leave work in_review for acceptance. No hardcoded role names.
+	return taskLeaseKindForProfile(profile) === "review" ? "done" : "in_review";
 }
 
 export function nowOr(value: number | null | undefined, fallback: number): number | null {

@@ -53,7 +53,8 @@ import type {
 	AgentUnreadSummaryRecord,
 	CanSendMessageDecision,
 } from "./types.js";
-import { getAgentRole } from "./hierarchy-actors.js";
+import { getAgent, updateAgent } from "./agent-store.js";
+import { getAgentOrg, getAgentRole, getAgentScopeRow } from "./hierarchy-actors.js";
 
 export type {
 	ResolveAgentActorContextInput,

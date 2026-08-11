@@ -6,7 +6,7 @@
  */
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import { makePlaceholders, runImmediateTransaction, safeJsonParse, toBoolean } from "./sql-util.js";
+import { addSessionScopeFilter, makePlaceholders, toBoolean } from "./sql-util.js";
 import {
 	toAgentAccessGrantRecord,
 	toAgentActiveEdgeRecord,
@@ -116,22 +116,6 @@ export function getAgentScopeRow(
 		spawnSessionId: row.spawn_session_id ?? null,
 		spawnSessionFile: row.spawn_session_file ?? null,
 	};
-}
-
-export function runImmediateTransaction<T>(db: DatabaseSync, callback: () => T): T {
-	db.exec("BEGIN IMMEDIATE;");
-	try {
-		const result = callback();
-		db.exec("COMMIT;");
-		return result;
-	} catch (error) {
-		try {
-			db.exec("ROLLBACK;");
-		} catch {
-			// Ignore rollback errors so the original error is preserved.
-		}
-		throw error;
-	}
 }
 
 export function createRootActorContext(scope: Omit<ResolveAgentActorContextInput, "currentAgentId" | "root"> = {}): AgentActorContext {

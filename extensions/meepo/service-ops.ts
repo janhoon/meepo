@@ -231,8 +231,13 @@ import {
 	TmuxServiceStopParams,
 } from "./tool-schemas.js";
 import type { CleanupCandidate } from "./cleanup-types.js";
-import { truncateText } from "./text-util.js";
-
+import {
+	ACTIVE_AGENT_STATES,
+	OPEN_AGENT_ATTENTION_V2_STATES,
+	OPEN_ATTENTION_STATES,
+	TERMINAL_AGENT_STATES,
+} from "./registry-shared.js";
+import { assertDirectory, resolveInputPath } from "./session-scope.js";
 
 /** Active Meepo config for this extension process (set on register). */
 export function resolveServiceFilters(
@@ -258,36 +263,6 @@ export function resolveServiceFilters(
 	}
 	return filters;
 }
-
-export function serviceStateIcon(state: ServiceSummary["state"]): string {
-	switch (state) {
-		case "launching":
-		case "running":
-			return "▶";
-		case "stopped":
-			return "■";
-		case "error":
-			return "✗";
-		case "lost":
-			return "?";
-		default:
-			return "•";
-	}
-}
-
-export function summarizeServiceFilters(scope: string, filters: ListServicesFilters): string {
-	const parts = [scope];
-	if (filters.activeOnly) parts.push("active-only");
-	return parts.join(", ");
-}
-
-export function serviceReadyLabel(service: ServiceSummary): string | null {
-	if (!service.readySubstring) return null;
-	if (service.readyMatchedAt) return "ready";
-	if (["stopped", "error", "lost"].includes(service.state)) return "not-ready";
-	return "waiting-ready";
-}
-
 
 export async function spawnServiceFromParams(ctx: ExtensionContext, params: {
 	title: string;
@@ -466,18 +441,4 @@ export async function reconcileServices(ctx: ExtensionContext, params: { scope?:
 	return { scope, reconciled: services.length, changed };
 }
 
-export function formatServiceReconcileResult(result: {
-	scope: string;
-	reconciled: number;
-	changed: Array<{ id: string; state: string; reason: string }>;
-}): string {
-	if (result.changed.length === 0) {
-		return `Reconciled ${result.reconciled} services in scope ${result.scope}. No changes.`;
-	}
-	return [
-		`Reconciled ${result.reconciled} services in scope ${result.scope}.`,
-		"",
-		...result.changed.map((item) => `${item.id} → ${item.state} · ${item.reason}`),
-	].join("\n");
-}
 

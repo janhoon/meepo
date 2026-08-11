@@ -13,7 +13,7 @@ export const LIST_SCOPE = StringEnum(["all", "current_project", "current_session
 export const SubagentSpawnParams = Type.Object({
 	title: Type.String({ description: "Short title for the child agent." }),
 	task: Type.String({ description: "Task to delegate to the child agent." }),
-	profile: Type.String({ description: "Agent profile name from ~/.pi/agent/agents/*.md." }),
+	profile: Type.String({ description: "Consumer agent profile name (markdown under ~/.pi/agent/agents or profiles.dirs). Meepo does not ship profiles." }),
 	taskId: Type.Optional(Type.String({ description: "Optional existing task id to attach this child to. If omitted, a task is auto-created." })),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the child. Defaults to the current cwd." })),
 	model: Type.Optional(Type.String({ description: "Optional model override." })),

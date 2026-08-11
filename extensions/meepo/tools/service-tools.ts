@@ -5,13 +5,21 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import {
 	captureServiceById,
 	focusServiceById,
+	formatServiceDetails,
+	formatServiceFocusResult,
+	formatServiceLine,
 	formatServiceReconcileResult,
+	formatServiceStartResult,
+	formatServiceStopResult,
 	reconcileServices,
 	resolveServiceFilters,
 	spawnServiceFromParams,
 	stopServiceById,
 	summarizeServiceFilters,
 } from "../coordinator-helpers.js";
+import { getMeepoDb } from "../db.js";
+import { getService, listServices } from "../service-registry.js";
+import type { ServiceSummary } from "../service-types.js";
 import {
 	TmuxServiceCaptureParams,
 	TmuxServiceFocusParams,

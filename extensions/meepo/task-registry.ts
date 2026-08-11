@@ -35,14 +35,15 @@ export {
 	assertTaskLeaseAvailable,
 } from "./task-leases.js";
 
+export { listTaskAgentLinks } from "./task-leases.js";
+
 export {
-	listTaskAgentLinks,
 	linkTaskAgent,
 	unlinkTaskAgent,
+	getTaskSummary,
 } from "./task-links-agents.js";
 
 export {
-	getTaskSummary,
 	listTaskAttention,
 	applyChildPublishToLinkedTask,
 	backfillLegacyTasksFromAgents,

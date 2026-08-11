@@ -1,17 +1,21 @@
 /**
  * Task exclusive/review lease helpers.
  */
+import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
+import { ACTIVE_AGENT_STATES } from "./registry-shared.js";
 import { makePlaceholders } from "./sql-util.js";
+import { createTaskEvent, updateTask } from "./task-store.js";
 import {
 	taskLeaseKindForProfile,
+	toTaskAgentLinkRecord,
 	toTaskLeaseOwnerRecord,
 	type TaskLeaseConflictRecord,
 	type TaskLeaseKind,
 	type TaskLeaseOwnerRecord,
 	type TaskLeaseStateRecord,
 } from "./task-shared.js";
-import type { ListTaskAgentLinksFilters } from "./task-types.js";
+import type { ListTaskAgentLinksFilters, TaskAgentLinkRecord } from "./task-types.js";
 
 export function listTaskLeaseOwners(
 	db: DatabaseSync,
@@ -130,7 +134,7 @@ export function listTaskAgentLinks(db: DatabaseSync, filters: ListTaskAgentLinks
 	return rows.map(toTaskAgentLinkRecord);
 }
 
-function deactivateActiveLinksForAgent(db: DatabaseSync, agentId: string, exceptTaskId: string | null, reason: string, now: number): string[] {
+export function deactivateActiveLinksForAgent(db: DatabaseSync, agentId: string, exceptTaskId: string | null, reason: string, now: number): string[] {
 	const rows = db
 		.prepare(
 			`SELECT id, task_id

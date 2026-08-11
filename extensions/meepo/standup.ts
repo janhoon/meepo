@@ -231,8 +231,23 @@ import {
 	TmuxServiceStopParams,
 } from "./tool-schemas.js";
 import type { CleanupCandidate } from "./cleanup-types.js";
-import { truncateText } from "./text-util.js";
-
+import {
+	ACTIVE_AGENT_STATES,
+	OPEN_AGENT_ATTENTION_V2_STATES,
+	OPEN_ATTENTION_STATES,
+	TERMINAL_AGENT_STATES,
+} from "./registry-shared.js";
+import { listCleanupCandidates, reconcileAgents, stopAgentById } from "./agent-lifecycle.js";
+import {
+	buildBoardData,
+	buildDashboardData,
+	captureAgentById,
+	focusAgentById,
+} from "./board-ops.js";
+import { setLastFocusedActiveAgentId, updateFleetUi } from "./coordinator-session.js";
+import { spawnServiceFromParams } from "./service-ops.js";
+import { resolveAttentionFilters, resolveTaskFilters } from "./session-scope.js";
+import { getTaskInteractions } from "./task-interactions.js";
 
 /** Active Meepo config for this extension process (set on register). */
 export function formatStandupAge(timestamp: number): string {

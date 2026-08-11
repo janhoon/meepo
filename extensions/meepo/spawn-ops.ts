@@ -231,15 +231,32 @@ import {
 	TmuxServiceStopParams,
 } from "./tool-schemas.js";
 import type { CleanupCandidate } from "./cleanup-types.js";
-import { truncateText } from "./text-util.js";
-
+import {
+	ACTIVE_AGENT_STATES,
+	OPEN_AGENT_ATTENTION_V2_STATES,
+	OPEN_ATTENTION_STATES,
+	TERMINAL_AGENT_STATES,
+} from "./registry-shared.js";
+import { activeMeepoRuntime, updateFleetUi } from "./coordinator-session.js";
+import {
+	assertDirectory,
+	childRuntimeEnvironment,
+	resolveInputPath,
+	resolveTaskFilters,
+	resolveToolActorContext,
+} from "./session-scope.js";
 
 /** Active Meepo config for this extension process (set on register). */
 export function requireProfile(profileName: string): SubagentProfile {
 	const profile = getSubagentProfile(profileName);
 	if (profile) return profile;
-	const available = listSubagentProfiles().map((item) => item.name).join(", ") || "(none)";
-	throw new Error(`Unknown subagent profile \"${profileName}\". Available profiles: ${available}`);
+	const names = listSubagentProfiles().map((item) => item.name);
+	const available = names.join(", ") || "(none)";
+	const byoHint =
+		names.length === 0
+			? " Meepo does not ship agent profiles — add markdown under ~/.pi/agent/agents/ or set profiles.dirs to your agent pack."
+			: "";
+	throw new Error(`Unknown subagent profile "${profileName}". Available profiles: ${available}.${byoHint}`);
 }
 
 export function createTaskFromParams(ctx: ExtensionContext, params: {
@@ -519,7 +536,7 @@ export async function dispatchReadyTasks(pi: ExtensionAPI, ctx: ExtensionContext
 export async function chooseProfile(ctx: ExtensionContext): Promise<SubagentProfile | null> {
 	const profiles = listSubagentProfiles();
 	if (profiles.length === 0) {
-		ctx.ui.notify("No subagent profiles found under ~/.pi/agent/agents.", "warning");
+		ctx.ui.notify("No subagent profiles found. Add markdown under ~/.pi/agent/agents or set profiles.dirs.", "warning");
 		return null;
 	}
 	const items: SelectItem[] = profiles.map((profile) => ({

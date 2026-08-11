@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseFrontmatter } from "@mariozechner/pi-coding-agent";
+import { getAgentDir, parseFrontmatter } from "@mariozechner/pi-coding-agent";
 import { getActiveProfileLoadOptions, setActiveProfileLoadOptions } from "./profile-load-options.js";
 import { buildProfileFieldsFromFrontmatter } from "./profile-metadata.js";
 import {
@@ -29,20 +29,30 @@ function isDirectory(path: string): boolean {
 	}
 }
 
-/** Package-bundled agents directory (works for git/npm install layout). */
+/**
+ * Historical path for a package-local `agents/` folder next to the extension.
+ * Meepo does **not** ship agent profiles and does **not** load this path by default.
+ * Consumers who vendor their own agent pack may still point `profiles.dirs` here.
+ */
 export function getPackageProfilesDir(): string {
 	return resolve(dirname(fileURLToPath(import.meta.url)), "../../agents");
 }
 
-/** @deprecated Prefer getPackageProfilesDir + listProfilesFromDirs. */
+/** @deprecated Prefer getUserProfilesDir + listProfilesFromDirs. Meepo is BYO profiles. */
 export function getProfilesDir(): string {
-	return getPackageProfilesDir();
+	return getUserProfilesDir();
+}
+
+/** Consumer Pi agents dir (`~/.pi/agent/agents` by default). */
+export function getUserProfilesDir(): string {
+	return join(getAgentDir(), "agents");
 }
 
 /**
- * Resolve ordered profile directories.
- * - If `dirs` is non-empty, those paths are used in order (later shadows earlier by name).
- * - If empty, only the package agents directory is used.
+ * Resolve ordered profile directories (bring-your-own agents).
+ * - If `dirs` / active config is non-empty, those paths are used in order (later shadows earlier by name).
+ * - If empty, only the consumer Pi agents dir (`getAgentDir()/agents`, usually `~/.pi/agent/agents`).
+ * Meepo never injects package-bundled role prompts into this list.
  * Missing directories are skipped.
  */
 export function resolveProfileDirs(dirs?: string[]): string[] {
@@ -51,7 +61,7 @@ export function resolveProfileDirs(dirs?: string[]): string[] {
 	const ordered =
 		configured.length > 0
 			? configured.map((d) => resolve(d))
-			: [getPackageProfilesDir()];
+			: [getUserProfilesDir()];
 	return ordered.filter((dir) => isDirectory(dir));
 }
 

@@ -231,8 +231,13 @@ import {
 	TmuxServiceStopParams,
 } from "./tool-schemas.js";
 import type { CleanupCandidate } from "./cleanup-types.js";
-import { truncateText } from "./text-util.js";
-
+import {
+	ACTIVE_AGENT_STATES,
+	OPEN_AGENT_ATTENTION_V2_STATES,
+	OPEN_ATTENTION_STATES,
+	TERMINAL_AGENT_STATES,
+} from "./registry-shared.js";
+import { resolveAgentFilters } from "./session-scope.js";
 
 /** Active Meepo config for this extension process (set on register). */
 export async function listCleanupCandidates(
@@ -635,14 +640,4 @@ export async function reconcileAgents(ctx: ExtensionContext, params: { scope?: "
 	return { scope, reconciled: agents.length, changed };
 }
 
-export function formatReconcileResult(result: { scope: string; reconciled: number; changed: Array<{ id: string; state: string; transportState: string; reason: string }> }): string {
-	if (result.changed.length === 0) {
-		return `Reconciled ${result.reconciled} agents in scope ${result.scope}. No changes.`;
-	}
-	return [
-		`Reconciled ${result.reconciled} agents in scope ${result.scope}.`,
-		"",
-		...result.changed.map((item) => `${item.id} → ${item.state} · transport=${item.transportState} · ${item.reason}`),
-	].join("\n");
-}
 

@@ -5,7 +5,9 @@ import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { addSessionScopeFilter, makePlaceholders, safeJsonParse } from "./sql-util.js";
 import {
+	normalizeStringArray,
 	nowOr,
+	TASK_FIELD_TO_COLUMN,
 	taskStatusOrderSql,
 	toTaskEventRecord,
 	toTaskRecord,

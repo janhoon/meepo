@@ -46,8 +46,8 @@ export interface MeepoPoliciesConfig {
 
 export interface MeepoProfilesConfig {
 	/**
-	 * Ordered profile directories. Later entries shadow earlier ones by profile name.
-	 * Empty means "package default resolution" (existing getProfilesDir behavior).
+	 * Ordered consumer profile directories. Later entries shadow earlier ones by profile name.
+	 * Empty means the user Pi agents dir only (`~/.pi/agent/agents`). Meepo does not ship profiles.
 	 */
 	dirs: string[];
 	/** When true, child tool lists may include names outside the closed builtin set. */
