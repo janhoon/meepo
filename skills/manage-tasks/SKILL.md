@@ -22,7 +22,7 @@ Use this skill whenever work should first be captured, updated, or triaged as a 
 - Planners may create follow-on tasks when one request decomposes into multiple independently executable work items.
 - When planning creates follow-on tasks, capture dependency order explicitly: each child ticket must either declare its prerequisite tickets or state that it is dependency-free and ready to dispatch.
 - Use first-class task links for dependencies: `task_link` with `sourceTaskId=A`, `targetTaskId=B`, `linkType=depends_on` means A cannot dispatch until B is done.
-- Set `recommendedProfile` on executable tickets to a **consumer-installed** profile name so `task_dispatch_ready` can launch the right agent as soon as dependencies clear. Meepo does not ship profiles.
+- Set `recommendedProfile` on executable tickets to a **consumer-installed** profile name so `task_dispatch_ready` can launch the right agent as soon as dependencies clear. Meepo does not ship profiles. Author a missing name with `create-subagents`.
 - Keep acceptance criteria, plan steps, validation steps, and relevant files up to date.
 
 ## Suggested flow

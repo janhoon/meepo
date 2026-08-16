@@ -16,6 +16,7 @@ Before spawning:
 1. Know which profile names exist in this install (spawn errors list available names; empty means no consumer pack is installed).
 2. Pick a profile that already exists — do not invent names that Meepo might have “built in.”
 3. Put run-specific instructions in the `task` string; put standing behavior in the consumer profile body.
+4. If the needed job has no profile yet, follow `create-subagents` and restart Pi before spawning.
 
 Profile frontmatter `lease` / `role` (when present) control task exclusivity and hierarchy keys. They are consumer metadata, not a Meepo role catalog.
 

@@ -176,7 +176,7 @@ Frontmatter fields consumers may set:
 - **profiles.dirs**: ordered consumer dirs; empty → user Pi agents dir only.
 - **extraTools / allowUnknownTools**: extend closed child tool allowlist.
 
-If no profiles are installed, `subagent_spawn` fails with a clear BYO error listing available names as `(none)`.
+If no profiles are installed, `subagent_spawn` fails with a clear BYO error listing available names as `(none)`. Author a consumer profile with the `create-subagents` skill, then restart Pi.
 
 ## Upgrade notes (existing `subagents.db`)
 

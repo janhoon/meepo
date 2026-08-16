@@ -49,7 +49,7 @@ Launch API servers, frontend dev servers, watchers, or other long-running comman
 - Put agent markdown in `~/.pi/agent/agents/*.md` (default), and/or
 - Point `profiles.dirs` at project- or package-specific agent directories
 
-Without at least one consumer profile on disk, `subagent_spawn` has nothing to launch.
+Without at least one consumer profile on disk, `subagent_spawn` has nothing to launch. Use the `create-subagents` skill to author one.
 
 ### Optional doctrine (not core)
 
@@ -62,7 +62,7 @@ Hierarchy policy knobs, optional org-chart **seed data** (role keys/edges — st
   - optional task board + tracked services (capability-gated)
   - module layout: `index.ts` (entry), `coordinator-ops.ts`, `coordinator-tools.ts`, `tool-schemas.ts`, `registry.ts`, hosts, policies
 - `skills/` (optional operator playbooks; profile-agnostic; not a role catalog)
-  - `dispatch-subagents`, `communicate-subagents`, `handoff-subagents`, `supervise-subagents`, `manage-tasks`
+  - `create-subagents`, `dispatch-subagents`, `communicate-subagents`, `handoff-subagents`, `supervise-subagents`, `manage-tasks`
 
 **Not included:** `agents/`, scout/worker/reviewer packs, org persona prompts, or review-pack profiles. Those belong in consumer config or a separate agent package.
 
