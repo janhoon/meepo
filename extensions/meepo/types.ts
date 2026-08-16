@@ -125,15 +125,7 @@ export type TaskInteractionSource = (typeof TASK_INTERACTION_SOURCES)[number];
 
 export interface SessionChildLinkEntryData {
 	childId: string;
-	title: string;
 	profile: string;
-	task: string;
-	runDir: string;
-	sessionFile: string;
-	transportKind?: AgentTransportKind;
-	transportState?: AgentTransportState;
-	bridgeSocketPath?: string | null;
-	bridgeStatusFile?: string | null;
 	taskId?: string | null;
 	createdAt: number;
 }
@@ -180,19 +172,14 @@ export interface SpawnSubagentInput {
 }
 
 export interface SpawnSubagentResult {
+	childId: string;
+	/** @deprecated Use childId. */
 	agentId: string;
 	profile: string;
 	title: string;
-	spawnCwd: string;
-	runDir: string;
-	sessionFile: string;
 	taskId: string | null;
-	transportKind: AgentTransportKind;
-	transportState: AgentTransportState;
-	bridgeSocketPath: string | null;
-	bridgeStatusFile: string | null;
-	bridgeLogFile: string | null;
 	host: HostIdentity;
+	transportState: AgentTransportState;
 	sessionLinkData: SessionChildLinkEntryData;
 }
 

@@ -413,17 +413,11 @@ export function buildTaskDispatchText(
 
 export function formatSpawnSuccess(result: SpawnSubagentResult): string {
 	return [
-		`Spawned ${result.agentId} (${result.profile})`,
+		`Spawned ${result.childId} (${result.profile})`,
 		"",
 		`title: ${result.title}`,
 		`taskId: ${result.taskId ?? "-"}`,
-		`cwd: ${result.spawnCwd}`,
-		`runDir: ${result.runDir}`,
-		`sessionFile: ${result.sessionFile}`,
-		`transport: ${result.transportKind} ${result.transportState}`,
-		`bridgeSocketPath: ${result.bridgeSocketPath ?? "-"}`,
-		`bridgeStatusFile: ${result.bridgeStatusFile ?? "-"}`,
-		`bridgeLogFile: ${result.bridgeLogFile ?? "-"}`,
+		`transport: ${result.transportState}`,
 		`host: ${formatHost(result.host)}`,
 	].join("\n");
 }

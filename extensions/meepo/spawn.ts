@@ -653,32 +653,18 @@ export async function spawnSubagent(input: SpawnSubagentInput): Promise<SpawnSub
 	appendRunEvent(runArtifacts.runDir, "host_spawned", `Spawned on ${persisted.host.kind}`, persisted.host);
 	const sessionLinkData: SessionChildLinkEntryData = {
 		childId: agentId,
-		title: input.title,
 		profile: input.profile.name,
-		task: input.task,
-		runDir: runArtifacts.runDir,
-		sessionFile: runArtifacts.sessionFile,
-		transportKind: "rpc_bridge",
-		transportState: "launching",
-		bridgeSocketPath: runArtifacts.bridgeSocketPath,
-		bridgeStatusFile: runArtifacts.bridgeStatusFile,
 		taskId: input.taskId,
 		createdAt: now,
 	};
 	return {
+		childId: agentId,
 		agentId,
 		profile: input.profile.name,
 		title: input.title,
-		spawnCwd,
-		runDir: runArtifacts.runDir,
-		sessionFile: runArtifacts.sessionFile,
 		taskId: input.taskId,
-		transportKind: "rpc_bridge",
-		transportState: "launching",
-		bridgeSocketPath: runArtifacts.bridgeSocketPath,
-		bridgeStatusFile: runArtifacts.bridgeStatusFile,
-		bridgeLogFile: runArtifacts.bridgeLogFile,
 		host: persisted.host,
+		transportState: "launching",
 		sessionLinkData,
 	};
 }

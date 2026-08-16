@@ -828,7 +828,7 @@ export async function runTaskSpawnWizard(pi: ExtensionAPI, ctx: ExtensionContext
 			allowDuplicateOwner,
 		});
 		ctx.ui.notify(
-			`Spawned ${result.agentId} on ${formatHost(result.host)}. RPC bridge launching — task will deliver when the child is ready.`,
+			`Spawned ${result.childId} on ${formatHost(result.host)}. RPC bridge launching — task will deliver when the child is ready`,
 			"info",
 		);
 		// Avoid ui.editor dump after spawn — it hijacks the parent composer.
