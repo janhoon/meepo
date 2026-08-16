@@ -291,6 +291,10 @@ export function buildInboxWhere(input: FetchAgentInboxV2Input, recipient: AgentR
 		where.push("m.project_key = ?");
 		params.push(input.projectKey);
 	}
+	if (input.senderAgentIds && input.senderAgentIds.length > 0) {
+		where.push(`m.sender_agent_id IN (${makePlaceholders(input.senderAgentIds.length)})`);
+		params.push(...input.senderAgentIds);
+	}
 	const statuses = input.statuses ?? (input.includeRead ? null : (["queued", "notified"] as AgentMessageRecipientStatus[]));
 	if (statuses && statuses.length > 0) {
 		where.push(`r.status IN (${makePlaceholders(statuses.length)})`);
@@ -300,6 +304,8 @@ export function buildInboxWhere(input: FetchAgentInboxV2Input, recipient: AgentR
 }
 
 export function selectInboxRows(db: DatabaseSync, input: FetchAgentInboxV2Input, recipient: AgentRecipientRef): AgentInboxMessageV2Record[] {
+	// Empty sender allow-list means "no parent-owned senders" — do not fall open to all project mail.
+	if (input.senderAgentIds && input.senderAgentIds.length === 0) return [];
 	const { where, params } = buildInboxWhere(input, recipient);
 	const limit = Math.max(1, Math.min(input.limit ?? 100, 500));
 	params.push(limit);

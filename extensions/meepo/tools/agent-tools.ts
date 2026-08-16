@@ -26,8 +26,10 @@ import {
 	listCleanupCandidates,
 	reconcileAgents,
 	resolveAdminAttentionV2Filters,
+	loadAttentionGate,
 	resolveAgentFilters,
 	resolveAttentionFilters,
+	resolveRootInboxSenderIds,
 	resolveTaskFilters,
 	resolveToolActorContext,
 	setLastFocusedActiveAgentId,
@@ -96,8 +98,7 @@ export function register(registerTool: RegisterTool, pi: ExtensionAPI): void {
 			],
 			parameters: SubagentSpawnParams,
 			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-				const gateItems = listAttentionItems(getMeepoDb(), resolveAttentionFilters(ctx, "current_project", { limit: 5 }));
-				const gateAgents = new Map(listAgents(getMeepoDb(), { projectKey: getProjectKey(ctx.cwd), limit: 100 }).map((agent) => [agent.id, agent]));
+				const { items: gateItems, agents: gateAgents } = loadAttentionGate(ctx, "current_project");
 				const result = await spawnChildFromParams(pi, ctx, params);
 				const warning = formatAttentionGateWarning(gateItems, gateAgents);
 				return {
@@ -437,11 +438,20 @@ export function register(registerTool: RegisterTool, pi: ExtensionAPI): void {
 				const agentFilters = applyHierarchyVisibilityToAgentFilters(ctx, resolveAgentFilters(ctx, scope, {}));
 				const db = getMeepoDb();
 				const actor = resolveToolActorContext(ctx);
+				// Root inboxes: single helper (no parallel resolveOwnedSubjectIds composition).
+				// Agent actors pin by recipient identity only.
+				const ownedSenderIds =
+					actor.kind === "root"
+						? resolveRootInboxSenderIds(ctx, scope, {
+								projectKey: agentFilters.projectKey ?? getProjectKey(ctx.cwd),
+						  })
+						: undefined;
 				const v2Messages = fetchAgentInboxV2(db, {
 					actor,
 					includeRead: params.includeDelivered ?? false,
 					markRead: !(params.includeDelivered ?? false),
 					projectKey: agentFilters.projectKey ?? (actor.kind === "agent" ? actor.projectKey : undefined),
+					senderAgentIds: ownedSenderIds,
 					limit: params.limit,
 				});
 				const v2ReadReceiptCount = params.includeDelivered ? 0 : v2Messages.length;
@@ -462,7 +472,7 @@ export function register(registerTool: RegisterTool, pi: ExtensionAPI): void {
 					projectKey: agentFilters.projectKey,
 					spawnSessionId: agentFilters.spawnSessionId,
 					spawnSessionFile: agentFilters.spawnSessionFile,
-					agentIds: agentFilters.ids ?? agentFilters.descendantOf,
+					agentIds: ownedSenderIds ?? agentFilters.ids ?? agentFilters.descendantOf,
 					includeDelivered: params.includeDelivered,
 					limit: params.limit,
 				});
@@ -516,7 +526,7 @@ export function register(registerTool: RegisterTool, pi: ExtensionAPI): void {
 				}
 				const filters = resolveAttentionFilters(ctx, scope, params);
 				const rawLegacyItems = listAttentionItems(db, filters);
-				const v2Filters = resolveAdminAttentionV2Filters(ctx, scope, params, actor);
+				const v2Filters = resolveAdminAttentionV2Filters(ctx, scope, params);
 				const v2Items = listAgentAttentionItemsV2(db, v2Filters);
 				const items = suppressDuplicateLegacyAttentionItems(rawLegacyItems, v2Items);
 				const suppressedLegacyDuplicateCount = rawLegacyItems.length - items.length;

@@ -18,6 +18,7 @@ import {
 	deriveDefaultTaskStatus,
 	mergeStringArrays,
 	normalizeStringArray,
+	nowOr,
 	taskLeaseKindForProfile,
 	toTaskRecord,
 } from "./task-shared.js";

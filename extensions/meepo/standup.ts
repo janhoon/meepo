@@ -24,7 +24,6 @@ import {
 } from "./no-wait-policy.js";
 import { LEGACY_SESSION_CHILD_LINK_ENTRY_TYPE, SESSION_CHILD_LINK_ENTRY_TYPE } from "./paths.js";
 import { getAllowedBuiltinToolNames, getSubagentProfile, listSubagentProfiles, normalizeBuiltinTools } from "./profiles.js";
-import { getProjectKey } from "./project.js";
 import { truncateText } from "./text-util.js";
 import {
 	AgentMessagePermissionError,
@@ -37,8 +36,6 @@ import {
 	getAgent,
 	getFleetSummary,
 	listAgentAttentionItemsV2,
-	listAgents,
-	listAttentionItems,
 	listDescendantAgentIds,
 	listHierarchyVisibleAgentIds,
 	listInboxMessages,
@@ -166,7 +163,6 @@ import {
 	formatServiceReconcileResult,
 	formatServiceStartResult,
 	formatServiceStopResult,
-	formatSpawnSuccess,
 	formatStopResult,
 	formatTaskDetails,
 	formatTaskLine,
@@ -246,7 +242,7 @@ import {
 } from "./board-ops.js";
 import { setLastFocusedActiveAgentId, updateFleetUi } from "./coordinator-session.js";
 import { spawnServiceFromParams } from "./service-ops.js";
-import { resolveAttentionFilters, resolveTaskFilters } from "./session-scope.js";
+import { loadAttentionGate, resolveTaskFilters } from "./session-scope.js";
 import { getTaskInteractions } from "./task-interactions.js";
 
 /** Active Meepo config for this extension process (set on register). */
@@ -806,9 +802,8 @@ export async function confirmTaskLeaseOverride(ctx: ExtensionContext, taskId: st
 
 export async function runTaskSpawnWizard(pi: ExtensionAPI, ctx: ExtensionContext, taskId?: string): Promise<void> {
 	if (!ctx.hasUI) return;
-	const gateItems = listAttentionItems(getMeepoDb(), resolveAttentionFilters(ctx, "current_project", { limit: 5 }));
+	const { items: gateItems, agents: gateAgents } = loadAttentionGate(ctx, "current_project");
 	if (gateItems.length > 0) {
-		const gateAgents = new Map(listAgents(getMeepoDb(), { projectKey: getProjectKey(ctx.cwd), limit: 100 }).map((agent) => [agent.id, agent]));
 		const ok = await ctx.ui.confirm("Open attention items", `${formatAttentionGateWarning(gateItems, gateAgents)}\n\nSpawn anyway?`);
 		if (!ok) return;
 	}
@@ -833,10 +828,10 @@ export async function runTaskSpawnWizard(pi: ExtensionAPI, ctx: ExtensionContext
 			allowDuplicateOwner,
 		});
 		ctx.ui.notify(
-			`Spawned ${result.agentId} on ${result.hostKind ?? "host"} (${result.hostDisplayName ?? result.hostPrimaryId ?? result.tmuxSessionName ?? "?"}).`,
+			`Spawned ${result.agentId} on ${result.hostKind ?? "host"} (${result.hostDisplayName ?? result.hostPrimaryId ?? result.tmuxSessionName ?? "?"}). RPC bridge launching — task will deliver when the child is ready.`,
 			"info",
 		);
-		await ctx.ui.editor(`Spawned ${result.agentId}`, formatSpawnSuccess(result));
+		// Avoid ui.editor dump after spawn — it hijacks the parent composer.
 	} catch (error) {
 		ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 	}

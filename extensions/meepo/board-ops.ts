@@ -240,8 +240,13 @@ import {
 import {
 	buildTaskInteractionsByTask,
 	mergeAgentAttentionV2Items,
+	resolveAdminAttentionV2Filters,
 } from "./task-interactions.js";
-import { getLinkedChildIds, resolveTaskFilters } from "./session-scope.js";
+import {
+	resolveAgentFilters,
+	resolveAttentionFilters,
+	resolveTaskFilters,
+} from "./session-scope.js";
 
 /** Active Meepo config for this extension process (set on register). */
 export async function focusAgentById(id: string): Promise<{ agent: AgentSummary; result: { focused: boolean; command: string; reason?: string } }> {
@@ -269,14 +274,12 @@ export async function captureAgentById(id: string, lines = 200): Promise<{ agent
 
 export function buildDashboardData(ctx: ExtensionContext): AgentsDashboardData {
 	const db = getMeepoDb();
+	// Agent scopes only via resolveAgentFilters — no hand-rolled owned* locals.
+	// current_project ≡ current_session owned ids; projectKey pin is the only builder difference.
 	const all = listAgents(db, { limit: 200 });
-	const currentProject = listAgents(db, { projectKey: getProjectKey(ctx.cwd), limit: 200 });
-	const currentSession = listAgents(db, {
-		spawnSessionId: ctx.sessionManager.getSessionId(),
-		spawnSessionFile: ctx.sessionManager.getSessionFile(),
-		limit: 200,
-	});
-	const descendants = listAgents(db, { descendantOf: getLinkedChildIds(ctx), limit: 200 });
+	const currentProject = listAgents(db, resolveAgentFilters(ctx, "current_project", { limit: 200 }));
+	const currentSession = listAgents(db, resolveAgentFilters(ctx, "current_session", { limit: 200 }));
+	const descendants = listAgents(db, resolveAgentFilters(ctx, "descendants", { limit: 200 }));
 	const childrenByParent = new Map<string, string[]>();
 	for (const agent of all) {
 		if (!agent.parentAgentId) continue;
@@ -380,9 +383,12 @@ export function buildBoardScopeData(
 
 export function buildBoardData(ctx: ExtensionContext): AgentsBoardData {
 	const db = getMeepoDb();
+	const projectKey = getProjectKey(ctx.cwd);
+	// Tasks stay ambient (project/session columns). Agent + attention scopes only via resolve*Filters.
+	// current_project ≡ current_session owned subject ids on agent surfaces — no dual hand-rolled lists.
 	const scopeTasks = {
 		all: listTasks(db, { includeDone: true, limit: 200 }),
-		current_project: listTasks(db, { projectKey: getProjectKey(ctx.cwd), includeDone: true, limit: 200 }),
+		current_project: listTasks(db, { projectKey, includeDone: true, limit: 200 }),
 		current_session: listTasks(db, {
 			spawnSessionId: ctx.sessionManager.getSessionId(),
 			spawnSessionFile: ctx.sessionManager.getSessionFile(),
@@ -393,36 +399,21 @@ export function buildBoardData(ctx: ExtensionContext): AgentsBoardData {
 	};
 	const scopeAgents = {
 		all: listAgents(db, { limit: 200 }),
-		current_project: listAgents(db, { projectKey: getProjectKey(ctx.cwd), limit: 200 }),
-		current_session: listAgents(db, {
-			spawnSessionId: ctx.sessionManager.getSessionId(),
-			spawnSessionFile: ctx.sessionManager.getSessionFile(),
-			limit: 200,
-		}),
-		descendants: listAgents(db, { descendantOf: getLinkedChildIds(ctx), limit: 200 }),
+		current_project: listAgents(db, resolveAgentFilters(ctx, "current_project", { limit: 200 })),
+		current_session: listAgents(db, resolveAgentFilters(ctx, "current_session", { limit: 200 })),
+		descendants: listAgents(db, resolveAgentFilters(ctx, "descendants", { limit: 200 })),
 	};
 	const scopeAttention = {
 		all: listAttentionItems(db, { states: OPEN_ATTENTION_STATES, limit: 500 }),
-		current_project: listAttentionItems(db, { projectKey: getProjectKey(ctx.cwd), states: OPEN_ATTENTION_STATES, limit: 500 }),
-		current_session: listAttentionItems(db, {
-			spawnSessionId: ctx.sessionManager.getSessionId(),
-			spawnSessionFile: ctx.sessionManager.getSessionFile(),
-			states: OPEN_ATTENTION_STATES,
-			limit: 500,
-		}),
-		descendants: listAttentionItems(db, { agentIds: getLinkedChildIds(ctx), states: OPEN_ATTENTION_STATES, limit: 500 }),
+		current_project: listAttentionItems(db, resolveAttentionFilters(ctx, "current_project", { limit: 500 })),
+		current_session: listAttentionItems(db, resolveAttentionFilters(ctx, "current_session", { limit: 500 })),
+		descendants: listAttentionItems(db, resolveAttentionFilters(ctx, "descendants", { limit: 500 })),
 	};
 	const scopeAttentionV2 = {
 		all: listAgentAttentionItemsV2(db, { states: OPEN_AGENT_ATTENTION_V2_STATES, limit: 500 }),
-		current_project: listAgentAttentionItemsV2(db, { projectKey: getProjectKey(ctx.cwd), states: OPEN_AGENT_ATTENTION_V2_STATES, limit: 500 }),
-		current_session: mergeAgentAttentionV2Items(
-			listAgentAttentionItemsV2(db, { taskIds: scopeTasks.current_session.map((task) => task.id), states: OPEN_AGENT_ATTENTION_V2_STATES, limit: 500 }),
-			listAgentAttentionItemsV2(db, { subjectAgentIds: scopeAgents.current_session.map((agent) => agent.id), states: OPEN_AGENT_ATTENTION_V2_STATES, limit: 500 }),
-		),
-		descendants: mergeAgentAttentionV2Items(
-			listAgentAttentionItemsV2(db, { taskIds: scopeTasks.descendants.map((task) => task.id), states: OPEN_AGENT_ATTENTION_V2_STATES, limit: 500 }),
-			listAgentAttentionItemsV2(db, { subjectAgentIds: scopeAgents.descendants.map((agent) => agent.id), states: OPEN_AGENT_ATTENTION_V2_STATES, limit: 500 }),
-		),
+		current_project: listAgentAttentionItemsV2(db, resolveAdminAttentionV2Filters(ctx, "current_project", { limit: 500 })),
+		current_session: listAgentAttentionItemsV2(db, resolveAdminAttentionV2Filters(ctx, "current_session", { limit: 500 })),
+		descendants: listAgentAttentionItemsV2(db, resolveAdminAttentionV2Filters(ctx, "descendants", { limit: 500 })),
 	};
 	return {
 		scopes: {
