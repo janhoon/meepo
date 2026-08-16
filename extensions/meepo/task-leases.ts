@@ -2,7 +2,7 @@
  * Task exclusive/review lease helpers.
  */
 import { randomUUID } from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "./sqlite.js";
 import { ACTIVE_AGENT_STATES } from "./registry-shared.js";
 import { makePlaceholders } from "./sql-util.js";
 import { createTaskEvent, updateTask } from "./task-store.js";

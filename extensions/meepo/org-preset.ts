@@ -1,4 +1,4 @@
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "./sqlite.js";
 import type { MeepoConfig } from "./config.js";
 
 export interface OrgRoleSeed {

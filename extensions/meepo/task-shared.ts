@@ -1,7 +1,7 @@
 /**
  * Shared task registry helpers and lease types.
  */
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "./sqlite.js";
 import { resolveProfileLeaseKind, toTaskLeaseKind } from "./profile-metadata.js";
 import { getSubagentProfile } from "./profiles.js";
 import { addSessionScopeFilter, makePlaceholders, safeJsonParse } from "./sql-util.js";

@@ -2,7 +2,7 @@
  * Task <-> agent ownership links.
  */
 import { randomUUID } from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "./sqlite.js";
 import { addSessionScopeFilter, runImmediateTransaction } from "./sql-util.js";
 import { assertTaskLeaseAvailable, deactivateActiveLinksForAgent } from "./task-leases.js";
 import { createTaskEvent, getTask, updateTask } from "./task-store.js";

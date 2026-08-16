@@ -2,7 +2,7 @@
  * Messaging + attention store (legacy delivery queue + v2 hierarchy messages).
  */
 import { randomUUID } from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "./sqlite.js";
 import { deliveryMessageFromInboxV2, mergeDeliveryMessages } from "./message-adapters.js";
 import {
 	addSessionScopeFilter,

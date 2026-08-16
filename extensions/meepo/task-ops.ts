@@ -2,7 +2,7 @@
  * Task attention, child-publish projection, backfill, reconcile.
  */
 import { randomUUID } from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "./sqlite.js";
 import { addSessionScopeFilter, makePlaceholders, safeJsonParse } from "./sql-util.js";
 import { getTask, listTasks, updateTask, createTask, createTaskEvent, listTaskEvents } from "./task-store.js";
 import { linkTaskAgent, unlinkTaskAgent } from "./task-links-agents.js";

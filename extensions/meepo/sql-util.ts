@@ -3,7 +3,7 @@
  * Keep these boring and dependency-free so agent/task/service stores can share one implementation.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "./sqlite.js";
 
 export function safeJsonParse<T>(value: string | null | undefined, fallback: T): T {
 	if (value == null || value === "") return fallback;

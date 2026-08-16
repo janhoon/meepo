@@ -1,7 +1,7 @@
 /**
  * Shared mappers/constants for Meepo registry stores.
  */
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "./sqlite.js";
 import {
 	makePlaceholders,
 	safeJsonParse,

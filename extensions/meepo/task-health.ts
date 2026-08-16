@@ -1,7 +1,7 @@
 /**
  * Derived task health (read-time liveness, not Kanban lane).
  */
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "./sqlite.js";
 import {
 	ACTIVE_AGENT_STATES,
 	OPEN_AGENT_ATTENTION_V2_STATES,

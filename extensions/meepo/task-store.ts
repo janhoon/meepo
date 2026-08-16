@@ -2,7 +2,7 @@
  * Task CRUD, subtree listing, and task events.
  */
 import { randomUUID } from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "./sqlite.js";
 import { addSessionScopeFilter, makePlaceholders, safeJsonParse } from "./sql-util.js";
 import {
 	normalizeStringArray,

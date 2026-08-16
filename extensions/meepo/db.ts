@@ -1,4 +1,4 @@
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync } from "./sqlite.js";
 import { MIGRATIONS, type Migration } from "./migrations/index.js";
 import { ensureMeepoRuntimePaths } from "./paths.js";
 

@@ -5,7 +5,7 @@
  * Hierarchy, routing permissions, and v2 multi-recipient message creation.
  */
 import { randomUUID } from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "./sqlite.js";
 import { addSessionScopeFilter, makePlaceholders, toBoolean } from "./sql-util.js";
 import {
 	toAgentAccessGrantRecord,

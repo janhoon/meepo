@@ -2,7 +2,7 @@
  * Agent record store: create/update/list/get + fleet summary.
  */
 import { randomUUID } from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "./sqlite.js";
 import { addSessionScopeFilter, makePlaceholders, safeJsonParse } from "./sql-util.js";
 import {
 	ACTIVE_STATES,

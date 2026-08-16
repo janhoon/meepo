@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync } from "./sqlite.js";
 import { describe, it } from "node:test";
 import { createCoreDefaultConfig, createFullDefaultConfig, loadMeepoConfig } from "./config.js";
 import {

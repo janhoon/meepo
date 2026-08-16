@@ -3,7 +3,7 @@
  * Delivery readers project v2 into the AgentMessageRecord shape for bridge/inbox code.
  */
 import assert from "node:assert/strict";
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync } from "./sqlite.js";
 import { describe, it } from "node:test";
 import { randomUUID } from "node:crypto";
 import { bootstrapMeepoDatabase } from "./db.js";

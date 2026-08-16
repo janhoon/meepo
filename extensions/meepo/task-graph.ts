@@ -2,7 +2,7 @@
  * Task dependency links and readiness.
  */
 import { randomUUID } from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "./sqlite.js";
 import { ACTIVE_AGENT_STATES } from "./registry-shared.js";
 import { addSessionScopeFilter, makePlaceholders, runImmediateTransaction } from "./sql-util.js";
 import { createTaskEvent, getTask, updateTask } from "./task-store.js";

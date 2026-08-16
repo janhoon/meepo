@@ -154,7 +154,7 @@ Each child agent run must have its own directory:
 
 ## SQLite schema requirements
 
-Use Node’s built-in `node:sqlite` module.
+Use the host-neutral SQLite adapter in `extensions/meepo/sqlite.ts` (`node:sqlite` on Node, `bun:sqlite` on compiled Pi / Bun).
 
 ### DB behavior requirements
 
