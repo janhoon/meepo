@@ -88,7 +88,7 @@ import { getService, listServices, updateService } from "./service-registry.js";
 import { readServiceStatus, spawnService, tailFileLines } from "./service-spawn.js";
 import { spawnSubagent } from "./spawn.js";
 import { maybeNotifyHostAttention } from "./host-notify.js";
-import { getProcessHost, hostHandleFromRecord } from "./process-host.js";
+import { getProcessHost } from "./process-host.js";
 import {
 	mapDeliveryModeToBridgeCommand,
 	missingHostTargetMessage,
@@ -291,7 +291,8 @@ export async function focusServiceById(id: string): Promise<{ service: ServiceSu
 	if (!service) {
 		throw new Error(`Unknown service id "${id}".`);
 	}
-	const result = await getProcessHost().focus(hostHandleFromRecord(service));
+	if (!service.host) throw new Error(`Service ${service.id} has no HostTarget.`);
+	const result = await getProcessHost().focus(service.host);
 	return { service, result };
 }
 
@@ -302,8 +303,8 @@ export async function captureServiceById(id: string, lines = 200): Promise<{ ser
 		throw new Error(`Unknown service id "${id}".`);
 	}
 	const host = getProcessHost();
-	const target = hostHandleFromRecord(service);
-	if (await host.targetExists(target)) {
+	const target = service.host;
+	if (target && (await host.targetExists(target))) {
 		const result = await host.capture(target, { lines });
 		return { service, content: result.content, command: result.command, source: "host" };
 	}
@@ -330,8 +331,8 @@ export async function stopServiceById(id: string, force: boolean, reason?: strin
 		throw new Error(`Unknown service id "${id}".`);
 	}
 	const host = getProcessHost();
-	const target = hostHandleFromRecord(service);
-	const targetExists = await host.targetExists(target);
+	const target = service.host;
+	const targetExists = target ? await host.targetExists(target) : false;
 	if (!targetExists) {
 		const latestStatus = readLatestServiceStatus(service);
 		if (latestStatus) {
@@ -394,7 +395,7 @@ export async function reconcileServices(ctx: ExtensionContext, params: { scope?:
 	const changed: Array<{ id: string; state: string; reason: string }> = [];
 	for (const service of services) {
 		const latestStatus = readLatestServiceStatus(service);
-		const targetExists = await host.targetExists(hostHandleFromRecord(service), inventory);
+		const targetExists = service.host ? await host.targetExists(service.host, inventory) : false;
 		let patch: UpdateServiceInput = {};
 		let reason = "";
 		const readyMatchedAt = maybeDetectServiceReady(service);

@@ -85,7 +85,7 @@ import { getService, listServices, updateService } from "./service-registry.js";
 import { readServiceStatus, spawnService, tailFileLines } from "./service-spawn.js";
 import { spawnSubagent } from "./spawn.js";
 import { maybeNotifyHostAttention } from "./host-notify.js";
-import { formatHost, getProcessHost, hostHandleFromRecord } from "./process-host.js";
+import { formatHost, getProcessHost } from "./process-host.js";
 import {
 	mapDeliveryModeToBridgeCommand,
 	missingHostTargetMessage,
@@ -233,13 +233,14 @@ import {
 	OPEN_ATTENTION_STATES,
 	TERMINAL_AGENT_STATES,
 } from "./registry-shared.js";
-import { listCleanupCandidates, reconcileAgents, stopAgentById } from "./child-fleet.js";
 import {
-	buildBoardData,
-	buildDashboardData,
 	captureAgentById,
 	focusAgentById,
-} from "./board-projection.js";
+	listCleanupCandidates,
+	reconcileAgents,
+	stopAgentById,
+} from "./child-fleet.js";
+import { buildBoardData, buildDashboardData } from "./board-projection.js";
 import { setLastFocusedActiveAgentId, updateFleetUi } from "./coordinator-session.js";
 import { spawnServiceFromParams } from "./service-ops.js";
 import { loadAttentionGate, resolveTaskFilters } from "./session-scope.js";
@@ -622,7 +623,7 @@ export async function runReplyFlow(ctx: ExtensionContext, agentId: string): Prom
 		throw new Error(`Cannot message agent ${agent.id} because it is in terminal state ${agent.state}.`);
 	}
 	if (
-		!(await getProcessHost().targetExists(hostHandleFromRecord(agent)))
+		!(agent.host && (await getProcessHost().targetExists(agent.host)))
 	) {
 		throw new Error(missingHostTargetMessage(agent.id));
 	}

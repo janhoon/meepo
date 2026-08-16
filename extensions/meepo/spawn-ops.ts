@@ -527,7 +527,7 @@ export async function dispatchReadyTasks(pi: ExtensionAPI, ctx: ExtensionContext
 			cwd: item.task.spawnCwd,
 			priority: item.task.priorityLabel ?? `p${item.task.priority}`,
 		});
-		dispatched.push({ taskId: item.task.id, profile: profileName, agentId: result.agentId, title: item.task.title });
+		dispatched.push({ taskId: item.task.id, profile: profileName, agentId: result.childId, title: item.task.title });
 	}
 	return { dispatched, skipped, preview };
 }

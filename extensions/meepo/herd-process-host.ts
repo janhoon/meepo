@@ -20,7 +20,7 @@ import {
 	type HostInventory,
 	type HostNotifyInput,
 	type HostSpawnWindowInput,
-	type HostHandle,
+	type HostIdentity,
 	type HostStopResult,
 	type HostTarget,
 	type ProcessHost,
@@ -127,13 +127,8 @@ function toHostTarget(agent: HerdrAgentInfo, displayName?: string): HostTarget {
 	};
 }
 
-/** herdr 0.8 command target: pane id first, then a name that actually renamed. */
-function resolveFocusTarget(target: HostHandle): string | null {
-	return target.lastKnownRefs?.paneId || target.displayName || target.lastKnownRefs?.agentName || null;
-}
-
-function resolvePaneId(target: HostHandle): string | null {
-	return target.lastKnownRefs?.paneId || null;
+function resolveFocusTarget(target: HostIdentity): string | null {
+	return target.displayName || target.primaryId || null;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -353,16 +348,10 @@ export class HerdProcessHost implements ProcessHost {
 		};
 	}
 
-	async targetExists(target: HostHandle, inventory?: HostInventory): Promise<boolean> {
+	async targetExists(target: HostIdentity, inventory?: HostInventory): Promise<boolean> {
 		const inv = inventory ?? (await this.listInventory());
-		const primary =
-			target.primaryId ||
-			target.lastKnownRefs?.terminalId ||
-			undefined;
-		if (primary && inv.primaryIds.has(primary)) return true;
-		const paneId = target.lastKnownRefs?.paneId;
-		if (paneId && inv.raw?.paneIds?.has(paneId)) return true;
-		const name = target.displayName || target.lastKnownRefs?.agentName;
+		if (target.primaryId && inv.primaryIds.has(target.primaryId)) return true;
+		const name = target.displayName;
 		if (name && inv.displayNames.has(name)) return true;
 		return false;
 	}
@@ -479,7 +468,7 @@ export class HerdProcessHost implements ProcessHost {
 		throw new Error(`herdr agent rename failed for all 32-char candidates near ${desiredName}`);
 	}
 
-	async focus(target: HostHandle): Promise<HostFocusResult> {
+	async focus(target: HostIdentity): Promise<HostFocusResult> {
 		const focusTarget = resolveFocusTarget(target);
 		const command = focusTarget
 			? `herdr agent focus ${shellQuote(focusTarget)}`
@@ -504,14 +493,11 @@ export class HerdProcessHost implements ProcessHost {
 		}
 	}
 
-	async stop(target: HostHandle, options?: { force?: boolean }): Promise<HostStopResult> {
+	async stop(target: HostIdentity, options?: { force?: boolean }): Promise<HostStopResult> {
 		const force = options?.force ?? false;
-		const paneId = resolvePaneId(target);
 		const focusTarget = resolveFocusTarget(target);
-
-		// Resolve pane_id via agent get when only terminal_id/name is known.
-		let resolvedPaneId = paneId;
-		if (!resolvedPaneId && focusTarget) {
+		let resolvedPaneId: string | null = null;
+		if (focusTarget) {
 			try {
 				const envelope = this.invoke(["agent", "get", focusTarget]);
 				const agent = agentInfoFromUnknown(envelope.result);
@@ -575,12 +561,11 @@ export class HerdProcessHost implements ProcessHost {
 		}
 	}
 
-	async capture(target: HostHandle, options?: { lines?: number }): Promise<HostCaptureResult> {
+	async capture(target: HostIdentity, options?: { lines?: number }): Promise<HostCaptureResult> {
 		const lines = Math.max(1, options?.lines ?? 200);
-		const paneId = resolvePaneId(target);
 		const focusTarget = resolveFocusTarget(target);
-		const kind = paneId ? "pane" : "agent";
-		const id = paneId ?? focusTarget;
+		const kind = "agent";
+		const id = focusTarget;
 		if (!id) throw new Error("Missing herdr target for capture (pane_id / displayName).");
 		const command = `herdr ${kind} read ${shellQuote(id)} --source recent --lines ${lines}`;
 		const envelope = this.invoke([kind, "read", id, "--source", "recent", "--lines", String(lines)]);

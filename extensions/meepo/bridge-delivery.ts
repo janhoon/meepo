@@ -7,12 +7,12 @@ import {
 	createAgentEvent,
 	createRootActorContext,
 	getAgent,
-	listMessagesForRecipient,
+
 	updateAgent,
 	updateAgentAttentionItemsV2ForOwner,
 	updateAttentionItemsForAgent,
 } from "./registry.js";
-import { listInboxForChild, markInbox, publishDownward } from "./inbox.js";
+import { listChildDeliveryQueue, listInboxForChild, markInbox, publishDownward } from "./inbox.js";
 import { getRpcBridgeSocketPath, sendRpcBridgeCommand } from "./rpc-client.js";
 import { mapDeliveryModeToBridgeCommand } from "./rpc-bridge-control.js";
 import { collectQueuedWakeCoalescingContext } from "./wake-coalescing.js";
@@ -42,7 +42,7 @@ export function coalesceQueuedDownwardWakeMessages(
 	if (!isCoalescableWake(kind, actionPolicy)) {
 		return { expiredMessageIds: [], expiredV2MessageIds: [], expiredV2RecipientRowIds: [], coalescedWakeMessages: [] };
 	}
-	const queued = listMessagesForRecipient(db, agent.id, { targetKind: "child", limit: 100 }).filter((message) => {
+	const queued = listChildDeliveryQueue(db, agent.id, { limit: 100 }).filter((message) => {
 		const payload = (message.payload && typeof message.payload === "object" ? message.payload : {}) as DownwardMessagePayload;
 		return isCoalescableWake(message.kind, payload.actionPolicy ?? defaultDownwardActionPolicy(message.kind as "answer" | "note" | "redirect" | "cancel" | "priority"));
 	});
@@ -90,7 +90,7 @@ export async function deliverQueuedMessagesViaBridge(agentId: string): Promise<{
 		if (agent.transportKind !== "rpc_bridge") {
 			return { delivered: 0, deferred: 0, transportState: agent.transportState };
 		}
-		const queued = listMessagesForRecipient(db, agent.id, { targetKind: "child", limit: 50 });
+		const queued = listChildDeliveryQueue(db, agent.id, { limit: 50 });
 		if (queued.length === 0) {
 			return { delivered: 0, deferred: 0, transportState: agent.transportState };
 		}
@@ -194,11 +194,11 @@ export async function deliverQueuedMessagesViaBridge(agentId: string): Promise<{
 				scheduleBridgeDeliveryRetry(agentId, 500);
 			}
 		}
-		const queued = listMessagesForRecipient(db, agentId, { targetKind: "child", limit: 50 });
+		const queued = listChildDeliveryQueue(db, agentId, { limit: 50 });
 		return { delivered: 0, deferred: queued.length, transportState: lastFailureWasTransport ? "fallback" : "live" };
 	} finally {
 		liveBridgeDeliveryInFlight.delete(agentId);
-		const queued = listMessagesForRecipient(getMeepoDb(), agentId, { targetKind: "child", limit: 1 });
+		const queued = listChildDeliveryQueue(getMeepoDb(), agentId, { limit: 1 });
 		if (queued.length > 0) scheduleBridgeDeliveryRetry(agentId, 300);
 	}
 }

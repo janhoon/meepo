@@ -95,7 +95,7 @@ export function createAgent(db: DatabaseSync, input: CreateAgentInput): void {
 		input.bridgeConnectedAt ?? null,
 		input.bridgeUpdatedAt ?? null,
 		input.bridgeLastError ?? null,
-		input.host?.kind ?? "tmux",
+		input.host?.kind ?? "",
 		input.host?.primaryId ?? null,
 		input.host?.displayName ?? null,
 		input.hostTargetJson ?? null,

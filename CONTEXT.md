@@ -9,8 +9,8 @@ The seam that places, focuses, stops, and captures Child and Service processes. 
 _Avoid_: backend, substrate, runner
 
 **HostTarget**:
-The identity of a live pane, window, or tab on a ProcessHost. Callers see `kind`, `primaryId`, and `displayName` only. Adapter refs stay inside the adapter and the store.
-_Avoid_: tmux target, pane id, host fields
+The identity of a live pane, window, or tab on a ProcessHost. Callers see `kind`, `primaryId`, and `displayName` only. Adapters resolve live refs from inventory. A Child or Service has no host until spawn succeeds.
+_Avoid_: tmux target, pane id, host fields, HostHandle
 
 **Child**:
 A tracked Pi replica launched against a Task. The live process sits on a ProcessHost; the registry row is the source of truth for host identity.

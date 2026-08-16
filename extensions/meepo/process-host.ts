@@ -40,17 +40,6 @@ export interface HostTarget {
 	refs: HostTargetRefs;
 }
 
-/** Token ProcessHost ops accept. lastKnownRefs is store-internal fallback, not a caller field. */
-export interface HostHandle {
-	kind?: HostKind;
-	primaryId?: string;
-	displayName?: string | null;
-	lastKnownRefs?: HostTargetRefs;
-}
-
-/** @deprecated Use HostHandle. */
-export type HostTargetRef = HostHandle;
-
 export interface HostInventory {
 	/** Backend-specific membership sets used by targetExists / reconcile */
 	primaryIds: Set<string>;
@@ -105,11 +94,11 @@ export interface ProcessHost {
 	isAvailable(): Promise<boolean>;
 	spawnWindow(input: HostSpawnWindowInput): Promise<HostTarget>;
 	getCurrentTarget(): Promise<HostTarget | null>;
-	focus(target: HostHandle): Promise<HostFocusResult>;
-	stop(target: HostHandle, options?: { force?: boolean }): Promise<HostStopResult>;
-	capture(target: HostHandle, options?: { lines?: number }): Promise<HostCaptureResult>;
+	focus(target: HostIdentity): Promise<HostFocusResult>;
+	stop(target: HostIdentity, options?: { force?: boolean }): Promise<HostStopResult>;
+	capture(target: HostIdentity, options?: { lines?: number }): Promise<HostCaptureResult>;
 	listInventory(): Promise<HostInventory>;
-	targetExists(target: HostHandle, inventory?: HostInventory): Promise<boolean>;
+	targetExists(target: HostIdentity, inventory?: HostInventory): Promise<boolean>;
 	/** Optional; TmuxProcessHost no-ops. HerdProcessHost → notification show + sound map. */
 	notify?(input: HostNotifyInput): Promise<void>;
 }
@@ -229,16 +218,6 @@ export function formatHost(host: HostIdentity | null | undefined): string {
 	return `${host.kind} ${name}`;
 }
 
-function parseStoredRefs(json: string | null | undefined): HostTargetRefs {
-	if (!json) return {};
-	try {
-		const parsed = JSON.parse(json) as HostTargetRefs;
-		return parsed && typeof parsed === "object" ? parsed : {};
-	} catch {
-		return {};
-	}
-}
-
 /** Persistable host_* columns from a live HostTarget. Does not write tmux_*. */
 export function hostPersistFromTarget(target: HostTarget): {
 	host: HostIdentity;
@@ -254,29 +233,6 @@ export function hostPersistFromTarget(target: HostTarget): {
 		hostPrimaryId: host.primaryId,
 		hostDisplayName: host.displayName,
 		hostTargetJson: JSON.stringify(target.refs ?? {}),
-	};
-}
-
-/** Store-internal: token + last-known refs from host_* / host_target_json. */
-export function hostHandleFromRecord(input: {
-	host?: HostIdentity | null;
-	hostKind?: HostKind | string | null;
-	hostPrimaryId?: string | null;
-	hostDisplayName?: string | null;
-	hostTargetJson?: string | null;
-}): HostHandle {
-	const refs = parseStoredRefs(input.hostTargetJson);
-	const kind =
-		input.host?.kind ??
-		parseHostKind(input.hostKind) ??
-		(refs.terminalId ? "herdr" : refs.paneId || refs.sessionId ? "tmux" : undefined);
-	const primaryId = input.host?.primaryId || input.hostPrimaryId || refs.terminalId || refs.paneId || refs.windowId || refs.sessionId;
-	const displayName = input.host?.displayName ?? input.hostDisplayName ?? refs.agentName ?? null;
-	return {
-		kind,
-		primaryId,
-		displayName,
-		lastKnownRefs: Object.keys(refs).length > 0 ? refs : undefined,
 	};
 }
 

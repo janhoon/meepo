@@ -9,7 +9,7 @@ import {
 	type HostInventory,
 	type HostNotifyInput,
 	type HostSpawnWindowInput,
-	type HostHandle,
+	type HostIdentity,
 	type HostStopResult,
 	type HostTarget,
 	type ProcessHost,
@@ -76,13 +76,13 @@ function sanitizeWindowName(title: string, entityId: string): string {
 	return `${base.slice(0, 24)}-${entityId.slice(-6)}`;
 }
 
-function refToTmuxInput(target: HostHandle): TmuxTargetInput {
-	const refs = target.lastKnownRefs ?? {};
+function identityToTmuxInput(target: HostIdentity): TmuxTargetInput {
+	const primary = target.primaryId;
 	return {
-		sessionId: refs.sessionId ?? null,
-		sessionName: refs.sessionName ?? null,
-		windowId: refs.windowId ?? null,
-		paneId: refs.paneId ?? (target.primaryId?.startsWith("%") ? target.primaryId : null),
+		sessionId: primary.startsWith("$") ? primary : null,
+		sessionName: target.displayName,
+		windowId: primary.startsWith("@") ? primary : null,
+		paneId: primary.startsWith("%") ? primary : null,
 	};
 }
 
@@ -177,23 +177,23 @@ export class TmuxProcessHost implements ProcessHost {
 		return toHostTarget(ids, windowName);
 	}
 
-	async focus(target: HostHandle): Promise<HostFocusResult> {
-		return focusTmuxTarget(refToTmuxInput(target));
+	async focus(target: HostIdentity): Promise<HostFocusResult> {
+		return focusTmuxTarget(identityToTmuxInput(target));
 	}
 
-	async stop(target: HostHandle, options?: { force?: boolean }): Promise<HostStopResult> {
-		return stopTmuxTarget(refToTmuxInput(target), options?.force ?? false);
+	async stop(target: HostIdentity, options?: { force?: boolean }): Promise<HostStopResult> {
+		return stopTmuxTarget(identityToTmuxInput(target), options?.force ?? false);
 	}
 
-	async capture(target: HostHandle, options?: { lines?: number }): Promise<HostCaptureResult> {
-		return captureTmuxTarget(refToTmuxInput(target), options?.lines ?? 200);
+	async capture(target: HostIdentity, options?: { lines?: number }): Promise<HostCaptureResult> {
+		return captureTmuxTarget(identityToTmuxInput(target), options?.lines ?? 200);
 	}
 
 	async listInventory(): Promise<HostInventory> {
 		return inventoryFromTmux();
 	}
 
-	async targetExists(target: HostHandle, inventory?: HostInventory): Promise<boolean> {
+	async targetExists(target: HostIdentity, inventory?: HostInventory): Promise<boolean> {
 		const inv = inventory ?? (await this.listInventory());
 		const tmuxInv = {
 			sessions: inv.raw?.sessions ?? new Set<string>(),
@@ -203,9 +203,9 @@ export class TmuxProcessHost implements ProcessHost {
 		};
 		// If raw missing, rebuild from primaryIds best-effort via tmuxTargetExists path.
 		if (!inv.raw) {
-			return tmuxTargetExists(refToTmuxInput(target), getTmuxInventory());
+			return tmuxTargetExists(identityToTmuxInput(target), getTmuxInventory());
 		}
-		return tmuxTargetExists(refToTmuxInput(target), tmuxInv);
+		return tmuxTargetExists(identityToTmuxInput(target), tmuxInv);
 	}
 
 	async notify(_input: HostNotifyInput): Promise<void> {

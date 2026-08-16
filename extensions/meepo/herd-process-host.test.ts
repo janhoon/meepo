@@ -347,15 +347,21 @@ describe("HerdProcessHost lifecycle (mocked CLI)", () => {
 					});
 				}
 				if (args[0] === "agent" && args[1] === "focus") {
-					assert.equal(args[2], "w4:p7");
+					assert.equal(args[2], "child-one");
 					return ok({ type: "ok" });
 				}
-				if (args[0] === "pane" && args[1] === "read") {
-					assert.equal(args[2], "w4:p7");
+				if (args[0] === "agent" && args[1] === "read") {
+					assert.equal(args[2], "child-one");
 					assert.ok(args.includes("recent"));
 					return ok({
-						type: "pane_read",
-						read: { text: "hello from pane", source: "recent", pane_id: "w4:p7" },
+						type: "agent_read",
+						read: { text: "hello from pane", source: "recent" },
+					});
+				}
+				if (args[0] === "agent" && args[1] === "get") {
+					assert.equal(args[2], "child-one");
+					return ok({
+						agent: { name: "child-one", terminal_id: "term_live", pane_id: "w4:p7" },
 					});
 				}
 				if (args[0] === "pane" && args[1] === "close") {
@@ -370,13 +376,6 @@ describe("HerdProcessHost lifecycle (mocked CLI)", () => {
 			kind: "herdr" as const,
 			primaryId: "term_live",
 			displayName: "child-one",
-			lastKnownRefs: {
-				terminalId: "term_live",
-				paneId: "w4:p7",
-				agentName: "child-one",
-				workspaceId: "w4",
-				tabId: "w4:t1",
-			},
 		};
 
 		assert.equal(await host.targetExists(ref), true);
@@ -412,7 +411,7 @@ describe("HerdProcessHost lifecycle (mocked CLI)", () => {
 			},
 		});
 		const result = await host.stop(
-			{ primaryId: "term_x", lastKnownRefs: { terminalId: "term_x", paneId: "w4:p9" } },
+			{ kind: "herdr", primaryId: "term_x", displayName: null },
 			{ force: true },
 		);
 		assert.equal(result.stopped, true);

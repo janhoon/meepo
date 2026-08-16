@@ -132,7 +132,7 @@ export function toAgentSummary(row: Record<string, unknown>): AgentSummary {
 		bridgeUpdatedAt: (row.bridge_updated_at as number | null) ?? null,
 		bridgeLastError: (row.bridge_last_error as string | null) ?? null,
 		host: hostIdentityFromRecord({
-			hostKind: parseHostKind(row.host_kind as string | null) ?? "tmux",
+			hostKind: parseHostKind(row.host_kind as string | null),
 			hostPrimaryId: (row.host_primary_id as string | null) ?? null,
 			hostDisplayName: (row.host_display_name as string | null) ?? null,
 		}),

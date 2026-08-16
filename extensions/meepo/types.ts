@@ -173,8 +173,6 @@ export interface SpawnSubagentInput {
 
 export interface SpawnSubagentResult {
 	childId: string;
-	/** @deprecated Use childId. */
-	agentId: string;
 	profile: string;
 	title: string;
 	taskId: string | null;

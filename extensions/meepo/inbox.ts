@@ -9,8 +9,6 @@ import {
 	listInboxMessages,
 	listMessagesForRecipient,
 	markAgentMessageRecipientsByIds,
-	markAgentMessageRecipientsByMessageIds,
-	markAgentMessages,
 } from "./registry.js";
 import type {
 	AgentActorContext,
@@ -88,17 +86,24 @@ export function markInbox(
 ): number {
 	if (ids.length === 0) return 0;
 	const recipientStatus =
-		status === "delivered" ? "read" : status === "acked" ? "acked" : status === "expired" ? "expired" : status === "failed" ? "failed" : "notified";
-	const v2ById = markAgentMessageRecipientsByIds(db, ids, recipientStatus, {
+		status === "delivered" || status === "acked" ? "acked" : status === "expired" ? "expired" : status === "failed" ? "failed" : "notified";
+	return markAgentMessageRecipientsByIds(db, ids, recipientStatus, {
 		recipientAgentId: options.childId,
 		transportKind: options.transportKind,
 	});
-	const v2ByMessage = markAgentMessageRecipientsByMessageIds(db, ids, recipientStatus, {
-		recipientAgentId: options.childId,
-		transportKind: options.transportKind,
+}
+
+/** Delivery queue for the RPC bridge. Inbox-owned wrap of the v2+leftover merge. */
+export function listChildDeliveryQueue(
+	db: DatabaseSync,
+	childId: string,
+	options: { includeDelivered?: boolean; limit?: number } = {},
+): AgentMessageRecord[] {
+	return listMessagesForRecipient(db, childId, {
+		targetKind: "child",
+		includeDelivered: options.includeDelivered,
+		limit: options.limit,
 	});
-	const legacy = markAgentMessages(db, ids, status);
-	return Math.max(v2ById, v2ByMessage, legacy);
 }
 
 export function publishDownward(

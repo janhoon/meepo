@@ -6,7 +6,7 @@ import {
 	ensureProcessHost,
 } from "./process-host-factory.js";
 import {
-	hostHandleFromRecord,
+	hostIdentityFromRecord,
 	hostPersistFromTarget,
 	parseProcessHostSelection,
 	resetProcessHostForTests,
@@ -173,25 +173,19 @@ describe("host target mapping", () => {
 		assert.equal("tmuxPaneId" in fields, false);
 	});
 
-	it("hostHandleFromRecord hydrates token plus last-known refs", () => {
-		const fromHost = hostHandleFromRecord({
+	it("hostIdentityFromRecord returns the token or null", () => {
+		const fromHost = hostIdentityFromRecord({
 			host: { kind: "tmux", primaryId: "%99", displayName: "named" },
-			hostTargetJson: JSON.stringify({ sessionId: "$9", paneId: "%99" }),
 		});
-		assert.equal(fromHost.kind, "tmux");
-		assert.equal(fromHost.primaryId, "%99");
-		assert.equal(fromHost.displayName, "named");
-		assert.equal(fromHost.lastKnownRefs?.paneId, "%99");
+		assert.deepEqual(fromHost, { kind: "tmux", primaryId: "%99", displayName: "named" });
 
-		const fromStored = hostHandleFromRecord({
+		const fromStored = hostIdentityFromRecord({
 			hostKind: "herdr",
 			hostPrimaryId: "term_abc",
 			hostDisplayName: "research-herdr",
-			hostTargetJson: JSON.stringify({ terminalId: "term_abc", paneId: "w1:p2" }),
 		});
-		assert.equal(fromStored.kind, "herdr");
-		assert.equal(fromStored.primaryId, "term_abc");
-		assert.equal(fromStored.lastKnownRefs?.paneId, "w1:p2");
+		assert.deepEqual(fromStored, { kind: "herdr", primaryId: "term_abc", displayName: "research-herdr" });
+		assert.equal(hostIdentityFromRecord({}), null);
 	});
 });
 

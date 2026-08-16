@@ -46,7 +46,7 @@ function toServiceSummary(row: Record<string, unknown>): ServiceSummary {
 		readyMatchedAt: (row.ready_matched_at as number | null) ?? null,
 		state: row.state as ServiceSummary["state"],
 		host: hostIdentityFromRecord({
-			hostKind: parseHostKind(row.host_kind as string | null) ?? "tmux",
+			hostKind: parseHostKind(row.host_kind as string | null),
 			hostPrimaryId: (row.host_primary_id as string | null) ?? null,
 			hostDisplayName: (row.host_display_name as string | null) ?? null,
 		}),
@@ -103,7 +103,7 @@ export function createService(db: DatabaseSync, input: CreateServiceInput): void
 		input.readySubstring ?? null,
 		input.readyMatchedAt ?? null,
 		input.state,
-		input.host?.kind ?? "tmux",
+		input.host?.kind ?? "",
 		input.host?.primaryId ?? null,
 		input.host?.displayName ?? null,
 		input.hostTargetJson ?? null,

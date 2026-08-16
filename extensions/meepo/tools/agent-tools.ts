@@ -3,16 +3,33 @@
  */
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import {
+	captureAgentById,
+	cleanupAgentTarget,
+	focusAgentById,
+	listCleanupCandidates,
+	reconcileAgents,
+	stopAgentById,
+} from "../child-fleet.js";
+import { updateFleetUi, setLastFocusedActiveAgentId } from "../coordinator-session.js";
+import {
 	applyHierarchyVisibilityToAgentFilters,
+	childRuntimeEnvironment,
+	getVisibleAgentIdsForTool,
+	loadAttentionGate,
+	resolveAgentFilters,
+	resolveAttentionFilters,
+	resolveRootInboxSenderIds,
+	resolveTaskFilters,
+	resolveToolActorContext,
+} from "../session-scope.js";
+import { spawnChildFromParams } from "../spawn-ops.js";
+import { resolveAdminAttentionV2Filters } from "../task-interactions.js";
+import {
 	buildAdminAttentionText,
 	buildAttentionV2Text,
 	buildInboxText,
 	buildInboxV2Text,
-	captureAgentById,
-	childRuntimeEnvironment,
-	cleanupAgentTarget,
 	defaultDownwardActionPolicy,
-	focusAgentById,
 	formatAgentDetails,
 	formatAgentLine,
 	formatAttentionGateWarning,
@@ -22,36 +39,19 @@ import {
 	formatReconcileResult,
 	formatSpawnSuccess,
 	formatStopResult,
-	getVisibleAgentIdsForTool,
-	listCleanupCandidates,
-	reconcileAgents,
-	resolveAdminAttentionV2Filters,
-	loadAttentionGate,
-	resolveAgentFilters,
-	resolveAttentionFilters,
-	resolveRootInboxSenderIds,
-	resolveTaskFilters,
-	resolveToolActorContext,
-	setLastFocusedActiveAgentId,
-	spawnChildFromParams,
-	stopAgentById,
 	summarizeFilters,
-	suppressDuplicateLegacyAttentionItems,
-	updateFleetUi,
-} from "../coordinator-helpers.js";
+} from "../formatters.js";
 import { getMeepoDb } from "../db.js";
 import { listInbox, listOpenAttention, markInbox } from "../inbox.js";
 import {
 	deliverQueuedMessagesViaBridge,
 	queueDownwardMessage,
 } from "../bridge-delivery.js";
-import { getProcessHost, hostHandleFromRecord } from "../process-host.js";
+import { getProcessHost } from "../process-host.js";
 import { getProjectKey } from "../project.js";
 import { missingHostTargetMessage } from "../rpc-bridge-control.js";
 import {
-	AgentMessagePermissionError,
 	canSendMessage,
-	createMessageWithRecipients,
 	fetchAgentInboxV2,
 	getAgent,
 	listAgentAttentionItemsV2,
@@ -169,35 +169,6 @@ export function register(registerTool: RegisterTool, pi: ExtensionAPI): void {
 				const recipient: AgentRecipientRef = { kind: "agent", agentId: agent.id };
 				const preflight = canSendMessage(db, { actor, recipient, messageKind: kind });
 				if (!preflight.allowed) {
-					try {
-						createMessageWithRecipients(db, {
-							actor,
-							recipients: [{ ...recipient, deliveryMode: params.deliveryMode ?? "immediate" }],
-							projectKey: agent.projectKey,
-							taskId: agent.taskId,
-							subjectAgentId: agent.id,
-							kind,
-							summary: params.summary,
-							bodyMarkdown: params.details ?? null,
-							payload: {
-								summary: params.summary,
-								details: params.details,
-								files: params.files,
-								actionPolicy,
-								inReplyToMessageId: params.inReplyToMessageId,
-							},
-							actionPolicy,
-							thread: { kind: "command", title: params.summary },
-						});
-					} catch (error) {
-						if (error instanceof AgentMessagePermissionError) {
-							const decision = error.decisions[0] ?? preflight;
-							throw new Error(
-								`Denied hierarchy message from ${decision.fromKind}:${decision.fromAgentId ?? "root"} to ${decision.toKind}:${decision.toAgentId ?? "-"} via ${decision.routeKind}: ${decision.decisionReason}`,
-							);
-						}
-						throw error;
-					}
 					throw new Error(
 						`Denied hierarchy message from ${preflight.fromKind}:${preflight.fromAgentId ?? "root"} to ${preflight.toKind}:${preflight.toAgentId ?? "-"} via ${preflight.routeKind}: ${preflight.decisionReason}`,
 					);
@@ -205,33 +176,10 @@ export function register(registerTool: RegisterTool, pi: ExtensionAPI): void {
 				if (["done", "error", "stopped", "lost"].includes(agent.state)) {
 					throw new Error(`Cannot message agent ${agent.id} because it is in terminal state ${agent.state}.`);
 				}
-				if (
-					!(await getProcessHost().targetExists(hostHandleFromRecord(agent)))
-				) {
+				if (!(agent.host && (await getProcessHost().targetExists(agent.host)))) {
 					throw new Error(missingHostTargetMessage(agent.id));
 				}
-				const messageResult = createMessageWithRecipients(db, {
-					actor,
-					recipients: [{ ...recipient, deliveryMode: params.deliveryMode ?? "immediate", transportKind: "inbox" }],
-					projectKey: agent.projectKey,
-					orgId: agent.orgId,
-					taskId: agent.taskId,
-					subjectAgentId: agent.id,
-					kind,
-					summary: params.summary,
-					bodyMarkdown: params.details ?? null,
-					payload: {
-						summary: params.summary,
-						details: params.details,
-						files: params.files,
-						actionPolicy,
-						inReplyToMessageId: params.inReplyToMessageId,
-					},
-					actionPolicy,
-					thread: { kind: "command", title: params.summary },
-				});
-				const route = messageResult.routes[0] ?? preflight;
-				queueDownwardMessage(
+				const messageId = queueDownwardMessage(
 					agent,
 					kind,
 					{
@@ -240,13 +188,12 @@ export function register(registerTool: RegisterTool, pi: ExtensionAPI): void {
 						files: params.files,
 						actionPolicy,
 						inReplyToMessageId: params.inReplyToMessageId,
-						v2MessageId: messageResult.message.id,
-						v2RecipientRowId: messageResult.recipients[0]?.id,
-						routeKind: route.routeKind,
+						routeKind: preflight.routeKind,
 					},
 					params.deliveryMode ?? "immediate",
 					actor,
 				);
+				const route = preflight;
 				const liveDelivery = await deliverQueuedMessagesViaBridge(agent.id);
 				updateFleetUi(ctx);
 				const senderText = actor.kind === "agent" ? `agent:${actor.agentId}` : "root";
@@ -261,13 +208,11 @@ export function register(registerTool: RegisterTool, pi: ExtensionAPI): void {
 						recipient,
 						kind,
 						actionPolicy,
-						message: messageResult.message,
-						recipients: messageResult.recipients,
-						routes: messageResult.routes,
+						messageId,
 						inReplyToMessageId: params.inReplyToMessageId ?? null,
 						deliveryMode: params.deliveryMode ?? "immediate",
 						liveDelivery,
-						readReceipt: { status: liveDelivery.delivered > 0 ? "acked" : "queued", recipientRowIds: messageResult.recipients.map((item) => item.id) },
+						readReceipt: { status: liveDelivery.delivered > 0 ? "acked" : "queued" },
 					},
 				};
 			},

@@ -25,13 +25,10 @@ import {
 	createMessageWithRecipients,
 	getAgent,
 	listActiveAgentEdges,
-	listMessagesForRecipient,
-	markAgentMessageRecipientsByIds,
-	markAgentMessageRecipientsByMessageIds,
-	markAgentMessages,
 	resolveAgentActorContext,
 	updateAgent,
 } from "./registry.js";
+import { listChildDeliveryQueue, markInbox } from "./inbox.js";
 import { truncateText } from "./text-util.js";
 import type {
 	AgentMessageRecord,
@@ -217,29 +214,18 @@ export function registerChildRuntime(
 
 	function ackPendingPollFallbackDeliveries(): void {
 		const db = getMeepoDb();
-		if (pendingAckIds.size > 0) {
-			markAgentMessages(db, [...pendingAckIds], "acked");
+		const pending = [...pendingAckIds, ...pendingV2AckRecipientRowIds];
+		if (pending.length > 0) {
+			markInbox(db, pending, "acked", { childId: environment.childId, transportKind: "poll_fallback" });
 			pendingAckIds.clear();
-		}
-		if (pendingV2AckRecipientRowIds.size > 0) {
-			markAgentMessageRecipientsByIds(db, [...pendingV2AckRecipientRowIds], "acked", {
-				recipientAgentId: environment.childId,
-				transportKind: "poll_fallback",
-			});
 			pendingV2AckRecipientRowIds.clear();
 		}
-		if (pendingV2AckMessageIds.size > 0) {
-			markAgentMessageRecipientsByMessageIds(db, [...pendingV2AckMessageIds], "acked", {
-				recipientAgentId: environment.childId,
-				transportKind: "poll_fallback",
-			});
-			pendingV2AckMessageIds.clear();
-		}
+		pendingV2AckMessageIds.clear();
 	}
 
 	async function drainDownwardMessages(): Promise<void> {
 		const db = getMeepoDb();
-		const messages = listMessagesForRecipient(db, environment.childId, { targetKind: "child", limit: 25 });
+		const messages = listChildDeliveryQueue(db, environment.childId, { limit: 25 });
 		for (const message of messages) {
 			try {
 				pi.sendMessage(
@@ -251,21 +237,12 @@ export function registerChildRuntime(
 					},
 					getDeliveryOptions(message),
 				);
-				markAgentMessages(db, [message.id], "delivered");
 				const v2Payload = getV2Payload(message);
-				if (v2Payload?.v2RecipientRowId) {
-					markAgentMessageRecipientsByIds(db, [v2Payload.v2RecipientRowId], "read", {
-						recipientAgentId: environment.childId,
-						transportKind: "poll_fallback",
-					});
-					pendingV2AckRecipientRowIds.add(v2Payload.v2RecipientRowId);
-				} else if (v2Payload?.v2MessageId) {
-					markAgentMessageRecipientsByMessageIds(db, [v2Payload.v2MessageId], "read", {
-						recipientAgentId: environment.childId,
-						transportKind: "poll_fallback",
-					});
-					pendingV2AckMessageIds.add(v2Payload.v2MessageId);
-				}
+				markInbox(db, [v2Payload?.v2RecipientRowId ?? message.id], "delivered", {
+					childId: environment.childId,
+					transportKind: "poll_fallback",
+				});
+				if (v2Payload?.v2RecipientRowId) pendingV2AckRecipientRowIds.add(v2Payload.v2RecipientRowId);
 				pendingAckIds.add(message.id);
 				appendRunEvent(environment, "downward_delivered", `Delivered ${message.kind}`, {
 					messageId: message.id,

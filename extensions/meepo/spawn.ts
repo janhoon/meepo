@@ -659,7 +659,6 @@ export async function spawnSubagent(input: SpawnSubagentInput): Promise<SpawnSub
 	};
 	return {
 		childId: agentId,
-		agentId,
 		profile: input.profile.name,
 		title: input.title,
 		taskId: input.taskId,
