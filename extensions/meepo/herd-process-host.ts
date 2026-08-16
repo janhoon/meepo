@@ -145,10 +145,9 @@ function resolvePaneId(target: HostTargetRef): string | null {
 	return target.refs?.paneId || null;
 }
 
-function launchArgvFromCommand(launchCommand: string): string[] {
-	// Meepo spawn paths pass a shell fragment (e.g. exec '/path/launch.sh').
-	// herdr 0.8 `pane run` and `agent start --` take real argv.
-	return ["bash", "-lc", launchCommand];
+/** herdr 0.8 `pane run` types COMMAND... as one shell line. Split argv drops quotes. */
+function launchLineFromCommand(launchCommand: string): string {
+	return launchCommand.trim();
 }
 
 function candidateHostNames(desiredName: string, entityId: string): string[] {
@@ -453,7 +452,7 @@ export class HerdProcessHost implements ProcessHost {
 
 		const current = await this.getCurrentTarget();
 		const workspaceId = current?.refs.workspaceId;
-		const argv = launchArgvFromCommand(input.launchCommand);
+		const launchLine = launchLineFromCommand(input.launchCommand);
 
 		// One tab per child. cwd belongs on tab create (herdr 0.8 dropped agent start --cwd).
 		const tabArgs = ["tab", "create", "--no-focus"];
@@ -477,7 +476,7 @@ export class HerdProcessHost implements ProcessHost {
 			const shell = this.waitForShellPane(rootPaneId);
 			// herdr 0.8 `agent start --kind pi` launches stock pi. Meepo children/services
 			// must run the RPC-bridge launch script, so occupy the cwd tab with pane run.
-			this.invoke(["pane", "run", rootPaneId, ...argv]);
+			this.invoke(["pane", "run", rootPaneId, launchLine]);
 			const pane = this.paneInfo(rootPaneId) ?? shell;
 			const named = this.assignPaneName(rootPaneId, desiredName, input.entityId);
 			return toHostTarget(

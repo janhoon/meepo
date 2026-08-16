@@ -100,7 +100,8 @@ describe("HerdProcessHost lifecycle (mocked CLI)", () => {
 				}
 				if (args[0] === "pane" && args[1] === "run") {
 					assert.equal(args[2], "w4:pRoot");
-					assert.deepEqual(args.slice(3), ["bash", "-lc", "exec '/tmp/launch.sh'"]);
+					assert.deepEqual(args.slice(3), ["exec '/tmp/launch.sh'"]);
+					assert.notEqual(args[3], "bash");
 					return ok({ type: "ok" });
 				}
 				if (args[0] === "agent" && args[1] === "rename") {
