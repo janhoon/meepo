@@ -260,8 +260,60 @@ describe("HerdProcessHost lifecycle (mocked CLI)", () => {
 		});
 		assert.equal(renameAttempts, 2);
 		assert.notEqual(renamed[1], renamed[0]);
+		assert.ok(renamed.every((name) => name.length <= 32));
 		assert.equal(target.displayName, renamed[1]);
 		assert.equal(target.primaryId, "term_root");
+	});
+
+	it("spawnWindow keeps the pane when rename has no herdr occupant yet", async () => {
+		const host = createHerdProcessHost({
+			isAvailableProbe: () => true,
+			runHerdr: (args) => {
+				if (args[0] === "api" && args[1] === "snapshot") {
+					return ok({ snapshot: { panes: [], agents: [] }, type: "session_snapshot" });
+				}
+				if (args[0] === "pane" && args[1] === "current") {
+					return ok({
+						type: "pane_current",
+						pane: { terminal_id: "term_p", pane_id: "w4:p1", workspace_id: "w4", tab_id: "w4:t1" },
+					});
+				}
+				if (args[0] === "tab" && args[1] === "create") {
+					return ok({
+						type: "tab_created",
+						tab: { tab_id: "w4:t9", workspace_id: "w4", label: "Research" },
+						root_pane: { pane_id: "w4:pRoot", terminal_id: "term_root", tab_id: "w4:t9", workspace_id: "w4" },
+					});
+				}
+				if (args[0] === "pane" && args[1] === "get") {
+					return ok({
+						type: "pane_info",
+						pane: {
+							pane_id: "w4:pRoot",
+							terminal_id: "term_root",
+							tab_id: "w4:t9",
+							workspace_id: "w4",
+							cwd: "/tmp",
+						},
+					});
+				}
+				if (args[0] === "pane" && args[1] === "run") return ok({ type: "ok" });
+				if (args[0] === "agent" && args[1] === "rename") {
+					return err("agent_not_found", "agent target w4:pRoot not found");
+				}
+				return err("unexpected", args.join(" "));
+			},
+		});
+
+		const target = await host.spawnWindow({
+			title: "Research",
+			entityId: "sa_abc123",
+			launchCommand: "exec '/tmp/launch.sh'",
+			pool: "agents",
+			cwd: "/tmp",
+		});
+		assert.equal(target.refs.paneId, "w4:pRoot");
+		assert.equal(target.displayName, "research");
 	});
 
 	it("focus / capture / stop / targetExists round-trip on terminal_id", async () => {

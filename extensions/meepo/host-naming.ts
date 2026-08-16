@@ -61,3 +61,8 @@ export function fallbackServiceHostName(title: string, entityId: string, invento
 	const desired = serviceHostName(title);
 	return allocateUniqueHostName({ desired, entityId, inventory });
 }
+
+/** Record a just-claimed name so a later race retry stays unique. */
+export function rememberAllocatedHostName(inventory: HostInventory, name: string): void {
+	inventory.displayNames.add(name);
+}

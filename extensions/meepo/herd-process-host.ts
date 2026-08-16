@@ -1,20 +1,19 @@
 /**
  * HerdProcessHost — ProcessHost adapter for herdr named agents.
  *
- * Policy: wayfinder #18 (port), #19 (naming/layout/stop), research herdr 0.7.x lifecycle.
- * Layout: **one new tab per child/service** in the current workspace (not a split pane in the
- * coordinator tab — panes burn screen real estate). herdr 0.8 flow:
- * `tab create --cwd --no-focus` → wait for a shell pane → `agent start --kind pi --pane`
- * (or `pane run` for services). cwd is a tab-create flag, never `agent start --cwd`.
- * Durable host id: terminal_id. Stop: pane close (last pane removes the tab). Capture: agent read.
- *
- * Small-model English namer is fog until model/flags are specified; slug fallback is used.
+ * Policy: wayfinder #18 (port), #19 (naming/layout/stop).
+ * herdr 0.8 layout: one new tab per child/service in the current workspace.
+ * Flow: `tab create --cwd --no-focus` → `pane run <launch>` → `agent rename`.
+ * Durable host id: terminal_id. Stop: pane close (last pane removes the tab).
+ * Capture/focus: pane id or live name (not terminal_id).
  */
 
 import { spawnSync } from "node:child_process";
 import {
+	allocateUniqueHostName,
 	fallbackAgentHostName,
 	fallbackServiceHostName,
+	rememberAllocatedHostName,
 } from "./host-naming.js";
 import {
 	type HostCaptureResult,
@@ -64,6 +63,7 @@ interface HerdrAgentInfo {
 	tab_id?: string;
 	workspace_id?: string;
 	cwd?: string;
+	foreground_cwd?: string;
 	focused?: boolean;
 	agent_status?: string;
 	agent?: string | null;
@@ -145,24 +145,8 @@ function resolvePaneId(target: HostTargetRef): string | null {
 	return target.refs?.paneId || null;
 }
 
-/** herdr 0.8 `pane run` types COMMAND... as one shell line. Split argv drops quotes. */
-function launchLineFromCommand(launchCommand: string): string {
-	return launchCommand.trim();
-}
-
-function candidateHostNames(desiredName: string, entityId: string): string[] {
-	const names = [desiredName];
-	for (let n = 2; n <= 6; n += 1) {
-		const base = desiredName.length > 40 ? desiredName.slice(0, 40) : desiredName;
-		names.push(`${base}-${n}`);
-	}
-	const entitySuffix = entityId.replace(/[^a-zA-Z0-9]/g, "").slice(-6);
-	if (entitySuffix) names.push(`${desiredName.slice(0, 40)}-${entitySuffix}`);
-	return names;
-}
-
-function sleepSync(ms: number): void {
-	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /** Tab label for herdr UI; keep short and shell-safe-ish. */
@@ -392,17 +376,6 @@ export class HerdProcessHost implements ProcessHost {
 		return false;
 	}
 
-	/** Best-effort close of the empty shell pane created with a new tab. */
-	private closeOrphanRootPane(rootPaneId: string | null | undefined, agentPaneId: string | null | undefined): void {
-		if (!rootPaneId) return;
-		if (agentPaneId && rootPaneId === agentPaneId) return;
-		try {
-			this.invoke(["pane", "close", rootPaneId]);
-		} catch {
-			// Agent still runs; leftover shell pane is annoying but non-fatal.
-		}
-	}
-
 	private closeTabBestEffort(tabId: string | null | undefined): void {
 		if (!tabId) return;
 		try {
@@ -418,25 +391,22 @@ export class HerdProcessHost implements ProcessHost {
 		return pane ?? null;
 	}
 
-	/** herdr 0.8 `agent start` needs an interactive shell, not a brand-new empty pane. */
-	private waitForShellPane(paneId: string, timeoutMs = 8_000): HerdrAgentInfo {
+	/** Wait until tab create has a pane_id and cwd. `pane run` needs that shell. */
+	private async waitForPaneCwd(paneId: string, timeoutMs = 8_000): Promise<HerdrAgentInfo> {
 		const deadline = Date.now() + timeoutMs;
 		let last: HerdrAgentInfo | null = null;
 		let lastError: Error | undefined;
 		while (Date.now() < deadline) {
 			try {
 				last = this.paneInfo(paneId);
-				const title = last?.terminal_title ?? "";
 				const cwd = last?.cwd ?? last?.foreground_cwd;
-				const looksLikeShell = Boolean(cwd || title.includes("@") || title.includes(":"));
-				const occupied = Boolean(last?.agent);
-				if (last && looksLikeShell && !occupied) return last;
+				if (last?.pane_id && cwd) return last;
 			} catch (error) {
 				lastError = error as Error;
 			}
-			sleepSync(150);
+			await sleep(150);
 		}
-		throw lastError ?? new Error(`herdr pane ${paneId} did not become an available shell: ${JSON.stringify(last)}`);
+		throw lastError ?? new Error(`herdr pane ${paneId} did not report cwd: ${JSON.stringify(last)}`);
 	}
 
 	async spawnWindow(input: HostSpawnWindowInput): Promise<HostTarget> {
@@ -452,9 +422,8 @@ export class HerdProcessHost implements ProcessHost {
 
 		const current = await this.getCurrentTarget();
 		const workspaceId = current?.refs.workspaceId;
-		const launchLine = launchLineFromCommand(input.launchCommand);
+		const launchLine = input.launchCommand.trim();
 
-		// One tab per child. cwd belongs on tab create (herdr 0.8 dropped agent start --cwd).
 		const tabArgs = ["tab", "create", "--no-focus"];
 		if (workspaceId) tabArgs.push("--workspace", workspaceId);
 		if (input.cwd) tabArgs.push("--cwd", input.cwd);
@@ -473,12 +442,10 @@ export class HerdProcessHost implements ProcessHost {
 		const { tabId, rootPaneId } = createdTab;
 
 		try {
-			const shell = this.waitForShellPane(rootPaneId);
-			// herdr 0.8 `agent start --kind pi` launches stock pi. Meepo children/services
-			// must run the RPC-bridge launch script, so occupy the cwd tab with pane run.
+			const shell = await this.waitForPaneCwd(rootPaneId);
 			this.invoke(["pane", "run", rootPaneId, launchLine]);
 			const pane = this.paneInfo(rootPaneId) ?? shell;
-			const named = this.assignPaneName(rootPaneId, desiredName, input.entityId);
+			const named = this.assignPaneName(rootPaneId, desiredName, input.entityId, inventory);
 			return toHostTarget(
 				{
 					...pane,
@@ -495,19 +462,30 @@ export class HerdProcessHost implements ProcessHost {
 		}
 	}
 
-	private assignPaneName(paneId: string, desiredName: string, entityId: string): string {
-		for (const name of candidateHostNames(desiredName, entityId)) {
+	private assignPaneName(
+		paneId: string,
+		desiredName: string,
+		entityId: string,
+		inventory: HostInventory,
+	): string {
+		let name = desiredName;
+		for (let attempt = 0; attempt < 8; attempt += 1) {
 			try {
 				this.invoke(["agent", "rename", paneId, name]);
 				return name;
 			} catch (error) {
 				const err = error as Error & { herdrCode?: string };
-				if (err.herdrCode === "agent_name_taken") continue;
-				// Rename is cosmetic; keep the pane even if herdr has no occupant yet.
-				return desiredName;
+				if (err.herdrCode === "agent_name_taken") {
+					rememberAllocatedHostName(inventory, name);
+					name = allocateUniqueHostName({ desired: desiredName, entityId, inventory });
+					continue;
+				}
+				// pane run has not produced a herdr-detected agent yet; keep pane_id as the target.
+				if (err.herdrCode === "agent_not_found") return desiredName;
+				throw error;
 			}
 		}
-		return desiredName;
+		throw new Error(`herdr agent rename failed for all 32-char candidates near ${desiredName}`);
 	}
 
 	async focus(target: HostTargetRef): Promise<HostFocusResult> {
@@ -519,7 +497,7 @@ export class HerdProcessHost implements ProcessHost {
 			return {
 				focused: false,
 				command,
-				reason: "Missing herdr target (terminal_id / displayName / pane_id).",
+				reason: "Missing herdr target (displayName / pane_id).",
 			};
 		}
 		try {
@@ -610,33 +588,11 @@ export class HerdProcessHost implements ProcessHost {
 		const lines = Math.max(1, options?.lines ?? 200);
 		const paneId = resolvePaneId(target);
 		const focusTarget = resolveFocusTarget(target);
-		if (paneId) {
-			const command = `herdr pane read ${shellQuote(paneId)} --source recent --lines ${lines}`;
-			const envelope = this.invoke([
-				"pane",
-				"read",
-				paneId,
-				"--source",
-				"recent",
-				"--lines",
-				String(lines),
-			]);
-			const read = (envelope.result as { read?: { text?: string } } | undefined)?.read;
-			return { content: read?.text ?? "", command };
-		}
-		if (!focusTarget) {
-			throw new Error("Missing herdr target for capture (pane_id / displayName).");
-		}
-		const command = `herdr agent read ${shellQuote(focusTarget)} --source recent --lines ${lines}`;
-		const envelope = this.invoke([
-			"agent",
-			"read",
-			focusTarget,
-			"--source",
-			"recent",
-			"--lines",
-			String(lines),
-		]);
+		const kind = paneId ? "pane" : "agent";
+		const id = paneId ?? focusTarget;
+		if (!id) throw new Error("Missing herdr target for capture (pane_id / displayName).");
+		const command = `herdr ${kind} read ${shellQuote(id)} --source recent --lines ${lines}`;
+		const envelope = this.invoke([kind, "read", id, "--source", "recent", "--lines", String(lines)]);
 		const read = (envelope.result as { read?: { text?: string } } | undefined)?.read;
 		return { content: read?.text ?? "", command };
 	}

@@ -9,7 +9,7 @@
 
 import { spawnSync } from "node:child_process";
 import type { MeepoConfig } from "./config.js";
-import { probeHerdrCompatible } from "./herdr-compat.js";
+import { type HerdrProbe, probeHerdr } from "./herdr-compat.js";
 
 export type HostKind = "tmux" | "herdr";
 export type ProcessHostSelection = "auto" | HostKind;
@@ -126,6 +126,7 @@ export interface ResolveProcessHostInput {
 	probes?: {
 		herdrAvailable?: () => boolean;
 		tmuxAvailable?: () => boolean;
+		probeHerdr?: () => HerdrProbe;
 	};
 }
 
@@ -142,11 +143,30 @@ export function commandExists(command: string): boolean {
 	return result.status === 0;
 }
 
-/** herdr on PATH, `--version` succeeds, and the version/protocol is in Meepo's supported range. */
+export function resolveCommandPath(command: string): string | null {
+	const result = spawnSync("bash", ["-lc", `command -v ${shellQuote(command)}`], { encoding: "utf8" });
+	const found = result.stdout?.trim();
+	return found || null;
+}
+
+/** Compiled `pi` sets process.execPath to itself and cannot run rpc-bridge.mjs. */
+export function resolveNodeExecutable(preferred?: string | null): string {
+	const base = (preferred ?? "").replace(/\\/g, "/").split("/").pop() ?? "";
+	if (base === "node" || base === "nodejs") return preferred as string;
+	const fromPath = resolveCommandPath("node");
+	if (fromPath) return fromPath;
+	throw new Error(
+		"Meepo child launch needs a Node executable on PATH. process.execPath is not Node (compiled pi?).",
+	);
+}
+
+/** herdr on PATH and in the supported 0.8.x / protocol 20 range. */
 export function probeHerdrAvailable(): boolean {
-	return probeHerdrCompatible({
-		commandExists: () => commandExists("herdr"),
-	});
+	return (
+		probeHerdr({
+			commandExists: () => commandExists("herdr"),
+		}).status === "ok"
+	);
 }
 
 export function probeTmuxAvailable(): boolean {

@@ -8,47 +8,60 @@ import {
 	type ResolveProcessHostInput,
 	freezeProcessHost,
 	getFrozenProcessHost,
-	probeHerdrAvailable,
 	probeTmuxAvailable,
 	resolveProcessHostSelection,
 } from "./process-host.js";
 import {
-	assertSupportedHerdr,
-	readHerdrVersion,
+	type HerdrProbe,
+	missingHerdrMessage,
+	probeHerdr,
+	unsupportedHerdrMessage,
 } from "./herdr-compat.js";
 import { createHerdProcessHost, HERD_PROCESS_HOST_LIFECYCLE_READY } from "./herd-process-host.js";
 import { createTmuxProcessHost } from "./tmux-process-host.js";
 
+function resolveHerdrProbe(input: ResolveProcessHostInput): () => HerdrProbe {
+	if (input.probes?.probeHerdr) return input.probes.probeHerdr;
+	if (input.probes?.herdrAvailable) {
+		return () =>
+			input.probes!.herdrAvailable!()
+				? { status: "ok", info: { version: "0.8.0", protocol: 20, raw: "test" } }
+				: { status: "missing" };
+	}
+	return () => probeHerdr();
+}
+
 /**
  * Build a ProcessHost for the resolved selection without freezing the singleton.
  * Explicit `herdr` + failed probe throws (no silent fallback).
- * Default selection is `herdr`. `auto` prefers herdr when lifecycle-ready and probe succeeds; else tmux.
+ * Default selection is `herdr`. `auto` prefers herdr when lifecycle-ready and probe is ok; else tmux.
  */
 export function createProcessHost(input: ResolveProcessHostInput = {}): ProcessHost {
 	const selection = resolveProcessHostSelection(input);
-	const herdrOk = input.probes?.herdrAvailable ?? probeHerdrAvailable;
 	const tmuxOk = input.probes?.tmuxAvailable ?? probeTmuxAvailable;
 	const options = input.hostOptions ?? {};
+	const herdrProbe = resolveHerdrProbe(input);
 
 	if (selection === "tmux") {
 		return createTmuxProcessHost(options);
 	}
+
+	const herdr = herdrProbe();
 	if (selection === "herdr") {
-		if (!herdrOk()) {
-			const info = readHerdrVersion();
-			if (info) assertSupportedHerdr(info);
-			throw new Error(
-				"MEEPO_PROCESS_HOST=herdr (or runtime.processHost=herdr) but herdr is not available on PATH / failed version probe.",
-			);
+		switch (herdr.status) {
+			case "ok":
+				return createHerdProcessHost(options);
+			case "unsupported":
+				throw new Error(unsupportedHerdrMessage(herdr.info));
+			case "missing":
+				throw new Error(missingHerdrMessage());
 		}
-		return createHerdProcessHost(options);
 	}
-	// auto — prefer herdr when binary works *and* lifecycle adapter is ready.
-	if (herdrOk() && HERD_PROCESS_HOST_LIFECYCLE_READY) {
+
+	if (herdr.status === "ok" && HERD_PROCESS_HOST_LIFECYCLE_READY) {
 		return createHerdProcessHost(options);
 	}
 	if (!tmuxOk()) {
-		// Still return tmux host; spawn will throw with a clear missing-binary error.
 		return createTmuxProcessHost(options);
 	}
 	return createTmuxProcessHost(options);

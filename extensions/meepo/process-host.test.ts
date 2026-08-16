@@ -11,6 +11,7 @@ import {
 	hostTargetRefFromLegacy,
 	parseProcessHostSelection,
 	resetProcessHostForTests,
+	resolveNodeExecutable,
 	resolveProcessHostSelection,
 	type HostTarget,
 } from "./process-host.js";
@@ -100,8 +101,34 @@ describe("process host selection", () => {
 					selection: "herdr",
 					probes: { herdrAvailable: () => false, tmuxAvailable: () => true },
 				}),
-			/herdr is not available|Unsupported herdr/,
+			/herdr is not available/,
 		);
+	});
+
+	it("explicit herdr throws unsupported from the same probe result", () => {
+		assert.throws(
+			() =>
+				createProcessHost({
+					selection: "herdr",
+					probes: {
+						probeHerdr: () => ({
+							status: "unsupported",
+							info: { version: "0.7.4", protocol: 16, raw: "herdr 0.7.4" },
+						}),
+						tmuxAvailable: () => true,
+					},
+				}),
+			/Unsupported herdr 0\.7\.4/,
+		);
+	});
+
+	it("resolveNodeExecutable keeps a node path and rejects compiled pi", () => {
+		assert.equal(resolveNodeExecutable("/usr/bin/node"), "/usr/bin/node");
+		assert.notEqual(
+			resolveNodeExecutable("/home/janhoon/.local/share/mise/installs/pi/0.84.2/pi/pi"),
+			"/home/janhoon/.local/share/mise/installs/pi/0.84.2/pi/pi",
+		);
+		assert.match(resolveNodeExecutable("/home/janhoon/.local/share/mise/installs/pi/0.84.2/pi/pi"), /node/);
 	});
 
 	it("explicit herdr returns HerdProcessHost when probe succeeds", () => {

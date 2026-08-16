@@ -31,7 +31,7 @@ import type {
 } from "./types.js";
 import { getMeepoDb } from "./db.js";
 import { getProjectKey } from "./project.js";
-import { getProcessHost, hostFieldsFromTarget } from "./process-host.js";
+import { getProcessHost, hostFieldsFromTarget, resolveNodeExecutable } from "./process-host.js";
 import { buildBridgeLaunchCommand } from "./rpc-bridge-control.js";
 
 const RPC_BRIDGE_ENTRY_SCRIPT = fileURLToPath(new URL("./rpc-bridge.mjs", import.meta.url));
@@ -223,7 +223,7 @@ function buildBridgeConfig(options: CreateRunArtifactsOptions, paths: SubagentRu
 function buildLaunchScriptContent(options: CreateRunArtifactsOptions, paths: SubagentRunPaths): string {
 	// Identical launch contract on tmux and herdr (wayfinder #20/#24): bridge is pane main process.
 	const launch = buildBridgeLaunchCommand({
-		nodeExecutable: process.execPath,
+		nodeExecutable: resolveNodeExecutable(process.execPath),
 		bridgeEntryScript: RPC_BRIDGE_ENTRY_SCRIPT,
 		bridgeConfigFile: paths.bridgeConfigFile,
 		shellQuote,

@@ -4,12 +4,11 @@ import {
 	HERDR_MAX_EXCLUSIVE_VERSION,
 	HERDR_MIN_VERSION,
 	HERDR_REQUIRED_PROTOCOL,
-	assertSupportedHerdr,
 	compareHerdrVersions,
 	formatUnsupportedHerdrVersion,
 	isSupportedHerdrVersion,
 	parseHerdrVersionToken,
-	probeHerdrCompatible,
+	probeHerdr,
 	readHerdrVersion,
 } from "./herdr-compat.js";
 
@@ -28,19 +27,11 @@ describe("herdr compat", () => {
 		assert.ok(compareHerdrVersions(HERDR_MIN_VERSION, HERDR_MAX_EXCLUSIVE_VERSION) < 0);
 	});
 
-	it("assertSupportedHerdr names the required range", () => {
-		assert.throws(
-			() => assertSupportedHerdr({ version: "0.7.4", protocol: 16, raw: "herdr 0.7.4" }),
-			/Unsupported herdr 0\.7\.4/,
-		);
-		assert.throws(
-			() => assertSupportedHerdr({ version: "0.8.0", protocol: 16, raw: "herdr 0.8.0" }),
-			/protocol 16/,
-		);
-		assert.doesNotThrow(() =>
-			assertSupportedHerdr({ version: "0.8.0", protocol: HERDR_REQUIRED_PROTOCOL, raw: "herdr 0.8.0" }),
-		);
+	it("formats the required range", () => {
+		assert.match(formatUnsupportedHerdrVersion("0.7.4", 16), /Unsupported herdr 0\.7\.4 \(protocol 16\)/);
 		assert.match(formatUnsupportedHerdrVersion("0.7.4", 16), /MEEPO_PROCESS_HOST=tmux/);
+		assert.match(formatUnsupportedHerdrVersion("0.8.0", 16), /protocol 20/);
+		assert.ok(HERDR_REQUIRED_PROTOCOL === 20);
 	});
 
 	it("readHerdrVersion pulls version and protocol from CLI text", () => {
@@ -60,21 +51,21 @@ describe("herdr compat", () => {
 		assert.deepEqual(info, { version: "0.8.0", protocol: 20, raw: "herdr 0.8.0" });
 	});
 
-	it("probeHerdrCompatible is false for missing or old herdr", () => {
-		assert.equal(probeHerdrCompatible({ commandExists: () => false }), false);
-		assert.equal(
-			probeHerdrCompatible({
+	it("probeHerdr returns missing / unsupported / ok without a second CLI read", () => {
+		assert.equal(probeHerdr({ commandExists: () => false }).status, "missing");
+		assert.deepEqual(
+			probeHerdr({
 				commandExists: () => true,
 				readVersion: () => ({ version: "0.7.4", protocol: 16, raw: "herdr 0.7.4" }),
 			}),
-			false,
+			{ status: "unsupported", info: { version: "0.7.4", protocol: 16, raw: "herdr 0.7.4" } },
 		);
 		assert.equal(
-			probeHerdrCompatible({
+			probeHerdr({
 				commandExists: () => true,
 				readVersion: () => ({ version: "0.8.0", protocol: 20, raw: "herdr 0.8.0" }),
-			}),
-			true,
+			}).status,
+			"ok",
 		);
 	});
 });

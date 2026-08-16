@@ -5,7 +5,6 @@
  * herdr (or tmux) only hosts the process; delivery never uses host PTY typing.
  */
 
-import { spawnSync } from "node:child_process";
 import type { DeliveryMode } from "./types.js";
 
 export type RpcBridgeDownwardCommand = "prompt" | "steer" | "follow_up";
@@ -35,34 +34,14 @@ export function isSharedRpcBridgeTransport(transportKind: string | null | undefi
  * Launch argv fragment used as ProcessHost launchCommand on every backend.
  * Host adapters must run this as the pane main process (bridge supervises pi).
  */
-export function looksLikeNodeExecutable(executable: string): boolean {
-	const base = executable.replace(/\\/g, "/").split("/").pop() ?? executable;
-	return base === "node" || base === "nodejs" || /^node\d/.test(base);
-}
-
-/**
- * The RPC bridge is a Node script. Compiled `pi` sets process.execPath to itself
- * and rejects `--config`, so the child pane exits immediately.
- */
-export function resolveNodeExecutable(preferred?: string | null): string {
-	if (preferred && looksLikeNodeExecutable(preferred)) return preferred;
-	const result = spawnSync("bash", ["-lc", "command -v node"], { encoding: "utf8" });
-	const found = result.stdout?.trim();
-	if (found) return found;
-	throw new Error(
-		"Meepo child launch needs a Node executable on PATH. process.execPath is not Node (compiled pi?).",
-	);
-}
-
 export function buildBridgeLaunchCommand(options: {
-	nodeExecutable?: string | null;
+	nodeExecutable: string;
 	bridgeEntryScript: string;
 	bridgeConfigFile: string;
 	shellQuote?: (value: string) => string;
 }): string {
 	const q = options.shellQuote ?? ((value: string) => `'${value.replace(/'/g, `'"'"'`)}'`);
-	const nodeExecutable = resolveNodeExecutable(options.nodeExecutable);
-	return `exec ${q(nodeExecutable)} ${q(options.bridgeEntryScript)} --config ${q(options.bridgeConfigFile)}`;
+	return `exec ${q(options.nodeExecutable)} ${q(options.bridgeEntryScript)} --config ${q(options.bridgeConfigFile)}`;
 }
 
 /** Operator-facing label for missing process-host targets (tmux pane or herdr terminal). */

@@ -1,9 +1,8 @@
 /**
  * herdr version/protocol contract for Meepo's HerdProcessHost.
  *
- * 0.8.0 (protocol 20) changed `agent start` to occupy an existing shell pane
- * (`--kind` + `--pane`). cwd lives on `tab create`, not on `agent start`.
- * Older CLIs (`agent start --cwd --tab -- <argv>`) are not supported.
+ * Supported: herdr 0.8.x (protocol 20). cwd is a `tab create` flag; children
+ * occupy that pane with `pane run`. Older `agent start --cwd` CLIs are unsupported.
  */
 
 import { spawnSync } from "node:child_process";
@@ -19,6 +18,11 @@ export interface HerdrVersionInfo {
 	protocol: number | null;
 	raw: string;
 }
+
+export type HerdrProbe =
+	| { status: "ok"; info: HerdrVersionInfo }
+	| { status: "missing" }
+	| { status: "unsupported"; info: HerdrVersionInfo };
 
 export function parseHerdrVersionToken(raw: string): string | null {
 	const match = raw.match(/\b(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\b/);
@@ -53,16 +57,31 @@ export function isSupportedHerdrVersion(version: string): boolean {
 	);
 }
 
+export function isSupportedHerdr(info: HerdrVersionInfo): boolean {
+	if (!isSupportedHerdrVersion(info.version)) return false;
+	if (info.protocol != null && info.protocol !== HERDR_REQUIRED_PROTOCOL) return false;
+	return true;
+}
+
 export function formatUnsupportedHerdrVersion(version: string, protocol?: number | null): string {
 	const proto = protocol != null ? ` (protocol ${protocol})` : "";
 	return (
 		`Unsupported herdr ${version}${proto}. Meepo requires herdr >= ${HERDR_MIN_VERSION} and < ${HERDR_MAX_EXCLUSIVE_VERSION}` +
-		(HERDR_REQUIRED_PROTOCOL != null ? ` (protocol ${HERDR_REQUIRED_PROTOCOL})` : "") +
-		". Pin herdr or set MEEPO_PROCESS_HOST=tmux."
+		` (protocol ${HERDR_REQUIRED_PROTOCOL}). Pin herdr or set MEEPO_PROCESS_HOST=tmux.`
 	);
 }
 
-export function readHerdrVersion(run?: (args: string[]) => { status: number | null; stdout: string; stderr: string }): HerdrVersionInfo | null {
+export function unsupportedHerdrMessage(info: HerdrVersionInfo): string {
+	return formatUnsupportedHerdrVersion(info.version, info.protocol);
+}
+
+export function missingHerdrMessage(): string {
+	return "MEEPO_PROCESS_HOST=herdr (or runtime.processHost=herdr) but herdr is not available on PATH / failed version probe.";
+}
+
+export function readHerdrVersion(
+	run?: (args: string[]) => { status: number | null; stdout: string; stderr: string },
+): HerdrVersionInfo | null {
 	const invoke =
 		run ??
 		((args: string[]) => {
@@ -91,30 +110,22 @@ export function readHerdrVersion(run?: (args: string[]) => { status: number | nu
 	return { version, protocol, raw: versionRaw };
 }
 
-export function assertSupportedHerdr(info: HerdrVersionInfo): void {
-	if (!isSupportedHerdrVersion(info.version)) {
-		throw new Error(formatUnsupportedHerdrVersion(info.version, info.protocol));
-	}
-	if (info.protocol != null && info.protocol !== HERDR_REQUIRED_PROTOCOL) {
-		throw new Error(formatUnsupportedHerdrVersion(info.version, info.protocol));
-	}
-}
-
-/** PATH + --version + supported range. Used by createProcessHost / HerdProcessHost. */
-export function probeHerdrCompatible(
+/** PATH + --version + supported range. One result for factory + availability. */
+export function probeHerdr(
 	options: {
 		commandExists?: () => boolean;
 		readVersion?: () => HerdrVersionInfo | null;
 	} = {},
-): boolean {
-	const exists = options.commandExists ?? (() => {
-		const result = spawnSync("bash", ["-lc", "command -v herdr >/dev/null 2>&1"], { stdio: "ignore" });
-		return result.status === 0;
-	});
-	if (!exists()) return false;
+): HerdrProbe {
+	const exists =
+		options.commandExists ??
+		(() => {
+			const result = spawnSync("bash", ["-lc", "command -v herdr >/dev/null 2>&1"], { stdio: "ignore" });
+			return result.status === 0;
+		});
+	if (!exists()) return { status: "missing" };
 	const info = (options.readVersion ?? readHerdrVersion)();
-	if (!info) return false;
-	if (!isSupportedHerdrVersion(info.version)) return false;
-	if (info.protocol != null && info.protocol !== HERDR_REQUIRED_PROTOCOL) return false;
-	return true;
+	if (!info) return { status: "missing" };
+	if (!isSupportedHerdr(info)) return { status: "unsupported", info };
+	return { status: "ok", info };
 }
