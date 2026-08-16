@@ -40,6 +40,7 @@ import {
 	updateFleetUi,
 } from "../coordinator-helpers.js";
 import { getMeepoDb } from "../db.js";
+import { listInbox, listOpenAttention, markInbox } from "../inbox.js";
 import {
 	deliverQueuedMessagesViaBridge,
 	queueDownwardMessage,
@@ -55,10 +56,7 @@ import {
 	getAgent,
 	listAgentAttentionItemsV2,
 	listAgents,
-	listAttentionItems,
 	listHierarchyVisibleAgentIds,
-	listInboxMessages,
-	markAgentMessages,
 } from "../registry.js";
 import { reconcileTasks } from "../task-registry.js";
 import type {
@@ -468,7 +466,7 @@ export function register(registerTool: RegisterTool, pi: ExtensionAPI): void {
 						},
 					};
 				}
-				const messages = listInboxMessages(db, {
+				const messages = listInbox(db, {
 					projectKey: agentFilters.projectKey,
 					spawnSessionId: agentFilters.spawnSessionId,
 					spawnSessionFile: agentFilters.spawnSessionFile,
@@ -477,15 +475,15 @@ export function register(registerTool: RegisterTool, pi: ExtensionAPI): void {
 					limit: params.limit,
 				});
 				const deliveredIds = params.includeDelivered ? [] : messages.filter((message) => message.status === "queued").map((message) => message.id);
-				const readReceiptCount = markAgentMessages(db, deliveredIds, "delivered");
+				const readReceiptCount = markInbox(db, deliveredIds, "delivered");
 				const deliveredIdSet = new Set(deliveredIds);
 				const returnedMessages = messages.map((message) =>
-					deliveredIdSet.has(message.id) ? { ...message, status: "delivered" as const, deliveredAt: Date.now() } : message,
+					deliveredIdSet.has(message.id) ? { ...message, status: "delivered" as const } : message,
 				);
 				updateFleetUi(ctx);
 				return {
 					content: [{ type: "text", text: buildInboxText(returnedMessages, readReceiptCount) }],
-					details: { scope, actor, messages: returnedMessages, readReceipt: { status: "delivered", ids: deliveredIds, count: readReceiptCount }, version: "legacy" },
+					details: { scope, actor, messages: returnedMessages, readReceipt: { status: "delivered", ids: deliveredIds, count: readReceiptCount }, version: "inbox" },
 				};
 			},
 		});
@@ -525,11 +523,9 @@ export function register(registerTool: RegisterTool, pi: ExtensionAPI): void {
 					};
 				}
 				const filters = resolveAttentionFilters(ctx, scope, params);
-				const rawLegacyItems = listAttentionItems(db, filters);
 				const v2Filters = resolveAdminAttentionV2Filters(ctx, scope, params);
-				const v2Items = listAgentAttentionItemsV2(db, v2Filters);
-				const items = suppressDuplicateLegacyAttentionItems(rawLegacyItems, v2Items);
-				const suppressedLegacyDuplicateCount = rawLegacyItems.length - items.length;
+				const { v2: v2Items, leftover: items } = listOpenAttention(db, { v2: v2Filters, legacy: filters });
+				const suppressedLegacyDuplicateCount = 0;
 				const agentIds = [
 					...items.map((item) => item.agentId),
 					...v2Items.flatMap((item) => [item.subjectAgentId, item.ownerAgentId]).filter((value): value is string => Boolean(value)),

@@ -286,6 +286,20 @@ export interface AgentMessageRecord {
 	ackedAt: number | null;
 }
 
+export type InboxDirection = "upward" | "downward";
+
+export interface InboxEntry {
+	id: string;
+	direction: InboxDirection;
+	kind: MessageKind;
+	summary: string;
+	status: MessageStatus;
+	childId: string | null;
+	createdAt: number;
+	details?: string;
+	actionPolicy?: DownwardMessageActionPolicy;
+}
+
 export interface AgentSummary {
 	id: string;
 	parentAgentId: string | null;

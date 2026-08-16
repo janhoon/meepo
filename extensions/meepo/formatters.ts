@@ -12,6 +12,7 @@ import type {
 	AgentSummary,
 	AttentionItemRecord,
 	DownwardMessageActionPolicy,
+	InboxEntry,
 	FleetSummary,
 	ListAgentsFilters,
 	RuntimeStatusSnapshot,
@@ -335,12 +336,12 @@ export function buildAdminAttentionText(
 	return sections.join("\n\n");
 }
 
-export function buildInboxText(messages: AgentMessageRecord[], readReceiptCount = 0): string {
+export function buildInboxText(messages: InboxEntry[], readReceiptCount = 0): string {
 	if (messages.length === 0) return "No unread child-originated messages.";
 	const body = messages
 		.map((message) => {
-			const payloadText = truncateText(JSON.stringify(message.payload), 160);
-			return `${message.id} · ${message.kind} · ${message.targetKind} · sender=${message.senderAgentId ?? "-"} · recipient=${message.recipientAgentId ?? "root/user"}\n${payloadText}`;
+			const extra = [message.details, message.actionPolicy].filter(Boolean).join(" · ");
+			return `${message.id} · ${message.kind} · ${message.direction} · child=${message.childId ?? "-"}\n${truncateText(extra || message.summary, 160)}`;
 		})
 		.join("\n\n");
 	if (readReceiptCount <= 0) return body;

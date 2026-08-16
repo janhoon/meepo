@@ -88,6 +88,7 @@ import { getService, listServices, updateService } from "./service-registry.js";
 import { readServiceStatus, spawnService, tailFileLines } from "./service-spawn.js";
 import { spawnSubagent } from "./spawn.js";
 import { maybeNotifyHostAttention } from "./host-notify.js";
+import { listOpenAttention } from "./inbox.js";
 import {
 	mapDeliveryModeToBridgeCommand,
 	missingHostTargetMessage,
@@ -348,12 +349,11 @@ export async function wakeCoordinatorFromAttention(pi: ExtensionAPI, ctx: Extens
 		states: ["open", "acknowledged", "waiting_on_owner"],
 	});
 	if (v2Filters.subjectAgentIds && v2Filters.subjectAgentIds.length === 0) return;
-	const v2Items = listAgentAttentionItemsV2(db, v2Filters);
 	const legacyFilters = resolveAttentionFilters(ctx, "current_session", {
 		limit: 25,
 		states: ["open", "waiting_on_coordinator", "waiting_on_user"],
 	});
-	const legacyItems = suppressDuplicateLegacyAttentionItems(listAttentionItems(db, legacyFilters), v2Items);
+	const { v2: v2Items, leftover: legacyItems } = listOpenAttention(db, { v2: v2Filters, legacy: legacyFilters });
 	const items = [...v2Items.map(attentionItemFromV2), ...legacyItems].sort(
 		(a, b) => b.priority - a.priority || a.createdAt - b.createdAt,
 	);

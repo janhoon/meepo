@@ -5,23 +5,21 @@ import { randomUUID } from "node:crypto";
 import { getMeepoDb } from "./db.js";
 import {
 	createAgentEvent,
-	createAgentMessage,
 	createRootActorContext,
 	getAgent,
 	listMessagesForRecipient,
-	markAgentMessageRecipientsByIds,
-	markAgentMessageRecipientsByMessageIds,
-	markAgentMessages,
 	updateAgent,
 	updateAgentAttentionItemsV2ForOwner,
 	updateAttentionItemsForAgent,
 } from "./registry.js";
+import { listInboxForChild, markInbox, publishDownward } from "./inbox.js";
 import { getRpcBridgeSocketPath, sendRpcBridgeCommand } from "./rpc-client.js";
 import { mapDeliveryModeToBridgeCommand } from "./rpc-bridge-control.js";
 import { collectQueuedWakeCoalescingContext } from "./wake-coalescing.js";
 import { defaultDownwardActionPolicy, formatDownwardMessageForChild } from "./formatters.js";
 import type {
 	AgentActorContext,
+	AgentMessageRecord,
 	AgentSummary,
 	DeliveryMode,
 	DownwardMessageActionPolicy,
@@ -52,9 +50,10 @@ export function coalesceQueuedDownwardWakeMessages(
 		return { expiredMessageIds: [], expiredV2MessageIds: [], expiredV2RecipientRowIds: [], coalescedWakeMessages: [] };
 	}
 	const { expiredMessageIds, expiredV2MessageIds, expiredV2RecipientRowIds, coalescedWakeMessages } = collectQueuedWakeCoalescingContext(queued);
-	markAgentMessages(db, expiredMessageIds, "expired");
-	markAgentMessageRecipientsByMessageIds(db, expiredV2MessageIds, "expired", { recipientAgentId: agent.id, transportKind: "inbox" });
-	markAgentMessageRecipientsByIds(db, expiredV2RecipientRowIds, "expired", { recipientAgentId: agent.id, transportKind: "inbox" });
+	markInbox(db, [...expiredMessageIds, ...expiredV2MessageIds, ...expiredV2RecipientRowIds], "expired", {
+		childId: agent.id,
+		transportKind: "inbox",
+	});
 	createAgentEvent(db, {
 		id: randomUUID(),
 		agentId: agent.id,
@@ -77,7 +76,7 @@ export function scheduleBridgeDeliveryRetry(agentId: string, delayMs = 250): voi
 export async function deliverQueuedMessagesViaBridge(agentId: string): Promise<{ delivered: number; deferred: number; transportState: string }> {
 	if (liveBridgeDeliveryInFlight.has(agentId)) {
 		scheduleBridgeDeliveryRetry(agentId, 300);
-		const queued = listMessagesForRecipient(getMeepoDb(), agentId, { targetKind: "child", limit: 50 });
+		const queued = listInboxForChild(getMeepoDb(), agentId, { limit: 50 });
 		return { delivered: 0, deferred: queued.length, transportState: "busy" };
 	}
 	liveBridgeDeliveryInFlight.add(agentId);
@@ -144,20 +143,13 @@ export async function deliverQueuedMessagesViaBridge(agentId: string): Promise<{
 				lastFailureWasTransport = false;
 				throw new Error(response.error ?? `RPC bridge rejected ${message.kind}.`);
 			}
-			markAgentMessages(db, [message.id], "delivered");
-			markAgentMessages(db, [message.id], "acked");
 			const v2Payload = (message.payload && typeof message.payload === "object" ? message.payload : null) as DownwardMessagePayload | null;
-			if (v2Payload?.v2RecipientRowId) {
-				markAgentMessageRecipientsByIds(db, [v2Payload.v2RecipientRowId], "acked", {
-					recipientAgentId: agent.id,
-					transportKind: "rpc_bridge",
-				});
-			} else if (v2Payload?.v2MessageId) {
-				markAgentMessageRecipientsByMessageIds(db, [v2Payload.v2MessageId], "acked", {
-					recipientAgentId: agent.id,
-					transportKind: "rpc_bridge",
-				});
-			}
+			markInbox(
+				db,
+				[message.id, v2Payload?.v2RecipientRowId, v2Payload?.v2MessageId].filter((id): id is string => Boolean(id)),
+				"acked",
+				{ childId: agent.id, transportKind: "rpc_bridge" },
+			);
 			createAgentEvent(db, {
 				id: randomUUID(),
 				agentId: agent.id,
@@ -219,7 +211,6 @@ export function queueDownwardMessage(
 	actor: AgentActorContext = createRootActorContext(),
 ): string {
 	const db = getMeepoDb();
-	const messageId = randomUUID();
 	const fullPayload: DownwardMessagePayload = {
 		...payload,
 		senderKind: actor.kind === "root" ? "root" : "agent",
@@ -233,17 +224,24 @@ export function queueDownwardMessage(
 		fullPayload.coalescedV2RecipientRowIds = coalescedWake.expiredV2RecipientRowIds;
 		fullPayload.coalescedWakeMessages = coalescedWake.coalescedWakeMessages;
 	}
-	createAgentMessage(db, {
-		id: messageId,
-		threadId: agent.id,
-		senderAgentId: actor.kind === "agent" ? actor.agentId : null,
-		recipientAgentId: agent.id,
-		targetKind: "child",
-		kind,
-		deliveryMode,
-		payload: fullPayload,
-		status: "queued",
-	});
+	let messageId = payload.v2MessageId ?? null;
+	if (!messageId) {
+		const published = publishDownward(db, {
+			actor,
+			agent,
+			kind,
+			summary: fullPayload.summary,
+			details: fullPayload.details,
+			files: fullPayload.files,
+			actionPolicy: fullPayload.actionPolicy,
+			inReplyToMessageId: fullPayload.inReplyToMessageId,
+			deliveryMode,
+			payload: fullPayload,
+		});
+		messageId = published.messageId;
+		fullPayload.v2MessageId = published.messageId;
+		fullPayload.v2RecipientRowId = published.recipientRowId ?? undefined;
+	}
 	createAgentEvent(db, {
 		id: randomUUID(),
 		agentId: agent.id,
