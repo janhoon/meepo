@@ -100,7 +100,7 @@ describe("process host selection", () => {
 					selection: "herdr",
 					probes: { herdrAvailable: () => false, tmuxAvailable: () => true },
 				}),
-			/herdr is not available/,
+			/herdr is not available|Unsupported herdr/,
 		);
 	});
 

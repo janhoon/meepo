@@ -6,7 +6,8 @@
 
 import type { HostInventory } from "./process-host.js";
 
-const DEFAULT_MAX_LEN = 48;
+/** herdr 0.8 names: `[a-z][a-z0-9_-]{0,31}` (32 chars). */
+const DEFAULT_MAX_LEN = 32;
 
 export function slugifyHostName(title: string, maxLen = DEFAULT_MAX_LEN): string {
 	const slug = title

@@ -71,11 +71,13 @@ Meepo freezes **one** process host per primary session at `MeepoRuntime.start`:
 
 | Selection | Behavior |
 |---|---|
-| `herdr` (default) | Always use the herdr adapter (fails if herdr is unavailable) |
-| `auto` | Prefer **herdr** when on `PATH` and `herdr --version` succeeds; else **tmux** |
+| `herdr` (default) | Always use the herdr adapter (fails if herdr is missing or outside the supported version range) |
+| `auto` | Prefer **herdr** when on `PATH` and the version/protocol probe passes; else **tmux** |
 | `tmux` | Always use the tmux adapter |
 
 **Precedence:** env `MEEPO_PROCESS_HOST` → config `runtime.processHost` → `herdr`.
+
+**herdr version gate:** Meepo requires herdr `>= 0.8.0` and `< 0.9.0` (protocol `20`). `MeepoRuntime.start` / `createProcessHost` refuse an explicit herdr backend outside that range. `auto` falls back to tmux. Pin herdr or set `MEEPO_PROCESS_HOST=tmux`.
 
 Registry stores host-neutral `host_kind` / `host_primary_id` / `host_display_name` / `host_target_json` plus legacy `tmux_*` columns for compatibility.
 

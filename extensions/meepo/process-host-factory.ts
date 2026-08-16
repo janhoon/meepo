@@ -12,6 +12,10 @@ import {
 	probeTmuxAvailable,
 	resolveProcessHostSelection,
 } from "./process-host.js";
+import {
+	assertSupportedHerdr,
+	readHerdrVersion,
+} from "./herdr-compat.js";
 import { createHerdProcessHost, HERD_PROCESS_HOST_LIFECYCLE_READY } from "./herd-process-host.js";
 import { createTmuxProcessHost } from "./tmux-process-host.js";
 
@@ -31,8 +35,10 @@ export function createProcessHost(input: ResolveProcessHostInput = {}): ProcessH
 	}
 	if (selection === "herdr") {
 		if (!herdrOk()) {
+			const info = readHerdrVersion();
+			if (info) assertSupportedHerdr(info);
 			throw new Error(
-				"MEEPO_PROCESS_HOST=herdr (or runtime.processHost=herdr) but herdr is not available on PATH / failed probe.",
+				"MEEPO_PROCESS_HOST=herdr (or runtime.processHost=herdr) but herdr is not available on PATH / failed version probe.",
 			);
 		}
 		return createHerdProcessHost(options);

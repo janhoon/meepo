@@ -9,6 +9,7 @@
 
 import { spawnSync } from "node:child_process";
 import type { MeepoConfig } from "./config.js";
+import { probeHerdrCompatible } from "./herdr-compat.js";
 
 export type HostKind = "tmux" | "herdr";
 export type ProcessHostSelection = "auto" | HostKind;
@@ -141,11 +142,11 @@ export function commandExists(command: string): boolean {
 	return result.status === 0;
 }
 
-/** Cheap herdr probe: binary on PATH and `--version` succeeds. */
+/** herdr on PATH, `--version` succeeds, and the version/protocol is in Meepo's supported range. */
 export function probeHerdrAvailable(): boolean {
-	if (!commandExists("herdr")) return false;
-	const result = spawnSync("herdr", ["--version"], { encoding: "utf8", timeout: 3000 });
-	return result.status === 0;
+	return probeHerdrCompatible({
+		commandExists: () => commandExists("herdr"),
+	});
 }
 
 export function probeTmuxAvailable(): boolean {

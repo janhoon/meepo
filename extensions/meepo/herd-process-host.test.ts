@@ -38,7 +38,7 @@ describe("HerdProcessHost lifecycle (mocked CLI)", () => {
 		assert.equal(host.hostKind, "herdr");
 	});
 
-	it("spawnWindow creates a dedicated tab then starts agent with --no-focus", async () => {
+	it("spawnWindow creates a dedicated tab then pane-runs the launch script", async () => {
 		const calls: string[][] = [];
 		const host = createHerdProcessHost({
 			isAvailableProbe: () => true,
@@ -67,6 +67,7 @@ describe("HerdProcessHost lifecycle (mocked CLI)", () => {
 				if (args[0] === "tab" && args[1] === "create") {
 					assert.ok(args.includes("--no-focus"));
 					assert.equal(args[args.indexOf("--workspace") + 1], "w4");
+					assert.equal(args[args.indexOf("--cwd") + 1], "/home/janhoon/projects/meepo");
 					assert.equal(args[args.indexOf("--label") + 1], "Research herdr");
 					return ok({
 						type: "tab_created",
@@ -83,31 +84,28 @@ describe("HerdProcessHost lifecycle (mocked CLI)", () => {
 						},
 					});
 				}
-				if (args[0] === "agent" && args[1] === "start") {
-					assert.equal(args[2], "research-herdr");
-					assert.ok(args.includes("--no-focus"));
-					assert.ok(args.includes("--tab"));
-					assert.equal(args[args.indexOf("--tab") + 1], "w4:t9");
-					assert.ok(!args.includes("--workspace"));
-					assert.ok(!args.includes("--split"));
-					assert.ok(args.includes("--cwd"));
-					const dash = args.indexOf("--");
-					assert.ok(dash > 0);
-					assert.deepEqual(args.slice(dash + 1), ["bash", "-lc", "exec '/tmp/launch.sh'"]);
+				if (args[0] === "pane" && args[1] === "get") {
+					assert.equal(args[2], "w4:pRoot");
 					return ok({
-						type: "agent_started",
-						argv: ["bash", "-lc", "exec '/tmp/launch.sh'"],
-						agent: {
-							name: "research-herdr",
-							terminal_id: "term_child",
-							pane_id: "w4:p9",
+						type: "pane_info",
+						pane: {
+							pane_id: "w4:pRoot",
+							terminal_id: "term_root",
 							tab_id: "w4:t9",
 							workspace_id: "w4",
+							cwd: "/home/janhoon/projects/meepo",
+							terminal_title: "janhoon@host:meepo",
 						},
 					});
 				}
-				if (args[0] === "pane" && args[1] === "close") {
+				if (args[0] === "pane" && args[1] === "run") {
 					assert.equal(args[2], "w4:pRoot");
+					assert.deepEqual(args.slice(3), ["bash", "-lc", "exec '/tmp/launch.sh'"]);
+					return ok({ type: "ok" });
+				}
+				if (args[0] === "agent" && args[1] === "rename") {
+					assert.equal(args[2], "w4:pRoot");
+					assert.equal(args[3], "research-herdr");
 					return ok({ type: "ok" });
 				}
 				return err("unexpected", `unexpected args ${args.join(" ")}`);
@@ -123,18 +121,18 @@ describe("HerdProcessHost lifecycle (mocked CLI)", () => {
 		});
 
 		assert.equal(target.hostKind, "herdr");
-		assert.equal(target.primaryId, "term_child");
+		assert.equal(target.primaryId, "term_root");
 		assert.equal(target.displayName, "research-herdr");
-		assert.equal(target.refs.terminalId, "term_child");
-		assert.equal(target.refs.paneId, "w4:p9");
+		assert.equal(target.refs.terminalId, "term_root");
+		assert.equal(target.refs.paneId, "w4:pRoot");
 		assert.equal(target.refs.tabId, "w4:t9");
 		assert.equal(target.refs.workspaceId, "w4");
-		assert.ok(calls.some((c) => c[0] === "tab" && c[1] === "create"));
-		assert.ok(calls.some((c) => c[0] === "agent" && c[1] === "start"));
-		assert.ok(calls.some((c) => c[0] === "pane" && c[1] === "close" && c[2] === "w4:pRoot"));
+		assert.ok(calls.some((c) => c[0] === "tab" && c[1] === "create" && c.includes("--cwd")));
+		assert.ok(calls.some((c) => c[0] === "pane" && c[1] === "run"));
+		assert.ok(!calls.some((c) => c[0] === "agent" && c[1] === "start"));
 	});
 
-	it("spawnWindow prefixes services with svc- and retries on agent_name_taken", async () => {
+	it("spawnWindow prefixes services with svc- and runs the launch command in the tab pane", async () => {
 		let startAttempts = 0;
 		const startedNames: string[] = [];
 		const host = createHerdProcessHost({
@@ -153,34 +151,38 @@ describe("HerdProcessHost lifecycle (mocked CLI)", () => {
 					});
 				}
 				if (args[0] === "tab" && args[1] === "create") {
+					assert.equal(args[args.indexOf("--cwd") + 1], "/tmp");
 					return ok({
 						type: "tab_created",
 						tab: { tab_id: "w4:tSvc", workspace_id: "w4", label: "API server" },
-						root_pane: { pane_id: "w4:pSvcRoot", tab_id: "w4:tSvc", workspace_id: "w4" },
-					});
-				}
-				if (args[0] === "agent" && args[1] === "start") {
-					startAttempts += 1;
-					const name = args[2];
-					startedNames.push(name);
-					assert.ok(name.startsWith("svc-"), `expected svc- name, got ${name}`);
-					assert.equal(args[args.indexOf("--tab") + 1], "w4:tSvc");
-					if (startAttempts === 1) {
-						return err("agent_name_taken", `agent name ${name} is already used`);
-					}
-					return ok({
-						type: "agent_started",
-						agent: {
-							name,
-							terminal_id: "term_svc_new",
-							pane_id: "w4:p8",
+						root_pane: {
+							pane_id: "w4:pSvcRoot",
+							terminal_id: "term_svc_root",
 							tab_id: "w4:tSvc",
 							workspace_id: "w4",
 						},
 					});
 				}
-				if (args[0] === "pane" && args[1] === "close") {
+				if (args[0] === "pane" && args[1] === "get") {
+					return ok({
+						type: "pane_info",
+						pane: {
+							pane_id: "w4:pSvcRoot",
+							terminal_id: "term_svc_new",
+							tab_id: "w4:tSvc",
+							workspace_id: "w4",
+							cwd: "/tmp",
+							terminal_title: "janhoon@host:/tmp",
+						},
+					});
+				}
+				if (args[0] === "pane" && args[1] === "run") {
+					startAttempts += 1;
 					assert.equal(args[2], "w4:pSvcRoot");
+					startedNames.push("svc-api-server");
+					return ok({ type: "ok" });
+				}
+				if (args[0] === "agent" && args[1] === "rename") {
 					return ok({ type: "ok" });
 				}
 				return err("unexpected", args.join(" "));
@@ -194,11 +196,71 @@ describe("HerdProcessHost lifecycle (mocked CLI)", () => {
 			pool: "services",
 			cwd: "/tmp",
 		});
-		assert.equal(startAttempts, 2);
+		assert.equal(startAttempts, 1);
 		assert.equal(startedNames[0], "svc-api-server");
-		assert.notEqual(startedNames[1], startedNames[0]);
 		assert.equal(target.primaryId, "term_svc_new");
 		assert.ok(target.displayName?.startsWith("svc-"));
+	});
+
+	it("spawnWindow retries agent rename on agent_name_taken", async () => {
+		let renameAttempts = 0;
+		const renamed: string[] = [];
+		const host = createHerdProcessHost({
+			isAvailableProbe: () => true,
+			runHerdr: (args) => {
+				if (args[0] === "api" && args[1] === "snapshot") {
+					return ok({ snapshot: { panes: [], agents: [] }, type: "session_snapshot" });
+				}
+				if (args[0] === "pane" && args[1] === "current") {
+					return ok({
+						type: "pane_current",
+						pane: { terminal_id: "term_p", pane_id: "w4:p1", workspace_id: "w4", tab_id: "w4:t1" },
+					});
+				}
+				if (args[0] === "tab" && args[1] === "create") {
+					return ok({
+						type: "tab_created",
+						tab: { tab_id: "w4:t9", workspace_id: "w4", label: "Research" },
+						root_pane: { pane_id: "w4:pRoot", terminal_id: "term_root", tab_id: "w4:t9", workspace_id: "w4" },
+					});
+				}
+				if (args[0] === "pane" && args[1] === "get") {
+					return ok({
+						type: "pane_info",
+						pane: {
+							pane_id: "w4:pRoot",
+							terminal_id: "term_root",
+							tab_id: "w4:t9",
+							workspace_id: "w4",
+							cwd: "/tmp",
+						},
+					});
+				}
+				if (args[0] === "pane" && args[1] === "run") {
+					return ok({ type: "ok" });
+				}
+				if (args[0] === "agent" && args[1] === "rename") {
+					renameAttempts += 1;
+					const name = args[3];
+					renamed.push(name);
+					if (renameAttempts === 1) return err("agent_name_taken", `agent name ${name} is already used`);
+					return ok({ type: "ok" });
+				}
+				return err("unexpected", args.join(" "));
+			},
+		});
+
+		const target = await host.spawnWindow({
+			title: "Research",
+			entityId: "sa_abc123",
+			launchCommand: "exec '/tmp/launch.sh'",
+			pool: "agents",
+			cwd: "/tmp",
+		});
+		assert.equal(renameAttempts, 2);
+		assert.notEqual(renamed[1], renamed[0]);
+		assert.equal(target.displayName, renamed[1]);
+		assert.equal(target.primaryId, "term_root");
 	});
 
 	it("focus / capture / stop / targetExists round-trip on terminal_id", async () => {
@@ -231,11 +293,11 @@ describe("HerdProcessHost lifecycle (mocked CLI)", () => {
 					});
 				}
 				if (args[0] === "agent" && args[1] === "focus") {
-					assert.equal(args[2], "term_live");
+					assert.equal(args[2], "child-one");
 					return ok({ type: "ok" });
 				}
-				if (args[0] === "agent" && args[1] === "read") {
-					assert.equal(args[2], "term_live");
+				if (args[0] === "pane" && args[1] === "read") {
+					assert.equal(args[2], "w4:p7");
 					assert.ok(args.includes("recent"));
 					return ok({
 						type: "pane_read",
