@@ -4,7 +4,7 @@
  * ownership seam: computeParentOwnedAgentIds → resolveOwnedSubjectIdsFromParts.
  */
 import assert from "node:assert/strict";
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync } from "./sqlite.js";
 import { describe, it } from "node:test";
 import { randomUUID } from "node:crypto";
 import { bootstrapMeepoDatabase } from "./db.js";

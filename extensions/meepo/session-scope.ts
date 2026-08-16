@@ -29,7 +29,7 @@ import type {
 	SessionChildLinkEntryData,
 } from "./types.js";
 import type { ListTasksFilters, TaskRecord, TaskState, TaskWaitingOn } from "./task-types.js";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "./sqlite.js";
 
 export const childRuntimeEnvironment = getChildRuntimeEnvironment();
 
