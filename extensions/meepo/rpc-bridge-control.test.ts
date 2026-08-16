@@ -3,8 +3,10 @@ import { describe, it } from "node:test";
 import {
 	buildBridgeLaunchCommand,
 	isSharedRpcBridgeTransport,
+	looksLikeNodeExecutable,
 	mapDeliveryModeToBridgeCommand,
 	missingHostTargetMessage,
+	resolveNodeExecutable,
 } from "./rpc-bridge-control.js";
 import { hostTargetRefFromLegacy } from "./process-host.js";
 
@@ -45,6 +47,19 @@ describe("rpc bridge control plane (host-agnostic, wayfinder #20/#24)", () => {
 		assert.doesNotMatch(command, /(^|[\s'"])pi([\s'"]|$)/);
 		assert.doesNotMatch(command, /(^|[\s'"])herdr([\s'"]|$)/);
 		assert.doesNotMatch(command, /(^|[\s'"])tmux([\s'"]|$)/);
+	});
+
+	it("refuses compiled pi as the bridge interpreter", () => {
+		assert.equal(looksLikeNodeExecutable("/usr/bin/node"), true);
+		assert.equal(looksLikeNodeExecutable("/home/janhoon/.local/share/mise/installs/pi/0.84.2/pi/pi"), false);
+		const command = buildBridgeLaunchCommand({
+			nodeExecutable: "/home/janhoon/.local/share/mise/installs/pi/0.84.2/pi/pi",
+			bridgeEntryScript: "/pkg/extensions/meepo/rpc-bridge.mjs",
+			bridgeConfigFile: "/tmp/runs/sa_1/bridge-config.json",
+		});
+		assert.match(command, /node/);
+		assert.doesNotMatch(command, /\/pi\/pi/);
+		assert.equal(looksLikeNodeExecutable(resolveNodeExecutable("/not/node")), true);
 	});
 
 	it("resolves herdr registry fields for message/stop targetExists gates", () => {
