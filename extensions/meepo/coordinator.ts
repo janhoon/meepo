@@ -1,72 +1,50 @@
 /**
  * Meepo coordinator: tool modules + commands/shortcuts + lifecycle hooks.
  */
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { DynamicBorder } from "@mariozechner/pi-coding-agent";
-import { Container, Key, type SelectItem, SelectList, Text } from "@mariozechner/pi-tui";
-import { LEGACY_SERVICE_TOOL_ALIASES, loadMeepoConfig } from "./config.js";
-import type { MeepoRuntime } from "./runtime.js";
-import { deliverQueuedMessagesViaBridge } from "./bridge-delivery.js";
+import { randomUUID } from "node:crypto";
+import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { Key } from "@mariozechner/pi-tui";
+import { ATTENTION_WAKE_POLL_MS, attentionWakePoll, setAttentionWakePoll, wakeCoordinatorFromAttention } from "./attention.js";
+import type { AgentsBoardState } from "./board.js";
+import { deliverQueuedMessagesViaBridge, queueDownwardMessage } from "./bridge-delivery.js";
+import { captureAgentById, cleanupAgentTarget, focusAgentById, listCleanupCandidates, reconcileAgents, stopAgentById } from "./child-fleet.js";
 import { registerChildRuntime } from "./child-runtime.js";
-import { configureSubtreeControlDeps } from "./subtree-control.js";
+import { LEGACY_SERVICE_TOOL_ALIASES } from "./config.js";
+import { lastFocusedActiveAgentId, setActiveMeepoRuntime, setLastFocusedActiveAgentId, updateFleetUi } from "./coordinator-session.js";
+import type { AgentsDashboardState } from "./dashboard.js";
 import { closeMeepoDb, getMeepoDb } from "./db.js";
+import {
+	buildAttentionText,
+	buildTaskAttentionText,
+	formatCleanupCandidates,
+	formatCleanupResults,
+	formatFocusResult,
+	formatReconcileResult,
+	formatServiceFocusResult,
+	formatServiceLine,
+	formatServiceReconcileResult,
+	formatServiceStopResult,
+	formatStopResult,
+	formatTaskDetails,
+	formatTaskLine,
+	summarizeServiceFilters,
+	summarizeTaskFilters,
+} from "./formatters.js";
+import { listOpenAttention } from "./inbox.js";
+import { applyNoWaitSystemPrompt, getBashCommandFromToolInput, noWaitBashBlockReason } from "./no-wait-policy.js";
 import { getProcessHost } from "./process-host.js";
 import { getProjectKey } from "./project.js";
-import { openAgentsBoard } from "./board.js";
-import { openAgentsDashboard } from "./dashboard.js";
+import { getAgent, listAgents } from "./registry.js";
+import { missingHostTargetMessage } from "./rpc-bridge-control.js";
+import type { MeepoRuntime } from "./runtime.js";
+import { captureServiceById, focusServiceById, reconcileServices, resolveServiceFilters, stopServiceById } from "./service-ops.js";
+import { listServices } from "./service-registry.js";
+import { childRuntimeEnvironment, resolveAttentionFilters, resolveTaskFilters } from "./session-scope.js";
+import { getTaskLinkedAgents } from "./spawn-ops.js";
 import {
-	applyNoWaitSystemPrompt,
-	getBashCommandFromToolInput,
-	noWaitBashBlockReason,
-} from "./no-wait-policy.js";
-import { getSubagentProfile, listSubagentProfiles } from "./profiles.js";
-import {
-	getAgent,
-	listAgents,
-	listAttentionItems,
-	listInboxMessages,
-	markAgentMessages,
-	resolveAgentActorContext,
-} from "./registry.js";
-import {
-	createTask,
-	createTaskEvent,
-	getTask,
-	linkTaskAgent,
-	listTaskAgentLinks,
-	listTaskAttention,
-	listTasks,
-	reconcileTasks,
-	unlinkTaskAgent,
-	updateTask,
-} from "./task-registry.js";
-import { register as registerAgentTools } from "./tools/agent-tools.js";
-import { register as registerTaskTools } from "./tools/task-tools.js";
-import { register as registerServiceTools } from "./tools/service-tools.js";
-import { registerSubagentProfileCommands } from "./subagent-commands.js";
-import {
-	ATTENTION_WAKE_POLL_MS,
-	attentionWakePoll,
 	buildStandupText,
-	captureAgentById,
-	captureServiceById,
-	childRuntimeEnvironment,
-	cleanupAgentTarget,
 	confirmTaskLeaseOverride,
-	focusAgentById,
-	focusServiceById,
-	formatReconcileResult,
-	formatServiceReconcileResult,
-	getTaskInteractions,
-	getTaskLinkedAgents,
-	lastFocusedActiveAgentId,
-	listCleanupCandidates,
-	listTaskInteractionsForTaskIds,
 	moveTaskById,
-	reconcileAgents,
-	reconcileServices,
-	resolveServiceFilters,
-	resolveTaskFilters,
 	runAgentsBoard,
 	runAgentsDashboard,
 	runServiceSpawnWizard,
@@ -74,17 +52,35 @@ import {
 	runTaskCreateWizard,
 	runTaskMoveFlow,
 	runTaskSpawnWizard,
-	setActiveMeepoRuntime,
-	setAttentionWakePoll,
-	setLastFocusedActiveAgentId,
-	stopAgentById,
-	stopServiceById,
-	summarizeServiceFilters,
-	updateFleetUi,
-	wakeCoordinatorFromAttention,
-} from "./coordinator-helpers.js";
-
-export * from "./coordinator-helpers.js";
+} from "./standup.js";
+import { registerSubagentProfileCommands } from "./subagent-commands.js";
+import {
+	applyTaskSubtreeControl,
+	buildTaskSubtreeControlPreview,
+	configureSubtreeControlDeps,
+	formatTaskSubtreeControlApplyResult,
+	formatTaskSubtreeControlConfirmation,
+	formatTaskSubtreeControlPreview,
+	type TaskSubtreeControlAction,
+} from "./subtree-control.js";
+import { getTaskInteractions, listTaskInteractionsForTaskIds } from "./task-interactions.js";
+import {
+	createTaskEvent,
+	getTask,
+	linkTaskAgent,
+	listTaskAttention,
+	listTaskEvents,
+	listTaskHealth,
+	listTasks,
+	reconcileTasks,
+	taskLeaseKindForProfile,
+	unlinkTaskAgent,
+	updateTask,
+} from "./task-registry.js";
+import type { TaskState } from "./task-types.js";
+import { register as registerAgentTools } from "./tools/agent-tools.js";
+import { register as registerServiceTools } from "./tools/service-tools.js";
+import { register as registerTaskTools } from "./tools/task-tools.js";
 
 export function registerMeepoCoordinatorTools(pi: ExtensionAPI, runtime: MeepoRuntime): void {
 	setActiveMeepoRuntime(runtime);
@@ -515,7 +511,8 @@ export function registerMeepoCoordinatorTools(pi: ExtensionAPI, runtime: MeepoRu
 				return;
 			}
 			const filters = resolveAttentionFilters(ctx, scope, { limit: 200 });
-			const items = listAttentionItems(getMeepoDb(), filters);
+			const attention = listOpenAttention(getMeepoDb(), { legacy: filters });
+			const items = attention.leftover;
 			const agentsById = new Map(
 				listAgents(getMeepoDb(), { ids: [...new Set(items.map((item) => item.agentId))], limit: 200 }).map((agent) => [agent.id, agent]),
 			);

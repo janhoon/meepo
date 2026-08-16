@@ -1,9 +1,11 @@
 /**
  * Pure-ish text/format helpers for Meepo coordinator surfaces.
  */
+import type { CleanupCandidate } from "./cleanup-types.js";
 import { formatHost } from "./process-host.js";
 import { truncateText } from "./text-util.js";
 import { deriveTaskHealth, taskLeaseKindForProfile } from "./task-registry.js";
+import type { TaskEventRecord } from "./task-types.js";
 // Keep formatters free of DB access: callers that need live health pass a snapshot.
 import type {
 	AgentAttentionV2Record,
@@ -12,6 +14,7 @@ import type {
 	AgentSummary,
 	AttentionItemRecord,
 	DownwardMessageActionPolicy,
+	DownwardMessagePayload,
 	InboxEntry,
 	FleetSummary,
 	ListAgentsFilters,
@@ -790,10 +793,19 @@ export function defaultDownwardActionPolicy(kind: "answer" | "note" | "redirect"
 	}
 }
 
+export function formatStandupAge(timestamp: number): string {
+	if (!timestamp) return "unknown";
+	const minutes = Math.max(0, Math.floor((Date.now() - timestamp) / 60000));
+	if (minutes < 60) return `${minutes}m`;
+	const hours = Math.floor(minutes / 60);
+	if (hours < 48) return `${hours}h`;
+	return `${Math.floor(hours / 24)}d`;
+}
+
 export function formatTaskDetails(
 	task: TaskRecord,
 	linkedAgents: AgentSummary[] = [],
-	events: ReturnType<typeof listTaskEvents> = [],
+	events: TaskEventRecord[] = [],
 	links: { dependencies?: TaskLinkWithTasksRecord[]; dependents?: TaskLinkWithTasksRecord[] } = {},
 	interactions: TaskInteractionRecord[] = [],
 	health: TaskHealthSnapshot = getTaskHealthSnapshot(task),

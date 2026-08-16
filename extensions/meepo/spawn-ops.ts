@@ -1,249 +1,37 @@
 /**
- * spawn-ops — split from coordinator-helpers.
+ * Child launch and ready-task dispatch.
  */
-/**
- * Coordinator helpers (spawn/reconcile/wake/UI). Tool registration lives in tools/*.
- */
-import { existsSync, readFileSync, statSync } from "node:fs";
-import { createHash, randomUUID } from "node:crypto";
-import { resolve } from "node:path";
+import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { DynamicBorder } from "@mariozechner/pi-coding-agent";
-import { StringEnum } from "@mariozechner/pi-ai";
-import { Container, Key, type SelectItem, SelectList, Text } from "@mariozechner/pi-tui";
-import { Type } from "@sinclair/typebox";
-import { openAgentsBoard, type AgentsBoardData, type AgentsBoardState, type BoardLaneId, type BoardTicket } from "./board.js";
-import { registerChildRuntime, getChildRuntimeEnvironment } from "./child-runtime.js";
-import { openAgentsDashboard, type AgentsDashboardData, type AgentsDashboardState } from "./dashboard.js";
-import { closeMeepoDb, getMeepoDb } from "./db.js";
-import { getRpcBridgeSocketPath, pingRpcBridge, readRpcBridgeStatus, sendRpcBridgeCommand } from "./rpc-client.js";
-import {
-	applyNoWaitSystemPrompt,
-	getBashCommandFromToolInput,
-	noWaitBashBlockReason,
-} from "./no-wait-policy.js";
-import { LEGACY_SESSION_CHILD_LINK_ENTRY_TYPE, SESSION_CHILD_LINK_ENTRY_TYPE } from "./paths.js";
-import { getAllowedBuiltinToolNames, getSubagentProfile, listSubagentProfiles, normalizeBuiltinTools } from "./profiles.js";
-import { getProjectKey } from "./project.js";
-import { truncateText } from "./text-util.js";
-import {
-	AgentMessagePermissionError,
-	canSendMessage,
-	createAgentEvent,
-	createAgentMessage,
-	createMessageWithRecipients,
-	createRootActorContext,
-	fetchAgentInboxV2,
-	getAgent,
-	getFleetSummary,
-	listAgentAttentionItemsV2,
-	listAgents,
-	listAttentionItems,
-	listDescendantAgentIds,
-	listHierarchyVisibleAgentIds,
-	listInboxMessages,
-	listMessagesForRecipient,
-	markAgentMessageRecipientsByIds,
-	markAgentMessageRecipientsByMessageIds,
-	markAgentMessages,
-	resolveAgentActorContext,
-	updateAgent,
-	updateAgentAttentionItemsV2ForOwner,
-	updateAttentionItemsForAgent,
-} from "./registry.js";
-import type { ListAgentAttentionItemsV2Filters } from "./registry.js";
-import { collectQueuedWakeCoalescingContext } from "./wake-coalescing.js";
-import { LEGACY_SERVICE_TOOL_ALIASES, loadMeepoConfig } from "./config.js";
-import { createMeepoRuntime, type MeepoRuntime } from "./runtime.js";
-import {
-	assertTaskLeaseAvailable,
-	cancelTaskLink,
-	createTask,
-	createTaskEvent,
-	createTaskLink,
-	deriveTaskHealth,
-	formatTaskLeaseConflict,
-	getTask,
-	getTaskLease,
-	getTaskLeaseConflict,
-	getTaskSummary,
-	linkTaskAgent,
-	listTaskAgentLinks,
-	listTaskAttention,
-	listTaskEvents,
-	listTaskHealth,
-	listTaskLinks,
-	listTaskReadiness,
-	listTasks,
-	listTaskSubtreeWithMeta,
-	listUnresolvedTaskDependencies,
-	reconcileTasks,
-	refreshTaskDependencyBlockState,
-	resolveDependenciesForCompletedTask,
-	taskLeaseKindForProfile,
-	unlinkTaskAgent,
-	updateTask,
-} from "./task-registry.js";
-import { getService, listServices, updateService } from "./service-registry.js";
-import { readServiceStatus, spawnService, tailFileLines } from "./service-spawn.js";
-import { spawnSubagent } from "./spawn.js";
-import { maybeNotifyHostAttention } from "./host-notify.js";
-import {
-	mapDeliveryModeToBridgeCommand,
-	missingHostTargetMessage,
-} from "./rpc-bridge-control.js";
-import type {
-	ListServicesFilters,
-	ServiceStatusSnapshot,
-	ServiceSummary,
-	SpawnServiceResult,
-	UpdateServiceInput,
-} from "./service-types.js";
-import type {
-	AgentActorContext,
-	AgentAttentionV2Record,
-	AgentInboxMessageV2Record,
-	AgentMessageRecord,
-	AgentRecipientKind,
-	AgentRecipientRef,
-	AgentSummary,
-	AttentionItemRecord,
-	DeliveryMode,
-	DownwardMessageActionPolicy,
-	DownwardMessagePayload,
-	FleetSummary,
-	ListAgentsFilters,
-	RuntimeStatusSnapshot,
-	SessionChildLinkEntryData,
-	SpawnSubagentResult,
-	SubagentProfile,
-	TaskInteractionRecord,
-	UpdateAgentInput,
-} from "./types.js";
-import type {
-	CreateTaskInput,
-	ListTaskAgentLinksFilters,
-	ListTasksFilters,
-	TaskAgentLinkRecord,
-	TaskAttentionRecord,
-	TaskHealthSnapshot,
-	TaskLinkState,
-	TaskLinkType,
-	TaskLinkWithTasksRecord,
-	TaskReadinessRecord,
-	TaskRecord,
-	TaskState,
-	TaskSummaryCounts,
-	TaskWaitingOn,
-	UpdateTaskInput,
-} from "./task-types.js";
-import {
-	actorLabelForInteraction,
-	attentionItemIcon,
-	attentionItemLabel,
-	buildAdminAttentionText,
-	buildAttentionText,
-	buildAttentionV2Text,
-	buildInboxText,
-	buildInboxV2Text,
-	buildTaskAttentionText,
-	buildTaskLinksText,
-	buildTaskReadyText,
-	defaultDownwardActionPolicy,
-	formatAgentDetails,
-	formatAgentLine,
-	formatAttentionGateWarning,
-	formatAttentionWakeup,
-	formatCleanupCandidates,
-	formatCleanupResults,
-	formatFleetSummary,
-	formatFocusResult,
-	formatReconcileResult,
-	formatServiceDetails,
-	formatServiceFocusResult,
-	formatServiceLine,
-	formatServiceReconcileResult,
-	formatServiceStartResult,
-	formatServiceStopResult,
-	formatSpawnSuccess,
-	formatStopResult,
-	formatTaskDetails,
-	formatTaskLine,
-	formatTaskLinkLine,
-	formatTaskReadinessLine,
-	ownerLabelForInteraction,
-	serviceReadyLabel,
-	serviceStateIcon,
-	summarizeFilters,
-	summarizeServiceFilters,
-	summarizeTaskFilters,
-	taskInteractionIcon,
-	taskInteractionLabel,
-} from "./formatters.js";
-import {
-	TaskSubtreeControlAction,
-	applyTaskSubtreeControl,
-	buildTaskSubtreeControlPreview,
-	configureSubtreeControlDeps,
-	formatTaskSubtreeControlApplyResult,
-	formatTaskSubtreeControlConfirmation,
-	formatTaskSubtreeControlPreview,
-} from "./subtree-control.js";
-import {
-	deliverQueuedMessagesViaBridge,
-	queueDownwardMessage,
-} from "./bridge-delivery.js";
-import {
-	SubagentAttentionParams,
-	SubagentCaptureParams,
-	SubagentCleanupParams,
-	SubagentFocusParams,
-	SubagentGetParams,
-	SubagentInboxParams,
-	SubagentListParams,
-	SubagentMessageParams,
-	SubagentReconcileParams,
-	SubagentSpawnParams,
-	SubagentStopParams,
-	TaskAttentionParams,
-	TaskCreateParams,
-	TaskDispatchReadyParams,
-	TaskGetParams,
-	TaskLinkAgentParams,
-	TaskLinkParams,
-	TaskLinksParams,
-	TaskListParams,
-	TaskMoveParams,
-	TaskNoteParams,
-	TaskReadyParams,
-	TaskReconcileParams,
-	TaskSubtreeControlParams,
-	TaskUnlinkAgentParams,
-	TaskUnlinkParams,
-	TaskUpdateParams,
-	TmuxServiceCaptureParams,
-	TmuxServiceFocusParams,
-	TmuxServiceGetParams,
-	TmuxServiceListParams,
-	TmuxServiceReconcileParams,
-	TmuxServiceStartParams,
-	TmuxServiceStopParams,
-} from "./tool-schemas.js";
-import type { CleanupCandidate } from "./cleanup-types.js";
-import {
-	ACTIVE_AGENT_STATES,
-	OPEN_AGENT_ATTENTION_V2_STATES,
-	OPEN_ATTENTION_STATES,
-	TERMINAL_AGENT_STATES,
-} from "./registry-shared.js";
+import { Container, type SelectItem, SelectList, Text } from "@mariozechner/pi-tui";
+import { loadMeepoConfig } from "./config.js";
 import { activeMeepoRuntime, updateFleetUi } from "./coordinator-session.js";
+import { getMeepoDb } from "./db.js";
+import { SESSION_CHILD_LINK_ENTRY_TYPE } from "./paths.js";
+import { getSubagentProfile, listSubagentProfiles, normalizeBuiltinTools } from "./profiles.js";
+import { getProjectKey } from "./project.js";
+import { listAgents } from "./registry.js";
 import {
 	assertDirectory,
-	childRuntimeEnvironment,
 	resolveInputPath,
 	resolveTaskFilters,
 	resolveToolActorContext,
 } from "./session-scope.js";
+import { spawnSubagent } from "./spawn.js";
+import {
+	assertTaskLeaseAvailable,
+	createTask,
+	createTaskEvent,
+	getTask,
+	listTaskAgentLinks,
+	listTaskReadiness,
+	listUnresolvedTaskDependencies,
+	taskLeaseKindForProfile,
+	updateTask,
+} from "./task-registry.js";
+import type { CreateTaskInput, TaskReadinessRecord, TaskRecord, TaskState, TaskWaitingOn } from "./task-types.js";
+import type { AgentSummary, SpawnSubagentResult, SubagentProfile } from "./types.js";
 
 /** Active Meepo config for this extension process (set on register). */
 export function requireProfile(profileName: string): SubagentProfile {
@@ -445,12 +233,12 @@ export async function spawnChildFromParams(pi: ExtensionAPI, ctx: ExtensionConte
 		task: params.task,
 		profile,
 		spawnCwd,
-		model: params.model?.trim() || profile.model,
+		model: params.model?.trim() || profile.model || null,
 		tools,
-		priority: params.priority?.trim() || null,
+		priority: params.priority?.trim() ?? null,
 		taskId: task.id,
 		parentAgentId,
-		spawnedByAgentId: actor.kind === "agent" ? actor.agentId : null,
+		spawnedByAgentId: actor.kind === "agent" ? actor.agentId ?? null : null,
 		createdByKind: actor.kind === "agent" ? "agent" : "root",
 		allowDuplicateOwner: params.allowDuplicateOwner,
 		hierarchyMode,

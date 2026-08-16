@@ -1,98 +1,12 @@
 /**
- * service-ops — split from coordinator-helpers.
+ * Service ops: start, focus, capture, stop, reconcile Services.
  */
-/**
- * Coordinator helpers (spawn/reconcile/wake/UI). Tool registration lives in tools/*.
- */
-import { existsSync, readFileSync, statSync } from "node:fs";
-import { createHash, randomUUID } from "node:crypto";
-import { resolve } from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { DynamicBorder } from "@mariozechner/pi-coding-agent";
-import { StringEnum } from "@mariozechner/pi-ai";
-import { Container, Key, type SelectItem, SelectList, Text } from "@mariozechner/pi-tui";
-import { Type } from "@sinclair/typebox";
-import { openAgentsBoard, type AgentsBoardData, type AgentsBoardState, type BoardLaneId, type BoardTicket } from "./board.js";
-import { registerChildRuntime, getChildRuntimeEnvironment } from "./child-runtime.js";
-import { openAgentsDashboard, type AgentsDashboardData, type AgentsDashboardState } from "./dashboard.js";
-import { closeMeepoDb, getMeepoDb } from "./db.js";
-import { getRpcBridgeSocketPath, pingRpcBridge, readRpcBridgeStatus, sendRpcBridgeCommand } from "./rpc-client.js";
-import {
-	applyNoWaitSystemPrompt,
-	getBashCommandFromToolInput,
-	noWaitBashBlockReason,
-} from "./no-wait-policy.js";
-import { LEGACY_SESSION_CHILD_LINK_ENTRY_TYPE, SESSION_CHILD_LINK_ENTRY_TYPE } from "./paths.js";
-import { getAllowedBuiltinToolNames, getSubagentProfile, listSubagentProfiles, normalizeBuiltinTools } from "./profiles.js";
+import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { getMeepoDb } from "./db.js";
+import { getProcessHost } from "./process-host.js";
 import { getProjectKey } from "./project.js";
-import { truncateText } from "./text-util.js";
-import {
-	AgentMessagePermissionError,
-	canSendMessage,
-	createAgentEvent,
-	createAgentMessage,
-	createMessageWithRecipients,
-	createRootActorContext,
-	fetchAgentInboxV2,
-	getAgent,
-	getFleetSummary,
-	listAgentAttentionItemsV2,
-	listAgents,
-	listAttentionItems,
-	listDescendantAgentIds,
-	listHierarchyVisibleAgentIds,
-	listInboxMessages,
-	listMessagesForRecipient,
-	markAgentMessageRecipientsByIds,
-	markAgentMessageRecipientsByMessageIds,
-	markAgentMessages,
-	resolveAgentActorContext,
-	updateAgent,
-	updateAgentAttentionItemsV2ForOwner,
-	updateAttentionItemsForAgent,
-} from "./registry.js";
-import type { ListAgentAttentionItemsV2Filters } from "./registry.js";
-import { collectQueuedWakeCoalescingContext } from "./wake-coalescing.js";
-import { LEGACY_SERVICE_TOOL_ALIASES, loadMeepoConfig } from "./config.js";
-import { createMeepoRuntime, type MeepoRuntime } from "./runtime.js";
-import {
-	assertTaskLeaseAvailable,
-	cancelTaskLink,
-	createTask,
-	createTaskEvent,
-	createTaskLink,
-	deriveTaskHealth,
-	formatTaskLeaseConflict,
-	getTask,
-	getTaskLease,
-	getTaskLeaseConflict,
-	getTaskSummary,
-	linkTaskAgent,
-	listTaskAgentLinks,
-	listTaskAttention,
-	listTaskEvents,
-	listTaskHealth,
-	listTaskLinks,
-	listTaskReadiness,
-	listTasks,
-	listTaskSubtreeWithMeta,
-	listUnresolvedTaskDependencies,
-	reconcileTasks,
-	refreshTaskDependencyBlockState,
-	resolveDependenciesForCompletedTask,
-	taskLeaseKindForProfile,
-	unlinkTaskAgent,
-	updateTask,
-} from "./task-registry.js";
 import { getService, listServices, updateService } from "./service-registry.js";
 import { readServiceStatus, spawnService, tailFileLines } from "./service-spawn.js";
-import { spawnSubagent } from "./spawn.js";
-import { maybeNotifyHostAttention } from "./host-notify.js";
-import { getProcessHost } from "./process-host.js";
-import {
-	mapDeliveryModeToBridgeCommand,
-	missingHostTargetMessage,
-} from "./rpc-bridge-control.js";
 import type {
 	ListServicesFilters,
 	ServiceStatusSnapshot,
@@ -100,144 +14,34 @@ import type {
 	SpawnServiceResult,
 	UpdateServiceInput,
 } from "./service-types.js";
-import type {
-	AgentActorContext,
-	AgentAttentionV2Record,
-	AgentInboxMessageV2Record,
-	AgentMessageRecord,
-	AgentRecipientKind,
-	AgentRecipientRef,
-	AgentSummary,
-	AttentionItemRecord,
-	DeliveryMode,
-	DownwardMessageActionPolicy,
-	DownwardMessagePayload,
-	FleetSummary,
-	ListAgentsFilters,
-	RuntimeStatusSnapshot,
-	SessionChildLinkEntryData,
-	SpawnSubagentResult,
-	SubagentProfile,
-	TaskInteractionRecord,
-	UpdateAgentInput,
-} from "./types.js";
-import type {
-	CreateTaskInput,
-	ListTaskAgentLinksFilters,
-	ListTasksFilters,
-	TaskAgentLinkRecord,
-	TaskAttentionRecord,
-	TaskHealthSnapshot,
-	TaskLinkState,
-	TaskLinkType,
-	TaskLinkWithTasksRecord,
-	TaskReadinessRecord,
-	TaskRecord,
-	TaskState,
-	TaskSummaryCounts,
-	TaskWaitingOn,
-	UpdateTaskInput,
-} from "./task-types.js";
-import {
-	actorLabelForInteraction,
-	attentionItemIcon,
-	attentionItemLabel,
-	buildAdminAttentionText,
-	buildAttentionText,
-	buildAttentionV2Text,
-	buildInboxText,
-	buildInboxV2Text,
-	buildTaskAttentionText,
-	buildTaskLinksText,
-	buildTaskReadyText,
-	defaultDownwardActionPolicy,
-	formatAgentDetails,
-	formatAgentLine,
-	formatAttentionGateWarning,
-	formatAttentionWakeup,
-	formatCleanupCandidates,
-	formatCleanupResults,
-	formatFleetSummary,
-	formatFocusResult,
-	formatReconcileResult,
-	formatServiceDetails,
-	formatServiceFocusResult,
-	formatServiceLine,
-	formatServiceReconcileResult,
-	formatServiceStartResult,
-	formatServiceStopResult,
-	formatSpawnSuccess,
-	formatStopResult,
-	formatTaskDetails,
-	formatTaskLine,
-	formatTaskLinkLine,
-	formatTaskReadinessLine,
-	ownerLabelForInteraction,
-	serviceReadyLabel,
-	serviceStateIcon,
-	summarizeFilters,
-	summarizeServiceFilters,
-	summarizeTaskFilters,
-	taskInteractionIcon,
-	taskInteractionLabel,
-} from "./formatters.js";
-import {
-	TaskSubtreeControlAction,
-	applyTaskSubtreeControl,
-	buildTaskSubtreeControlPreview,
-	configureSubtreeControlDeps,
-	formatTaskSubtreeControlApplyResult,
-	formatTaskSubtreeControlConfirmation,
-	formatTaskSubtreeControlPreview,
-} from "./subtree-control.js";
-import {
-	deliverQueuedMessagesViaBridge,
-	queueDownwardMessage,
-} from "./bridge-delivery.js";
-import {
-	SubagentAttentionParams,
-	SubagentCaptureParams,
-	SubagentCleanupParams,
-	SubagentFocusParams,
-	SubagentGetParams,
-	SubagentInboxParams,
-	SubagentListParams,
-	SubagentMessageParams,
-	SubagentReconcileParams,
-	SubagentSpawnParams,
-	SubagentStopParams,
-	TaskAttentionParams,
-	TaskCreateParams,
-	TaskDispatchReadyParams,
-	TaskGetParams,
-	TaskLinkAgentParams,
-	TaskLinkParams,
-	TaskLinksParams,
-	TaskListParams,
-	TaskMoveParams,
-	TaskNoteParams,
-	TaskReadyParams,
-	TaskReconcileParams,
-	TaskSubtreeControlParams,
-	TaskUnlinkAgentParams,
-	TaskUnlinkParams,
-	TaskUpdateParams,
-	TmuxServiceCaptureParams,
-	TmuxServiceFocusParams,
-	TmuxServiceGetParams,
-	TmuxServiceListParams,
-	TmuxServiceReconcileParams,
-	TmuxServiceStartParams,
-	TmuxServiceStopParams,
-} from "./tool-schemas.js";
-import type { CleanupCandidate } from "./cleanup-types.js";
-import {
-	ACTIVE_AGENT_STATES,
-	OPEN_AGENT_ATTENTION_V2_STATES,
-	OPEN_ATTENTION_STATES,
-	TERMINAL_AGENT_STATES,
-} from "./registry-shared.js";
 import { assertDirectory, resolveInputPath } from "./session-scope.js";
+
+function readLatestServiceStatus(service: ServiceSummary): ServiceStatusSnapshot | null {
+	return readServiceStatus(service.latestStatusFile);
+}
+
+function buildServicePatchFromStatus(service: ServiceSummary, status: ServiceStatusSnapshot): UpdateServiceInput {
+	const nextState = status.state;
+	const nextLastError =
+		nextState === "error"
+			? (status.lastError ??
+				(typeof status.lastExitCode === "number" ? `Command exited with status ${status.lastExitCode}.` : service.lastError ?? "Service exited with an error."))
+			: null;
+	return {
+		state: nextState,
+		updatedAt: status.updatedAt,
+		finishedAt: status.finishedAt ?? (nextState === "running" || nextState === "launching" ? null : service.finishedAt),
+		lastExitCode: status.lastExitCode ?? (nextState === "running" ? null : service.lastExitCode),
+		lastError: nextLastError,
+	};
+}
+
+function maybeDetectServiceReady(service: ServiceSummary): number | null {
+	if (!service.readySubstring || service.readyMatchedAt) return null;
+	const output = tailFileLines(service.logFile, 4000);
+	if (!output.includes(service.readySubstring)) return null;
+	return Date.now();
+}
 
 /** Active Meepo config for this extension process (set on register). */
 export function resolveServiceFilters(
@@ -366,7 +170,7 @@ export async function stopServiceById(id: string, force: boolean, reason?: strin
 		}
 		throw new Error(`Service ${service.id} no longer has a live host target. Use force=true or reconcile.`);
 	}
-	const result = await host.stop(target, { force });
+	const result = await host.stop(target!, { force });
 	if (force) {
 		updateService(db, service.id, {
 			state: "stopped",

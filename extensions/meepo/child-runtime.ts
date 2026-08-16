@@ -48,6 +48,7 @@ import {
 	formatDownwardMessage,
 	getAssistantText,
 	getDeliveryOptions,
+	getV2Payload,
 	isAssistantMessage,
 	markV2RecipientStatusForLegacyMessage,
 } from "./child-downward.js";

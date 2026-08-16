@@ -7,7 +7,9 @@
     "pi-package"
   ],
   "scripts": {
-    "test": "npx --yes tsx --test 'extensions/meepo/**/*.test.ts'"
+    "test": "npx --yes tsx --test 'extensions/meepo/**/*.test.ts'",
+    "typecheck": "tsc --noEmit",
+    "knip": "knip --no-progress"
   },
   "pi": {
     "extensions": [
@@ -18,13 +20,16 @@
     ]
   },
   "peerDependencies": {
-    "@mariozechner/pi-ai": "*",
     "@mariozechner/pi-agent-core": "*",
+    "@mariozechner/pi-ai": "*",
     "@mariozechner/pi-coding-agent": "*",
     "@mariozechner/pi-tui": "*",
     "@sinclair/typebox": "*"
   },
   "devDependencies": {
-    "tsx": "^4.19.0"
+    "@types/node": "^26.2.0",
+    "knip": "^6.32.2",
+    "tsx": "^4.19.0",
+    "typescript": "^7.0.2"
   }
 }

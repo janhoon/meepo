@@ -4,19 +4,10 @@
 import { randomUUID } from "node:crypto";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { AssistantMessage, TextContent } from "@mariozechner/pi-ai";
-import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { getMeepoDb } from "./db.js";
 import { getRpcBridgeSocketPath, sendRpcBridgeCommand } from "./rpc-client.js";
-import {
-	createAgentEvent,
-	getAgent,
-	listMessagesForRecipient,
-	markAgentMessageRecipientsByIds,
-	markAgentMessageRecipientsByMessageIds,
-	markAgentMessages,
-	updateAgent,
-} from "./registry.js";
-import { truncateText } from "./text-util.js";
+import { createAgentEvent, getAgent, updateAgent } from "./registry.js";
+import { listChildDeliveryQueue, markInbox } from "./inbox.js";
 import type {
 	AgentMessageRecord,
 	AgentTransportState,
@@ -144,11 +135,11 @@ export function markV2RecipientStatusForLegacyMessage(
 ): string | null {
 	const payload = getV2Payload(message);
 	if (payload?.v2RecipientRowId) {
-		markAgentMessageRecipientsByIds(db, [payload.v2RecipientRowId], status, { recipientAgentId, transportKind });
+		markInbox(db, [payload.v2RecipientRowId], status === "acked" ? "acked" : "delivered", { childId: recipientAgentId, transportKind });
 		return payload.v2MessageId ?? null;
 	}
 	if (payload?.v2MessageId) {
-		markAgentMessageRecipientsByMessageIds(db, [payload.v2MessageId], status, { recipientAgentId, transportKind });
+		markInbox(db, [payload.v2MessageId], status === "acked" ? "acked" : "delivered", { childId: recipientAgentId, transportKind });
 		return payload.v2MessageId;
 	}
 	return null;
@@ -156,7 +147,7 @@ export function markV2RecipientStatusForLegacyMessage(
 
 export async function deliverQueuedParentMessagesViaBridge(parentAgentId: string): Promise<ParentPublishDeliveryResult> {
 	const db = getMeepoDb();
-	const queued = listMessagesForRecipient(db, parentAgentId, { targetKind: "child", limit: 50 });
+	const queued = listChildDeliveryQueue(db, parentAgentId, { limit: 50 });
 	const legacyMessageIds = queued.map((message) => message.id);
 	const parent = getAgent(db, parentAgentId);
 	if (!parent) {
@@ -228,9 +219,11 @@ export async function deliverQueuedParentMessagesViaBridge(parentAgentId: string
 					: { command: "steer" as const, message: formatted };
 			const response = await sendRpcBridgeCommand(socketPath, bridgeCommand, 5000);
 			if (!response.success) throw new Error(response.error ?? `RPC bridge rejected ${message.kind}.`);
-			markAgentMessages(db, [message.id], "delivered");
-			markAgentMessages(db, [message.id], "acked");
 			const ackedV2MessageId = markV2RecipientStatusForLegacyMessage(db, message, "acked", parent.id, "rpc_bridge");
+			markInbox(db, [getV2Payload(message)?.v2RecipientRowId ?? message.id], "acked", {
+				childId: parent.id,
+				transportKind: "rpc_bridge",
+			});
 			if (ackedV2MessageId) v2AckedMessageIds.push(ackedV2MessageId);
 			createAgentEvent(db, {
 				id: randomUUID(),

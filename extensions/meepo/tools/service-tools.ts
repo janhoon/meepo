@@ -3,20 +3,22 @@
  */
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import {
-	captureServiceById,
-	focusServiceById,
 	formatServiceDetails,
 	formatServiceFocusResult,
 	formatServiceLine,
 	formatServiceReconcileResult,
 	formatServiceStartResult,
 	formatServiceStopResult,
+	summarizeServiceFilters,
+} from "../formatters.js";
+import {
+	captureServiceById,
+	focusServiceById,
 	reconcileServices,
 	resolveServiceFilters,
 	spawnServiceFromParams,
 	stopServiceById,
-	summarizeServiceFilters,
-} from "../coordinator-helpers.js";
+} from "../service-ops.js";
 import { getMeepoDb } from "../db.js";
 import { getService, listServices } from "../service-registry.js";
 import type { ServiceSummary } from "../service-types.js";

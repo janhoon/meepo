@@ -3,28 +3,22 @@
  */
 import { randomUUID } from "node:crypto";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { updateFleetUi } from "../coordinator-session.js";
 import {
 	buildTaskAttentionText,
 	buildTaskDispatchText,
 	buildTaskLinksText,
 	buildTaskReadyText,
-	createTaskFromParams,
-	dispatchReadyTasks,
 	formatTaskDetails,
 	formatTaskLine,
 	formatTaskLinkLine,
 	formatTaskReadinessLine,
-	getReadyTasksForDispatch,
-	getTaskInteractions,
-	getTaskLinkedAgents,
-	listTaskInteractionsForTaskIds,
-	moveTaskById,
-	resolveTaskFilters,
-	resolveTaskInteractionWithNote,
-	sortTasksForList,
 	summarizeTaskFilters,
-	updateFleetUi,
-} from "../coordinator-helpers.js";
+} from "../formatters.js";
+import { resolveTaskFilters, sortTasksForList } from "../session-scope.js";
+import { createTaskFromParams, dispatchReadyTasks, getReadyTasksForDispatch, getTaskLinkedAgents } from "../spawn-ops.js";
+import { moveTaskById } from "../standup.js";
+import { getTaskInteractions, listTaskInteractionsForTaskIds, resolveTaskInteractionWithNote } from "../task-interactions.js";
 import { getMeepoDb } from "../db.js";
 import { listAgents } from "../registry.js";
 import {

@@ -11,7 +11,7 @@ import type {
 
 const ACTIVE_SERVICE_STATES: ServiceState[] = ["launching", "running"];
 
-const SERVICE_FIELD_TO_COLUMN: Record<keyof UpdateServiceInput, string> = {
+const SERVICE_FIELD_TO_COLUMN: Record<Exclude<keyof UpdateServiceInput, "host">, string> = {
 	spawnSessionId: "spawn_session_id",
 	spawnSessionFile: "spawn_session_file",
 	spawnCwd: "spawn_cwd",
@@ -50,7 +50,6 @@ function toServiceSummary(row: Record<string, unknown>): ServiceSummary {
 			hostPrimaryId: (row.host_primary_id as string | null) ?? null,
 			hostDisplayName: (row.host_display_name as string | null) ?? null,
 		}),
-		hostTargetJson: (row.host_target_json as string | null) ?? null,
 		runDir: row.run_dir as string,
 		logFile: row.log_file as string,
 		latestStatusFile: row.latest_status_file as string,

@@ -26,7 +26,6 @@ export interface ServiceSummary {
 	readyMatchedAt: number | null;
 	state: ServiceState;
 	host: HostIdentity | null;
-	hostTargetJson: string | null;
 	runDir: string;
 	logFile: string;
 	latestStatusFile: string;

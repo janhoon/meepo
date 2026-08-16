@@ -314,8 +314,6 @@ export interface AgentSummary {
 	bridgeUpdatedAt: number | null;
 	bridgeLastError: string | null;
 	host: HostIdentity | null;
-	/** Store-internal last-known adapter refs. Not a caller field. */
-	hostTargetJson: string | null;
 	runDir: string;
 	sessionFile: string;
 	lastToolName: string | null;

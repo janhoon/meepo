@@ -43,7 +43,7 @@ export const OPEN_AGENT_ATTENTION_V2_STATES: AgentAttentionV2Record["state"][] =
 	"waiting_on_owner",
 ];
 
-export const AGENT_FIELD_TO_COLUMN: Record<keyof UpdateAgentInput, string> = {
+export const AGENT_FIELD_TO_COLUMN: Record<Exclude<keyof UpdateAgentInput, "host">, string> = {
 	parentAgentId: "parent_agent_id",
 	orgId: "org_id",
 	roleKey: "role_key",
@@ -136,7 +136,6 @@ export function toAgentSummary(row: Record<string, unknown>): AgentSummary {
 			hostPrimaryId: (row.host_primary_id as string | null) ?? null,
 			hostDisplayName: (row.host_display_name as string | null) ?? null,
 		}),
-		hostTargetJson: (row.host_target_json as string | null) ?? null,
 		runDir: row.run_dir as string,
 		sessionFile: row.session_file as string,
 		lastToolName: (row.last_tool_name as string | null) ?? null,

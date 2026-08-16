@@ -1,0 +1,37 @@
+{
+  "$schema": "https://unpkg.com/knip@5/schema.json",
+  "entry": [
+    "extensions/meepo/index.ts",
+    "extensions/meepo/rpc-bridge.mjs",
+    "extensions/meepo/**/*.test.ts"
+  ],
+  "project": ["extensions/meepo/**/*.{ts,mjs}"],
+  "ignoreDependencies": [
+    "@mariozechner/pi-ai",
+    "@mariozechner/pi-agent-core",
+    "@mariozechner/pi-coding-agent",
+    "@mariozechner/pi-tui",
+    "@sinclair/typebox"
+  ],
+  "ignoreBinaries": ["pi"],
+  "exclude": [
+    "exports",
+    "nsExports",
+    "types",
+    "nsTypes",
+    "enumMembers",
+    "namespaceMembers",
+    "unlisted",
+    "unresolved",
+    "binaries",
+    "catalog",
+    "catalogReferences",
+    "optionalPeerDependencies"
+  ],
+  "rules": {
+    "files": "error",
+    "dependencies": "off",
+    "devDependencies": "error",
+    "duplicates": "error"
+  }
+}
