@@ -133,6 +133,8 @@ export interface FetchAgentInboxV2Input {
 	markRead?: boolean;
 	statuses?: AgentMessageRecipientStatus[];
 	projectKey?: string;
+	/** When set, only messages from these senders are returned (parent-owned 1:1 inbox). Empty => none. */
+	senderAgentIds?: string[];
 	threadId?: string;
 	limit?: number;
 }

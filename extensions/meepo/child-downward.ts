@@ -2,6 +2,8 @@
  * Child downward message delivery (parent -> this child via bridge/poll).
  */
 import { randomUUID } from "node:crypto";
+import type { AgentMessage } from "@mariozechner/pi-agent-core";
+import type { AssistantMessage, TextContent } from "@mariozechner/pi-ai";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { getMeepoDb } from "./db.js";
 import { getRpcBridgeSocketPath, sendRpcBridgeCommand } from "./rpc-client.js";

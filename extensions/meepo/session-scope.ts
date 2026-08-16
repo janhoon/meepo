@@ -15,6 +15,7 @@ import { getProjectKey } from "./project.js";
 import {
 	createRootActorContext,
 	listAgents,
+	listAttentionItems,
 	listDescendantAgentIds,
 	listHierarchyVisibleAgentIds,
 	resolveAgentActorContext,
@@ -22,12 +23,24 @@ import {
 import { OPEN_ATTENTION_STATES } from "./registry-shared.js";
 import type {
 	AgentActorContext,
+	AgentSummary,
+	AttentionItemRecord,
 	ListAgentsFilters,
 	SessionChildLinkEntryData,
 } from "./types.js";
 import type { ListTasksFilters, TaskRecord, TaskState, TaskWaitingOn } from "./task-types.js";
+import type { DatabaseSync } from "node:sqlite";
 
 export const childRuntimeEnvironment = getChildRuntimeEnvironment();
+
+/** Tool/wake scopes that may pin parent-owned subjects. */
+export type OwnershipScope = "all" | "current_project" | "current_session" | "descendants";
+
+/**
+ * Owner kinds visible on root-coordinator surfaces (wake, board, default attention).
+ * Agent-owned items stay 1:1 with the parent agent via bridge/inbox — never root broadcast.
+ */
+export const ROOT_SURFACE_OWNER_KINDS = ["root", "user"] as const;
 
 export function resolveInputPath(baseDir: string, rawPath: string | undefined): string {
 	const normalized = (rawPath ?? baseDir).replace(/^@/, "");
@@ -89,6 +102,151 @@ export function getLinkedChildIds(ctx: ExtensionContext): string[] {
 	return [...ids];
 }
 
+export interface ComputeParentOwnedAgentIdsInput {
+	actor: AgentActorContext;
+	projectKey: string;
+	/** Root session identity; ignored for agent actors. */
+	spawnSessionId?: string | null;
+	spawnSessionFile?: string | null;
+	/** Explicit session→child links from the coordinator session journal. */
+	linkedChildIds?: string[];
+}
+
+/**
+ * Pure ownership core (DB + values only). Prefer this in unit tests.
+ * Root: spawn-session agents ∪ linked children ∪ their descendants.
+ * Agent: descendant subtree only (1:1 parent routing).
+ */
+export function computeParentOwnedAgentIds(db: DatabaseSync, input: ComputeParentOwnedAgentIdsInput): string[] {
+	if (input.actor.kind === "agent") {
+		return listDescendantAgentIds(db, [input.actor.agentId]);
+	}
+
+	const sessionOwned = listHierarchyVisibleAgentIds(db, input.actor, {
+		projectKey: input.projectKey,
+		spawnSessionId: input.spawnSessionId ?? undefined,
+		spawnSessionFile: input.spawnSessionFile ?? undefined,
+	});
+	const linked = input.linkedChildIds ?? [];
+	const roots = [...new Set([...sessionOwned, ...linked])];
+	if (roots.length === 0) return [];
+	const descendants = listDescendantAgentIds(db, roots);
+	return [...new Set([...roots, ...descendants])];
+}
+
+/**
+ * Agent ids this parent is allowed to receive subagent messages from.
+ * Thin ctx wrapper around {@link computeParentOwnedAgentIds}.
+ */
+export function getParentOwnedAgentIds(ctx: ExtensionContext, options: { projectKey?: string } = {}): string[] {
+	return computeParentOwnedAgentIds(getMeepoDb(), {
+		actor: resolveToolActorContext(ctx),
+		projectKey: options.projectKey ?? getProjectKey(ctx.cwd),
+		spawnSessionId: ctx.sessionManager.getSessionId(),
+		spawnSessionFile: ctx.sessionManager.getSessionFile(),
+		linkedChildIds: getLinkedChildIds(ctx),
+	});
+}
+
+export interface ResolveOwnedSubjectIdsParts {
+	/** Result of {@link computeParentOwnedAgentIds} / getParentOwnedAgentIds. */
+	parentOwnedIds: string[];
+	linkedChildIds: string[];
+	listDescendants: (parentIds: string[]) => string[];
+}
+
+/**
+ * Pure scope→owned-ids policy (no ctx/DB). Used by {@link resolveOwnedSubjectIds} and unit tests.
+ * - `all` → `null` (no pin; explicit fleet-wide escape hatch)
+ * - `current_project` / `current_session` → parentOwnedIds (**same id set**)
+ * - `descendants` → linkedChildIds ∪ their descendants
+ * Empty array means "owned nobody" (never fall open to project-wide).
+ *
+ * ## `current_project` ≡ `current_session` on parent-owned agent surfaces
+ *
+ * Under root-coordinator agent/attention/inbox pins, both labels intentionally resolve to the
+ * same owned subject id set (session-spawned ∪ linked children ∪ their descendants).
+ * Keep both API labels for operator continuity; do **not** hand-roll two parallel id lists that
+ * pretend to differ. The only material difference is {@link withOwnedSubjectPin}: `current_project`
+ * also sets `projectKey`, while `current_session` does not. Task filters remain ambient
+ * (projectKey vs spawn-session columns) and are **not** on this ownership pin.
+ */
+export function resolveOwnedSubjectIdsFromParts(scope: OwnershipScope, parts: ResolveOwnedSubjectIdsParts): string[] | null {
+	if (scope === "all") return null;
+	if (scope === "descendants") {
+		if (parts.linkedChildIds.length === 0) return [];
+		return [...new Set([...parts.linkedChildIds, ...parts.listDescendants(parts.linkedChildIds)])];
+	}
+	// current_project ≡ current_session owned subject ids (see doc above).
+	return parts.parentOwnedIds;
+}
+
+/**
+ * Single ownership seam for wake, inbox, attention, board, list, dashboard, and reconcile.
+ * Thin ctx wrapper around {@link resolveOwnedSubjectIdsFromParts}.
+ *
+ * `current_project` and `current_session` share the same parent-owned agent id set — see
+ * {@link resolveOwnedSubjectIdsFromParts}. Prefer {@link resolveAgentFilters} /
+ * {@link resolveAttentionFilters} / {@link resolveRootInboxSenderIds} at call sites instead of
+ * composing this helper ad hoc.
+ */
+export function resolveOwnedSubjectIds(
+	ctx: ExtensionContext,
+	scope: OwnershipScope,
+	options: { projectKey?: string } = {},
+): string[] | null {
+	const projectKey = options.projectKey ?? getProjectKey(ctx.cwd);
+	const linkedChildIds = getLinkedChildIds(ctx);
+	return resolveOwnedSubjectIdsFromParts(scope, {
+		parentOwnedIds: getParentOwnedAgentIds(ctx, { projectKey }),
+		linkedChildIds,
+		listDescendants: (parentIds) => listDescendantAgentIds(getMeepoDb(), parentIds),
+	});
+}
+
+/**
+ * Root-coordinator inbox sender allow-list via the single ownership seam.
+ * - `scope=all` → `undefined` (no sender pin / fleet-wide)
+ * - empty owned set → `[]` (fail-closed: no mail)
+ * - otherwise → owned subject ids
+ *
+ * Use only for root actor inboxes. Agent actors already pin by recipient identity; do not
+ * parallel-compose {@link resolveOwnedSubjectIds} in tools.
+ */
+export function resolveRootInboxSenderIds(
+	ctx: ExtensionContext,
+	scope: OwnershipScope,
+	options: { projectKey?: string } = {},
+): string[] | undefined {
+	const owned = resolveOwnedSubjectIds(ctx, scope, options);
+	return owned === null ? undefined : owned;
+}
+
+/**
+ * Apply the ownership pin to a filter bag used by agent list / attention queries.
+ * When `owned` is non-null it is authoritative — callers must not also AND spawn-session
+ * filters (linked children and their descendants often carry different spawn sessions).
+ * `current_project` additionally pins projectKey; `current_session` uses the same owned ids
+ * without forcing projectKey (labels differ; subject pin does not).
+ */
+export function withOwnedSubjectPin<
+	T extends { projectKey?: string; ids?: string[]; agentIds?: string[]; subjectAgentIds?: string[] },
+>(
+	filters: T,
+	scope: OwnershipScope,
+	owned: string[] | null,
+	options: { projectKey: string; idField: "ids" | "agentIds" | "subjectAgentIds" },
+): T {
+	const next = { ...filters };
+	if (owned !== null) {
+		(next as { ids?: string[]; agentIds?: string[]; subjectAgentIds?: string[] })[options.idField] = owned;
+	}
+	if (scope === "current_project") {
+		next.projectKey = options.projectKey;
+	}
+	return next;
+}
+
 export function resolveToolActorContext(ctx: ExtensionContext): AgentActorContext {
 	const db = getMeepoDb();
 	if (childRuntimeEnvironment) {
@@ -135,60 +293,76 @@ export function getVisibleAgentIdsForTool(ctx: ExtensionContext, requestedIds?: 
 
 export function resolveAttentionFilters(
 	ctx: ExtensionContext,
-	scope: "all" | "current_project" | "current_session" | "descendants",
-	params: { audience?: "all" | "coordinator" | "user"; includeResolved?: boolean; limit?: number },
+	scope: OwnershipScope,
+	params: {
+		audience?: "all" | "coordinator" | "user";
+		includeResolved?: boolean;
+		limit?: number;
+		/** Override default open-state set (e.g. wake omits acknowledged). */
+		states?: import("./types.js").ListAttentionItemsFilters["states"];
+	},
 ) {
+	const projectKey = getProjectKey(ctx.cwd);
 	const filters: import("./types.js").ListAttentionItemsFilters = {
 		limit: params.limit,
-		states: params.includeResolved ? undefined : OPEN_ATTENTION_STATES,
+		states:
+			params.states !== undefined
+				? params.states
+				: params.includeResolved
+					? undefined
+					: OPEN_ATTENTION_STATES,
 	};
 	if (params.audience === "coordinator") filters.audiences = ["coordinator"];
 	if (params.audience === "user") filters.audiences = ["user"];
-	switch (scope) {
-		case "current_project":
-			filters.projectKey = getProjectKey(ctx.cwd);
-			break;
-		case "current_session":
-			filters.spawnSessionId = ctx.sessionManager.getSessionId();
-			filters.spawnSessionFile = ctx.sessionManager.getSessionFile();
-			break;
-		case "descendants":
-			filters.agentIds = getLinkedChildIds(ctx);
-			break;
-		case "all":
-		default:
-			break;
-	}
-	return filters;
+	// Ownership pin only — never stack spawnSession* (would drop linked + descendants).
+	return withOwnedSubjectPin(filters, scope, resolveOwnedSubjectIds(ctx, scope, { projectKey }), {
+		projectKey,
+		idField: "agentIds",
+	});
 }
 
 export function resolveAgentFilters(
 	ctx: ExtensionContext,
-	scope: "all" | "current_project" | "current_session" | "descendants",
+	scope: OwnershipScope,
 	params: { activeOnly?: boolean; blockedOnly?: boolean; unreadOnly?: boolean; limit?: number },
 ): ListAgentsFilters {
+	const projectKey = getProjectKey(ctx.cwd);
 	const filters: ListAgentsFilters = {
 		activeOnly: params.activeOnly,
 		blockedOnly: params.blockedOnly,
 		unreadOnly: params.unreadOnly,
 		limit: params.limit,
 	};
-	switch (scope) {
-		case "current_project":
-			filters.projectKey = getProjectKey(ctx.cwd);
-			break;
-		case "current_session":
-			filters.spawnSessionId = ctx.sessionManager.getSessionId();
-			filters.spawnSessionFile = ctx.sessionManager.getSessionFile();
-			break;
-		case "descendants":
-			filters.descendantOf = getLinkedChildIds(ctx);
-			break;
-		case "all":
-		default:
-			break;
-	}
-	return filters;
+	// Same ownership seam as board/inbox/attention — ids pin, no parallel spawn-session path.
+	return withOwnedSubjectPin(filters, scope, resolveOwnedSubjectIds(ctx, scope, { projectKey }), {
+		projectKey,
+		idField: "ids",
+	});
+}
+
+/**
+ * Shared attention-gate snapshot for spawn surfaces (tool + wizard).
+ * Both items and agents go through the ownership seam — never project-wide listAgents.
+ * Default scope is current_project; current_session shares the same owned id set.
+ */
+export function loadAttentionGate(
+	ctx: ExtensionContext,
+	scope: OwnershipScope = "current_project",
+	params: { itemLimit?: number; agentLimit?: number } = {},
+): { items: AttentionItemRecord[]; agents: Map<string, AgentSummary> } {
+	const db = getMeepoDb();
+	const items = listAttentionItems(
+		db,
+		resolveAttentionFilters(ctx, scope, { limit: params.itemLimit ?? 5 }),
+	);
+	// Fail-closed owned pin (same scope as items) — never ambient projectKey-only listAgents.
+	const agents = new Map(
+		listAgents(db, resolveAgentFilters(ctx, scope, { limit: params.agentLimit ?? 100 })).map((agent) => [
+			agent.id,
+			agent,
+		]),
+	);
+	return { items, agents };
 }
 
 export function resolveTaskFilters(

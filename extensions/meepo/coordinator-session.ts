@@ -237,8 +237,6 @@ import {
 	OPEN_ATTENTION_STATES,
 	TERMINAL_AGENT_STATES,
 } from "./registry-shared.js";
-import { suppressDuplicateLegacyAttentionItems } from "./task-interactions.js";
-
 export {
 	ACTIVE_AGENT_STATES,
 	OPEN_AGENT_ATTENTION_V2_STATES,
@@ -253,23 +251,49 @@ export function setActiveMeepoRuntime(runtime: MeepoRuntime | null): void {
 	activeMeepoRuntime = runtime;
 }
 
-// Re-export session-scope helpers for callers that still import them from this module.
-// coordinator-helpers barrels session-scope first; avoid duplicate named exports there by
-// keeping these as local re-exports only when this file is imported directly.
-export {
+// Single session-scope import (local use + re-export for direct coordinator-session importers).
+// coordinator-helpers barrels session-scope first; keep these re-exports only for direct imports.
+import {
 	applyHierarchyVisibilityToAgentFilters,
 	assertDirectory,
 	childRuntimeEnvironment,
+	computeParentOwnedAgentIds,
 	getLinkedChildIds,
+	getParentOwnedAgentIds,
 	getVisibleAgentIdsForTool,
 	resolveAgentFilters,
 	resolveAttentionFilters,
 	resolveInputPath,
+	resolveOwnedSubjectIds,
+	resolveOwnedSubjectIdsFromParts,
+	resolveRootInboxSenderIds,
 	resolveTaskFilters,
 	resolveToolActorContext,
+	ROOT_SURFACE_OWNER_KINDS,
 	sortTasksForList,
+	withOwnedSubjectPin,
 } from "./session-scope.js";
-import { childRuntimeEnvironment } from "./session-scope.js";
+export {
+	applyHierarchyVisibilityToAgentFilters,
+	assertDirectory,
+	childRuntimeEnvironment,
+	computeParentOwnedAgentIds,
+	getLinkedChildIds,
+	getParentOwnedAgentIds,
+	getVisibleAgentIdsForTool,
+	resolveAgentFilters,
+	resolveAttentionFilters,
+	resolveInputPath,
+	resolveOwnedSubjectIds,
+	resolveOwnedSubjectIdsFromParts,
+	resolveRootInboxSenderIds,
+	resolveTaskFilters,
+	resolveToolActorContext,
+	ROOT_SURFACE_OWNER_KINDS,
+	sortTasksForList,
+	withOwnedSubjectPin,
+};
+import { resolveAdminAttentionV2Filters, suppressDuplicateLegacyAttentionItems } from "./task-interactions.js";
 
 export const ATTENTION_WAKE_POLL_MS = 2000;
 export let lastFocusedActiveAgentId: string | undefined;
@@ -315,27 +339,34 @@ export function attentionItemFromV2(item: AgentAttentionV2Record): AttentionItem
 }
 
 export async function wakeCoordinatorFromAttention(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
+	// Child sessions (including mid-level parents) must not consume root attention.
+	// Parent-agent delivery is 1:1 via recipient_agent_id + RPC bridge.
 	if (childRuntimeEnvironment) return;
 	const db = getMeepoDb();
-	const projectKey = getProjectKey(ctx.cwd);
-	const v2Items = listAgentAttentionItemsV2(db, {
-		projectKey,
-		states: ["open", "acknowledged", "waiting_on_owner"],
+	// Same filter builders as subagent_attention / board — states passed in (no post-hoc bag mutation).
+	const v2Filters = resolveAdminAttentionV2Filters(ctx, "current_session", {
 		limit: 25,
+		states: ["open", "acknowledged", "waiting_on_owner"],
 	});
-	const legacyItems = suppressDuplicateLegacyAttentionItems(
-		listAttentionItems(db, {
-			projectKey,
-			states: ["open", "waiting_on_coordinator", "waiting_on_user"],
-			limit: 25,
-		}),
-		v2Items,
-	);
+	if (v2Filters.subjectAgentIds && v2Filters.subjectAgentIds.length === 0) return;
+	const v2Items = listAgentAttentionItemsV2(db, v2Filters);
+	const legacyFilters = resolveAttentionFilters(ctx, "current_session", {
+		limit: 25,
+		states: ["open", "waiting_on_coordinator", "waiting_on_user"],
+	});
+	const legacyItems = suppressDuplicateLegacyAttentionItems(listAttentionItems(db, legacyFilters), v2Items);
 	const items = [...v2Items.map(attentionItemFromV2), ...legacyItems].sort(
 		(a, b) => b.priority - a.priority || a.createdAt - b.createdAt,
 	);
 	if (items.length === 0) return;
-	const agents = new Map(listAgents(db, { projectKey, limit: 200 }).map((agent) => [agent.id, agent]));
+	// Prefer subject pin from the shared filter builders; never fall open to fleet-wide agent lookup.
+	const ownedSubjectIds = v2Filters.subjectAgentIds ?? legacyFilters.agentIds ?? [];
+	const agents = new Map(
+		(ownedSubjectIds.length > 0
+			? listAgents(db, { ids: ownedSubjectIds, limit: Math.max(ownedSubjectIds.length, 1) })
+			: []
+		).map((agent) => [agent.id, agent]),
+	);
 
 	for (const item of items) {
 		const agent = agents.get(item.agentId);
@@ -390,16 +421,21 @@ export function updateFleetUi(ctx: ExtensionContext): void {
 		);
 		return;
 	}
-	const attentionItems = listAttentionItems(db, {
-		projectKey,
-		states: ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user"],
-		limit: 4,
-	});
+	// Status chrome is ownership-pinned — never ambient project-wide children from other sessions.
+	const attentionItems = listAttentionItems(
+		db,
+		resolveAttentionFilters(ctx, "current_session", {
+			states: ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user"],
+			limit: 4,
+		}),
+	);
 	if (attentionItems.length === 0) {
 		ctx.ui.setWidget("meepo", undefined);
 		return;
 	}
-	const agents = new Map(listAgents(db, { projectKey, limit: 100 }).map((agent) => [agent.id, agent]));
+	const agents = new Map(
+		listAgents(db, resolveAgentFilters(ctx, "current_session", { limit: 100 })).map((agent) => [agent.id, agent]),
+	);
 	const lines = attentionItems.map((item) => {
 		const agent = agents.get(item.agentId);
 		const title = agent ? truncateText(agent.title, 34) : item.agentId;

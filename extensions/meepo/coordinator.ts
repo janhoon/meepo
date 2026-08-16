@@ -6,6 +6,7 @@ import { DynamicBorder } from "@mariozechner/pi-coding-agent";
 import { Container, Key, type SelectItem, SelectList, Text } from "@mariozechner/pi-tui";
 import { LEGACY_SERVICE_TOOL_ALIASES, loadMeepoConfig } from "./config.js";
 import type { MeepoRuntime } from "./runtime.js";
+import { deliverQueuedMessagesViaBridge } from "./bridge-delivery.js";
 import { registerChildRuntime } from "./child-runtime.js";
 import { configureSubtreeControlDeps } from "./subtree-control.js";
 import { closeMeepoDb, getMeepoDb } from "./db.js";
@@ -691,6 +692,12 @@ export function registerMeepoCoordinatorTools(pi: ExtensionAPI, runtime: MeepoRu
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
+		// Child sessions only need child-runtime hooks. Coordinator reconcile/delivery must not
+		// run there — missing coordinator imports used to throw here and delay the child's
+		// ability to accept the initial RPC prompt under herdr.
+		if (childRuntimeEnvironment) {
+			return;
+		}
 		const db = getMeepoDb();
 		await reconcileAgents(ctx, { scope: "current_project", activeOnly: false, limit: 200 }).catch(() => {});
 		reconcileTasks(db, { projectKey: getProjectKey(ctx.cwd), limit: 500 });
@@ -700,20 +707,17 @@ export function registerMeepoCoordinatorTools(pi: ExtensionAPI, runtime: MeepoRu
 				void deliverQueuedMessagesViaBridge(agent.id);
 			}
 		}
-		if (!childRuntimeEnvironment) {
-			if (attentionWakePoll) clearInterval(attentionWakePoll);
-			setAttentionWakePoll(setInterval(() => {
-				void wakeCoordinatorFromAttention(pi, ctx).catch(() => {});
-			}, ATTENTION_WAKE_POLL_MS));
-			await wakeCoordinatorFromAttention(pi, ctx).catch(() => {});
-		}
+		if (attentionWakePoll) clearInterval(attentionWakePoll);
+		setAttentionWakePoll(setInterval(() => {
+			void wakeCoordinatorFromAttention(pi, ctx).catch(() => {});
+		}, ATTENTION_WAKE_POLL_MS));
+		await wakeCoordinatorFromAttention(pi, ctx).catch(() => {});
 		updateFleetUi(ctx);
 	});
 
 	pi.on("agent_end", async (_event, ctx) => {
-		if (!childRuntimeEnvironment) {
-			await wakeCoordinatorFromAttention(pi, ctx).catch(() => {});
-		}
+		if (childRuntimeEnvironment) return;
+		await wakeCoordinatorFromAttention(pi, ctx).catch(() => {});
 		updateFleetUi(ctx);
 	});
 

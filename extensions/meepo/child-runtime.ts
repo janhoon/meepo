@@ -46,8 +46,15 @@ import type {
 	SubagentPublishPayload,
 } from "./types.js";
 
-import { deliverQueuedParentMessagesViaBridge, formatDownwardMessage, getDeliveryOptions, markV2RecipientStatusForLegacyMessage } from "./child-downward.js";
-import { publishChildUpdate } from "./child-publish.js";
+import {
+	deliverQueuedParentMessagesViaBridge,
+	formatDownwardMessage,
+	getAssistantText,
+	getDeliveryOptions,
+	isAssistantMessage,
+	markV2RecipientStatusForLegacyMessage,
+} from "./child-downward.js";
+import { publishChildUpdate, recipientLabel } from "./child-publish.js";
 import {
 	appendRunEvent,
 	readLatestStatusFromDisk,

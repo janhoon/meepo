@@ -88,8 +88,19 @@ function getAssistantText(message) {
 }
 
 const CHILD_RPC_TIMEOUT_MS = 15000;
+/** Cold start under herdr loads full extension packs; 15s is too short for the first prompt ack. */
+const INITIAL_PROMPT_TIMEOUT_MS = 90_000;
+/** Bound how long we probe get_state before declaring the child not ready. */
+const CHILD_READY_TIMEOUT_MS = 60_000;
+/** Per-probe timeout while waiting for RPC to accept commands. */
+const CHILD_READY_PROBE_TIMEOUT_MS = 2_000;
+const CHILD_READY_PROBE_INTERVAL_MS = 200;
 const SHUTDOWN_GRACE_MS = 3000;
 const UI_DIALOG_METHODS = new Set(["select", "confirm", "input", "editor"]);
+
+function sleep(ms) {
+	return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+}
 
 function main() {
 	const { configPath } = parseArgs(process.argv);
@@ -107,6 +118,9 @@ function main() {
 	let shuttingDown = false;
 	let assistantStreaming = false;
 	let childExited = false;
+	const markChildExited = () => {
+		childExited = true;
+	};
 	const status = {
 		agentId: config.agentId,
 		transportKind: "rpc_bridge",
@@ -470,6 +484,7 @@ function main() {
 	});
 	child.on("error", (error) => {
 		const message = error instanceof Error ? error.message : String(error);
+		markChildExited();
 		writeStatus({ transportState: "error", lastError: message, isStreaming: false });
 		writeNormalizedRuntimeStatus({ state: "error", lastError: truncateText(message), finishedAt: now() });
 		recordBridgeEvent("child_error", { error: message });
@@ -478,7 +493,7 @@ function main() {
 		failPending(message);
 	});
 	child.on("close", (code, signal) => {
-		childExited = true;
+		markChildExited();
 		const gracefulSignals = new Set(["SIGINT", "SIGTERM"]);
 		const stoppedGracefully = code === 0 || Boolean(signal && gracefulSignals.has(signal)) || (shuttingDown && code === 130);
 		const transportState = stoppedGracefully ? "stopped" : "error";
@@ -532,33 +547,94 @@ function main() {
 	process.on("SIGTERM", () => forwardSignal("SIGTERM"));
 	process.on("exit", cleanup);
 
-	setTimeout(async () => {
-		try {
-			const promptText = fs.readFileSync(config.taskFile, "utf8");
-			const response = await sendRpcCommand({ type: "prompt", message: promptText });
-			if (response.success === false) {
-				const message = response.error ?? "Initial prompt rejected.";
-				writeStatus({ transportState: "error", lastError: message });
-				writeNormalizedRuntimeStatus({ state: "error", lastError: truncateText(message), finishedAt: now() });
-				recordBridgeEvent("initial_prompt_failed", { error: message });
-				log("initial_prompt_failed", { error: message });
-				renderLine(`[bridge:error] ${message}`);
-			} else {
-				writeStatus({ transportState: "live", connectedAt: now(), lastError: null });
-				writeNormalizedRuntimeStatus({ lastError: null });
-				recordBridgeEvent("initial_prompt_sent", { taskFile: config.taskFile });
-				log("initial_prompt_sent", { taskFile: config.taskFile });
-				renderLine(`[bridge] initial prompt sent`);
+	// Deliver task.md only after the child RPC accepts commands (get_state handshake).
+	// herdr cold starts commonly take several seconds; a fixed +150ms fire raced session_start,
+	// and stdout+settle heuristics still sent prompts before the protocol was actually ready.
+	const finishInitialPromptError = (message, eventType = "initial_prompt_error", extra = {}) => {
+		writeStatus({ transportState: "error", lastError: message });
+		writeNormalizedRuntimeStatus({ state: "error", lastError: truncateText(message), finishedAt: now() });
+		recordBridgeEvent(eventType, { error: message, ...extra });
+		log(eventType, { error: message, ...extra });
+		renderLine(`[bridge:error] ${message}`);
+	};
+
+	const waitForChildRpcReady = async (timeoutMs) => {
+		const deadline = now() + timeoutMs;
+		let lastError = null;
+		// Simple poll: get_state probe, then check childExited flag + short sleep.
+		// Do not Promise.race a long-lived childExitedPromise — losing arms throw later as unhandled rejections.
+		while (now() < deadline) {
+			if (childExited || shuttingDown) {
+				throw new Error("Child RPC process exited before becoming ready for the initial prompt.");
 			}
+			try {
+				const response = await sendRpcCommand({ type: "get_state" }, CHILD_READY_PROBE_TIMEOUT_MS);
+				if (response && response.success !== false) {
+					recordBridgeEvent("child_rpc_ready", { reason: "get_state" });
+					log("child_rpc_ready", { reason: "get_state" });
+					return "get_state";
+				}
+				lastError = response?.error ?? "get_state unsuccessful";
+			} catch (error) {
+				// Child close/error calls failPending(), which rejects in-flight get_state probes.
+				if (childExited || shuttingDown) {
+					throw new Error("Child RPC process exited before becoming ready for the initial prompt.");
+				}
+				lastError = error instanceof Error ? error.message : String(error);
+			}
+			const remaining = deadline - now();
+			if (remaining <= 0) break;
+			await sleep(Math.min(CHILD_READY_PROBE_INTERVAL_MS, remaining));
+		}
+		throw new Error(
+			`Child RPC session did not become ready within ${timeoutMs}ms${lastError ? ` (last error: ${lastError})` : ""}.`,
+		);
+	};
+
+	void (async () => {
+		const promptStartedAt = now();
+		try {
+			const readyReason = await waitForChildRpcReady(CHILD_READY_TIMEOUT_MS);
+			if (childExited || shuttingDown) return;
+
+			const promptText = fs.readFileSync(config.taskFile, "utf8");
+			recordBridgeEvent("initial_prompt_sending", {
+				taskFile: config.taskFile,
+				readyReason,
+				waitedMs: now() - promptStartedAt,
+			});
+			log("initial_prompt_sending", {
+				taskFile: config.taskFile,
+				readyReason,
+				waitedMs: now() - promptStartedAt,
+			});
+			renderLine(`[bridge] sending initial prompt (ready via ${readyReason})`);
+
+			const response = await sendRpcCommand({ type: "prompt", message: promptText }, INITIAL_PROMPT_TIMEOUT_MS);
+			if (response.success === false) {
+				finishInitialPromptError(response.error ?? "Initial prompt rejected.", "initial_prompt_failed");
+				return;
+			}
+
+			writeStatus({ transportState: "live", connectedAt: now(), lastError: null });
+			writeNormalizedRuntimeStatus({ lastError: null });
+			recordBridgeEvent("initial_prompt_sent", {
+				taskFile: config.taskFile,
+				readyReason,
+				elapsedMs: now() - promptStartedAt,
+			});
+			log("initial_prompt_sent", {
+				taskFile: config.taskFile,
+				readyReason,
+				elapsedMs: now() - promptStartedAt,
+			});
+			renderLine(`[bridge] initial prompt sent`);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			writeStatus({ transportState: "error", lastError: message });
-			writeNormalizedRuntimeStatus({ state: "error", lastError: truncateText(message), finishedAt: now() });
-			recordBridgeEvent("initial_prompt_error", { error: message });
-			log("initial_prompt_error", { error: message });
-			renderLine(`[bridge:error] ${message}`);
+			const phase = /exited before becoming ready|did not become ready/i.test(message) ? "wait_ready" : "prompt";
+			finishInitialPromptError(message, "initial_prompt_error", { phase });
 		}
-	}, 150);
+	})();
 
 	writeStatus();
 	writeNormalizedRuntimeStatus({

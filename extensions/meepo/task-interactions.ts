@@ -40,7 +40,6 @@ import {
 	listAgents,
 	listAttentionItems,
 	listDescendantAgentIds,
-	listHierarchyVisibleAgentIds,
 	listInboxMessages,
 	listMessagesForRecipient,
 	markAgentMessageRecipientsByIds,
@@ -237,49 +236,52 @@ import {
 	OPEN_ATTENTION_STATES,
 	TERMINAL_AGENT_STATES,
 } from "./registry-shared.js";
-import { getLinkedChildIds } from "./session-scope.js";
+import { resolveOwnedSubjectIds, ROOT_SURFACE_OWNER_KINDS, withOwnedSubjectPin, type OwnershipScope } from "./session-scope.js";
 
 /** Active Meepo config for this extension process (set on register). */
 export function attentionOwnerKindsForAudience(audience?: "all" | "coordinator" | "user"): AgentRecipientKind[] | undefined {
 	if (audience === "user") return ["user"];
-	if (audience === "coordinator") return ["root", "agent"];
+	// Coordinator surfaces own root-bound attention only. Agent-owned items are 1:1 with the parent agent.
+	if (audience === "coordinator") return ["root"];
+	// Default (no audience) stays fail-closed on root surfaces: root+user, never agent-owned broadcast.
+	if (audience === undefined) return [...ROOT_SURFACE_OWNER_KINDS];
+	// audience === "all": no ownerKind pin (still subject-pinned by ownership seam when scope ≠ all).
 	return undefined;
 }
 
 export function resolveAdminAttentionV2Filters(
 	ctx: ExtensionContext,
-	scope: "all" | "current_project" | "current_session" | "descendants",
-	params: { audience?: "all" | "coordinator" | "user"; includeResolved?: boolean; limit?: number },
-	actor: AgentActorContext,
+	scope: OwnershipScope,
+	params: {
+		audience?: "all" | "coordinator" | "user";
+		includeResolved?: boolean;
+		limit?: number;
+		/** Override default open-state set instead of mutating the returned bag. */
+		states?: ListAgentAttentionItemsV2Filters["states"];
+	} = {},
 ): ListAgentAttentionItemsV2Filters {
+	const projectKey = getProjectKey(ctx.cwd);
 	const filters: ListAgentAttentionItemsV2Filters = {
 		limit: params.limit,
 		ownerKinds: attentionOwnerKindsForAudience(params.audience),
-		states: params.includeResolved ? undefined : ["open", "acknowledged", "waiting_on_owner"],
+		states:
+			params.states !== undefined
+				? params.states
+				: params.includeResolved
+					? undefined
+					: ["open", "acknowledged", "waiting_on_owner"],
 	};
-	switch (scope) {
-		case "current_project":
-			filters.projectKey = getProjectKey(ctx.cwd);
-			break;
-		case "current_session":
-			filters.subjectAgentIds = listHierarchyVisibleAgentIds(getMeepoDb(), actor, {
-				spawnSessionId: ctx.sessionManager.getSessionId(),
-				spawnSessionFile: ctx.sessionManager.getSessionFile(),
-			});
-			break;
-		case "descendants":
-			filters.subjectAgentIds = getLinkedChildIds(ctx);
-			break;
-		case "all":
-		default:
-			break;
-	}
-	return filters;
+	// Single ownership seam via withOwnedSubjectPin — empty array means no subjects (never fall-open).
+	return withOwnedSubjectPin(filters, scope, resolveOwnedSubjectIds(ctx, scope, { projectKey }), {
+		projectKey,
+		idField: "subjectAgentIds",
+	});
 }
 
 export function attentionV2MatchesAudience(item: AgentAttentionV2Record, audience?: "all" | "coordinator" | "user"): boolean {
 	if (audience === "user") return item.ownerKind === "user";
-	if (audience === "coordinator") return item.ownerKind !== "user";
+	// Coordinator triage is root-owned (or agent-self path elsewhere); do not treat other agents' mail as coordinator mail.
+	if (audience === "coordinator") return item.ownerKind === "root";
 	return true;
 }
 
