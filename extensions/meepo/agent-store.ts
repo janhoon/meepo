@@ -53,10 +53,6 @@ export function createAgent(db: DatabaseSync, input: CreateAgentInput): void {
 			bridge_connected_at,
 			bridge_updated_at,
 			bridge_last_error,
-			tmux_session_id,
-			tmux_session_name,
-			tmux_window_id,
-			tmux_pane_id,
 			host_kind,
 			host_primary_id,
 			host_display_name,
@@ -70,7 +66,7 @@ export function createAgent(db: DatabaseSync, input: CreateAgentInput): void {
 			created_at,
 			updated_at,
 			finished_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	).run(
 		input.id,
 		input.parentAgentId ?? null,
@@ -99,13 +95,9 @@ export function createAgent(db: DatabaseSync, input: CreateAgentInput): void {
 		input.bridgeConnectedAt ?? null,
 		input.bridgeUpdatedAt ?? null,
 		input.bridgeLastError ?? null,
-		input.tmuxSessionId ?? null,
-		input.tmuxSessionName ?? null,
-		input.tmuxWindowId ?? null,
-		input.tmuxPaneId ?? null,
-		input.hostKind ?? "tmux",
-		input.hostPrimaryId ?? null,
-		input.hostDisplayName ?? null,
+		input.host?.kind ?? "tmux",
+		input.host?.primaryId ?? null,
+		input.host?.displayName ?? null,
 		input.hostTargetJson ?? null,
 		input.runDir,
 		input.sessionFile,
@@ -122,8 +114,12 @@ export function createAgent(db: DatabaseSync, input: CreateAgentInput): void {
 export function updateAgent(db: DatabaseSync, id: string, patch: UpdateAgentInput): void {
 	const assignments: string[] = [];
 	const params: unknown[] = [];
+	if (patch.host !== undefined) {
+		assignments.push("host_kind = ?", "host_primary_id = ?", "host_display_name = ?");
+		params.push(patch.host?.kind ?? null, patch.host?.primaryId ?? null, patch.host?.displayName ?? null);
+	}
 	for (const [field, value] of Object.entries(patch) as Array<[keyof UpdateAgentInput, UpdateAgentInput[keyof UpdateAgentInput]]>) {
-		if (value === undefined) continue;
+		if (value === undefined || field === "host") continue;
 		const column = AGENT_FIELD_TO_COLUMN[field];
 		if (!column) continue;
 		assignments.push(`${column} = ?`);

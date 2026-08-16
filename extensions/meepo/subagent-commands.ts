@@ -5,6 +5,7 @@
  * available agents the same way skills appear under `/skill:`.
  */
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { formatHost } from "./process-host.js";
 import { listSubagentProfiles } from "./profiles.js";
 import { spawnChildFromParams } from "./spawn-ops.js";
 import type { SubagentProfile } from "./types.js";
@@ -84,7 +85,7 @@ export async function handleSubagentProfileCommand(
 		// parent composer with the result text and feels like the task was "pasted"
 		// back into the current pi input instead of going to the child.
 		ctx.ui.notify(
-			`Spawned ${result.agentId} (${profile.name}) on ${result.hostKind ?? "host"} (${result.hostDisplayName ?? result.hostPrimaryId ?? result.tmuxSessionName ?? "?"}). RPC bridge launching — task will deliver when the child is ready.`,
+			`Spawned ${result.agentId} (${profile.name}) on ${formatHost(result.host)}. RPC bridge launching — task will deliver when the child is ready.`,
 			"info",
 		);
 	} catch (error) {

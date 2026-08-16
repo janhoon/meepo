@@ -8,6 +8,7 @@ import { migration as migration6 } from "./006-hierarchy-communication-foundatio
 import { migration as migration7 } from "./007-task-dependency-links.js";
 import { migration as migration8 } from "./008-coo-orchestration-role-policies.js";
 import { migration as migration9 } from "./009-process-host-neutral-fields.js";
+import { migration as migration10 } from "./010-host-target-token-backfill.js";
 
 export type { Migration } from "./types.js";
 
@@ -21,4 +22,5 @@ export const MIGRATIONS: Migration[] = [
 	migration7,
 	migration8,
 	migration9,
+	migration10,
 ];

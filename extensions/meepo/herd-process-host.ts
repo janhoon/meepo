@@ -20,9 +20,9 @@ import {
 	type HostInventory,
 	type HostNotifyInput,
 	type HostSpawnWindowInput,
+	type HostHandle,
 	type HostStopResult,
 	type HostTarget,
-	type HostTargetRef,
 	type ProcessHost,
 	type ProcessHostOptions,
 } from "./process-host.js";
@@ -128,12 +128,12 @@ function toHostTarget(agent: HerdrAgentInfo, displayName?: string): HostTarget {
 }
 
 /** herdr 0.8 command target: pane id first, then a name that actually renamed. */
-function resolveFocusTarget(target: HostTargetRef): string | null {
-	return target.refs?.paneId || target.displayName || target.refs?.agentName || null;
+function resolveFocusTarget(target: HostHandle): string | null {
+	return target.lastKnownRefs?.paneId || target.displayName || target.lastKnownRefs?.agentName || null;
 }
 
-function resolvePaneId(target: HostTargetRef): string | null {
-	return target.refs?.paneId || null;
+function resolvePaneId(target: HostHandle): string | null {
+	return target.lastKnownRefs?.paneId || null;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -353,16 +353,16 @@ export class HerdProcessHost implements ProcessHost {
 		};
 	}
 
-	async targetExists(target: HostTargetRef, inventory?: HostInventory): Promise<boolean> {
+	async targetExists(target: HostHandle, inventory?: HostInventory): Promise<boolean> {
 		const inv = inventory ?? (await this.listInventory());
 		const primary =
 			target.primaryId ||
-			target.refs?.terminalId ||
+			target.lastKnownRefs?.terminalId ||
 			undefined;
 		if (primary && inv.primaryIds.has(primary)) return true;
-		const paneId = target.refs?.paneId;
+		const paneId = target.lastKnownRefs?.paneId;
 		if (paneId && inv.raw?.paneIds?.has(paneId)) return true;
-		const name = target.displayName || target.refs?.agentName;
+		const name = target.displayName || target.lastKnownRefs?.agentName;
 		if (name && inv.displayNames.has(name)) return true;
 		return false;
 	}
@@ -479,7 +479,7 @@ export class HerdProcessHost implements ProcessHost {
 		throw new Error(`herdr agent rename failed for all 32-char candidates near ${desiredName}`);
 	}
 
-	async focus(target: HostTargetRef): Promise<HostFocusResult> {
+	async focus(target: HostHandle): Promise<HostFocusResult> {
 		const focusTarget = resolveFocusTarget(target);
 		const command = focusTarget
 			? `herdr agent focus ${shellQuote(focusTarget)}`
@@ -504,7 +504,7 @@ export class HerdProcessHost implements ProcessHost {
 		}
 	}
 
-	async stop(target: HostTargetRef, options?: { force?: boolean }): Promise<HostStopResult> {
+	async stop(target: HostHandle, options?: { force?: boolean }): Promise<HostStopResult> {
 		const force = options?.force ?? false;
 		const paneId = resolvePaneId(target);
 		const focusTarget = resolveFocusTarget(target);
@@ -575,7 +575,7 @@ export class HerdProcessHost implements ProcessHost {
 		}
 	}
 
-	async capture(target: HostTargetRef, options?: { lines?: number }): Promise<HostCaptureResult> {
+	async capture(target: HostHandle, options?: { lines?: number }): Promise<HostCaptureResult> {
 		const lines = Math.max(1, options?.lines ?? 200);
 		const paneId = resolvePaneId(target);
 		const focusTarget = resolveFocusTarget(target);

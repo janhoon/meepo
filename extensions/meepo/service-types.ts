@@ -1,3 +1,5 @@
+import type { HostIdentity } from "./process-host.js";
+
 export const SERVICE_STATES = ["launching", "running", "stopped", "error", "lost"] as const;
 
 export type ServiceState = (typeof SERVICE_STATES)[number];
@@ -23,13 +25,7 @@ export interface ServiceSummary {
 	readySubstring: string | null;
 	readyMatchedAt: number | null;
 	state: ServiceState;
-	tmuxSessionId: string | null;
-	tmuxSessionName: string | null;
-	tmuxWindowId: string | null;
-	tmuxPaneId: string | null;
-	hostKind: string | null;
-	hostPrimaryId: string | null;
-	hostDisplayName: string | null;
+	host: HostIdentity | null;
 	hostTargetJson: string | null;
 	runDir: string;
 	logFile: string;
@@ -53,13 +49,7 @@ export interface CreateServiceInput {
 	readySubstring?: string | null;
 	readyMatchedAt?: number | null;
 	state: ServiceState;
-	tmuxSessionId?: string | null;
-	tmuxSessionName?: string | null;
-	tmuxWindowId?: string | null;
-	tmuxPaneId?: string | null;
-	hostKind?: string | null;
-	hostPrimaryId?: string | null;
-	hostDisplayName?: string | null;
+	host?: HostIdentity | null;
 	hostTargetJson?: string | null;
 	runDir: string;
 	logFile: string;
@@ -82,13 +72,7 @@ export interface UpdateServiceInput {
 	readySubstring?: string | null;
 	readyMatchedAt?: number | null;
 	state?: ServiceState;
-	tmuxSessionId?: string | null;
-	tmuxSessionName?: string | null;
-	tmuxWindowId?: string | null;
-	tmuxPaneId?: string | null;
-	hostKind?: string | null;
-	hostPrimaryId?: string | null;
-	hostDisplayName?: string | null;
+	host?: HostIdentity | null;
 	hostTargetJson?: string | null;
 	runDir?: string;
 	logFile?: string;
@@ -134,11 +118,5 @@ export interface SpawnServiceResult {
 	state: ServiceState;
 	statusSnapshot: ServiceStatusSnapshot | null;
 	initialOutput: string;
-	tmuxSessionId: string;
-	tmuxSessionName: string;
-	tmuxWindowId: string;
-	tmuxPaneId: string;
-	hostKind: string;
-	hostPrimaryId: string;
-	hostDisplayName: string | null;
+	host: HostIdentity;
 }

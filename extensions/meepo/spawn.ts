@@ -31,7 +31,7 @@ import type {
 } from "./types.js";
 import { getMeepoDb } from "./db.js";
 import { getProjectKey } from "./project.js";
-import { getProcessHost, hostFieldsFromTarget } from "./process-host.js";
+import { getProcessHost, hostPersistFromTarget } from "./process-host.js";
 import { buildBridgeLaunchCommand } from "./rpc-bridge-control.js";
 
 const RPC_BRIDGE_ENTRY_SCRIPT = fileURLToPath(new URL("./rpc-bridge.mjs", import.meta.url));
@@ -634,50 +634,23 @@ export async function spawnSubagent(input: SpawnSubagentInput): Promise<SpawnSub
 		appendRunEvent(runArtifacts.runDir, "spawn_failed", message, { error: message });
 		throw error;
 	}
-	const fields = hostFieldsFromTarget(hostTarget);
+	const persisted = hostPersistFromTarget(hostTarget);
 	updateAgent(db, agentId, {
-		tmuxSessionId: fields.tmuxSessionId,
-		tmuxSessionName: fields.tmuxSessionName,
-		tmuxWindowId: fields.tmuxWindowId,
-		tmuxPaneId: fields.tmuxPaneId,
-		hostKind: fields.hostKind,
-		hostPrimaryId: fields.hostPrimaryId,
-		hostDisplayName: fields.hostDisplayName,
-		hostTargetJson: fields.hostTargetJson,
+		host: persisted.host,
+		hostTargetJson: persisted.hostTargetJson,
 		transportKind: "rpc_bridge",
 		transportState: "launching",
 		bridgeUpdatedAt: Date.now(),
 		updatedAt: Date.now(),
 	});
-	// Dual-write host_spawned + legacy tmux_spawned during transition.
 	createAgentEvent(db, {
 		id: randomUUID(),
 		agentId,
 		eventType: "host_spawned",
-		summary: `Spawned on ${fields.hostKind} (${fields.hostDisplayName ?? fields.hostPrimaryId})`,
-		payload: hostTarget,
+		summary: `Spawned on ${persisted.host.kind} (${persisted.host.displayName ?? persisted.host.primaryId})`,
+		payload: persisted.host,
 	});
-	createAgentEvent(db, {
-		id: randomUUID(),
-		agentId,
-		eventType: "tmux_spawned",
-		summary: `Spawned in ${fields.tmuxSessionName ?? fields.hostKind}`,
-		payload: {
-			sessionId: fields.tmuxSessionId,
-			sessionName: fields.tmuxSessionName,
-			windowId: fields.tmuxWindowId,
-			paneId: fields.tmuxPaneId,
-			hostKind: fields.hostKind,
-			primaryId: fields.hostPrimaryId,
-		},
-	});
-	appendRunEvent(runArtifacts.runDir, "host_spawned", `Spawned on ${fields.hostKind}`, hostTarget);
-	appendRunEvent(runArtifacts.runDir, "tmux_spawned", `Spawned in ${fields.tmuxSessionName ?? fields.hostKind}`, {
-		sessionId: fields.tmuxSessionId,
-		sessionName: fields.tmuxSessionName,
-		windowId: fields.tmuxWindowId,
-		paneId: fields.tmuxPaneId,
-	});
+	appendRunEvent(runArtifacts.runDir, "host_spawned", `Spawned on ${persisted.host.kind}`, persisted.host);
 	const sessionLinkData: SessionChildLinkEntryData = {
 		childId: agentId,
 		title: input.title,
@@ -689,10 +662,6 @@ export async function spawnSubagent(input: SpawnSubagentInput): Promise<SpawnSub
 		transportState: "launching",
 		bridgeSocketPath: runArtifacts.bridgeSocketPath,
 		bridgeStatusFile: runArtifacts.bridgeStatusFile,
-		tmuxSessionId: fields.tmuxSessionId,
-		tmuxSessionName: fields.tmuxSessionName,
-		tmuxWindowId: fields.tmuxWindowId,
-		tmuxPaneId: fields.tmuxPaneId,
 		taskId: input.taskId,
 		createdAt: now,
 	};
@@ -709,13 +678,7 @@ export async function spawnSubagent(input: SpawnSubagentInput): Promise<SpawnSub
 		bridgeSocketPath: runArtifacts.bridgeSocketPath,
 		bridgeStatusFile: runArtifacts.bridgeStatusFile,
 		bridgeLogFile: runArtifacts.bridgeLogFile,
-		tmuxSessionId: fields.tmuxSessionId ?? "",
-		tmuxSessionName: fields.tmuxSessionName ?? "",
-		tmuxWindowId: fields.tmuxWindowId ?? "",
-		tmuxPaneId: fields.tmuxPaneId ?? "",
-		hostKind: fields.hostKind,
-		hostPrimaryId: fields.hostPrimaryId,
-		hostDisplayName: fields.hostDisplayName,
+		host: persisted.host,
 		sessionLinkData,
 	};
 }

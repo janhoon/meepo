@@ -6,8 +6,8 @@ import {
 	ensureProcessHost,
 } from "./process-host-factory.js";
 import {
-	hostFieldsFromTarget,
-	hostTargetRefFromLegacy,
+	hostHandleFromRecord,
+	hostPersistFromTarget,
 	parseProcessHostSelection,
 	resetProcessHostForTests,
 	resolveProcessHostSelection,
@@ -149,7 +149,7 @@ describe("process host selection", () => {
 });
 
 describe("host target mapping", () => {
-	it("hostFieldsFromTarget dual-writes legacy tmux columns", () => {
+	it("hostPersistFromTarget writes host_* only", () => {
 		const target: HostTarget = {
 			hostKind: "tmux",
 			primaryId: "%12",
@@ -161,34 +161,37 @@ describe("host target mapping", () => {
 				paneId: "%12",
 			},
 		};
-		const fields = hostFieldsFromTarget(target);
+		const fields = hostPersistFromTarget(target);
+		assert.deepEqual(fields.host, {
+			kind: "tmux",
+			primaryId: "%12",
+			displayName: "research-foo-abcdef",
+		});
 		assert.equal(fields.hostKind, "tmux");
 		assert.equal(fields.hostPrimaryId, "%12");
-		assert.equal(fields.tmuxPaneId, "%12");
-		assert.equal(fields.tmuxSessionName, "pi-subagents");
 		assert.ok(fields.hostTargetJson.includes("paneId"));
+		assert.equal("tmuxPaneId" in fields, false);
 	});
 
-	it("hostTargetRefFromLegacy prefers host_* then falls back to tmux_*", () => {
-		const fromHost = hostTargetRefFromLegacy({
-			hostKind: "tmux",
-			hostPrimaryId: "%99",
-			hostDisplayName: "named",
+	it("hostHandleFromRecord hydrates token plus last-known refs", () => {
+		const fromHost = hostHandleFromRecord({
+			host: { kind: "tmux", primaryId: "%99", displayName: "named" },
 			hostTargetJson: JSON.stringify({ sessionId: "$9", paneId: "%99" }),
 		});
+		assert.equal(fromHost.kind, "tmux");
 		assert.equal(fromHost.primaryId, "%99");
 		assert.equal(fromHost.displayName, "named");
-		assert.equal(fromHost.refs?.paneId, "%99");
+		assert.equal(fromHost.lastKnownRefs?.paneId, "%99");
 
-		const fromLegacy = hostTargetRefFromLegacy({
-			tmuxSessionId: "$1",
-			tmuxSessionName: "main",
-			tmuxWindowId: "@2",
-			tmuxPaneId: "%3",
+		const fromStored = hostHandleFromRecord({
+			hostKind: "herdr",
+			hostPrimaryId: "term_abc",
+			hostDisplayName: "research-herdr",
+			hostTargetJson: JSON.stringify({ terminalId: "term_abc", paneId: "w1:p2" }),
 		});
-		assert.equal(fromLegacy.hostKind, "tmux");
-		assert.equal(fromLegacy.primaryId, "%3");
-		assert.equal(fromLegacy.refs?.sessionName, "main");
+		assert.equal(fromStored.kind, "herdr");
+		assert.equal(fromStored.primaryId, "term_abc");
+		assert.equal(fromStored.lastKnownRefs?.paneId, "w1:p2");
 	});
 });
 

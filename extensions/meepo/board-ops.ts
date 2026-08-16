@@ -88,7 +88,7 @@ import { getService, listServices, updateService } from "./service-registry.js";
 import { readServiceStatus, spawnService, tailFileLines } from "./service-spawn.js";
 import { spawnSubagent } from "./spawn.js";
 import { maybeNotifyHostAttention } from "./host-notify.js";
-import { getProcessHost, hostTargetRefFromLegacy } from "./process-host.js";
+import { getProcessHost, hostHandleFromRecord } from "./process-host.js";
 import {
 	mapDeliveryModeToBridgeCommand,
 	missingHostTargetMessage,
@@ -254,7 +254,7 @@ export async function focusAgentById(id: string): Promise<{ agent: AgentSummary;
 	if (!agent) {
 		throw new Error(`Unknown agent id "${id}".`);
 	}
-	const result = await getProcessHost().focus(hostTargetRefFromLegacy(agent));
+	const result = await getProcessHost().focus(hostHandleFromRecord(agent));
 	return { agent, result };
 }
 
@@ -264,7 +264,7 @@ export async function captureAgentById(id: string, lines = 200): Promise<{ agent
 		throw new Error(`Unknown agent id "${id}".`);
 	}
 	const host = getProcessHost();
-	const target = hostTargetRefFromLegacy(agent);
+	const target = hostHandleFromRecord(agent);
 	if (!(await host.targetExists(target))) {
 		throw new Error(`Cannot capture agent ${agent.id} because its host target is missing. Reconcile first.`);
 	}

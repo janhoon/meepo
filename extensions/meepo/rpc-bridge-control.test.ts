@@ -6,7 +6,7 @@ import {
 	mapDeliveryModeToBridgeCommand,
 	missingHostTargetMessage,
 } from "./rpc-bridge-control.js";
-import { hostTargetRefFromLegacy } from "./process-host.js";
+import { hostHandleFromRecord } from "./process-host.js";
 
 describe("rpc bridge control plane (host-agnostic, wayfinder #20/#24)", () => {
 	it("maps delivery modes to bridge commands only (no host PTY path)", () => {
@@ -48,7 +48,7 @@ describe("rpc bridge control plane (host-agnostic, wayfinder #20/#24)", () => {
 	});
 
 	it("resolves herdr registry fields for message/stop targetExists gates", () => {
-		const ref = hostTargetRefFromLegacy({
+		const ref = hostHandleFromRecord({
 			hostKind: "herdr",
 			hostPrimaryId: "term_abc",
 			hostDisplayName: "research-herdr",
@@ -59,16 +59,12 @@ describe("rpc bridge control plane (host-agnostic, wayfinder #20/#24)", () => {
 				tabId: "tab_1",
 				agentName: "research-herdr",
 			}),
-			tmuxSessionId: null,
-			tmuxSessionName: null,
-			tmuxWindowId: null,
-			tmuxPaneId: null,
 		});
-		assert.equal(ref.hostKind, "herdr");
+		assert.equal(ref.kind, "herdr");
 		assert.equal(ref.primaryId, "term_abc");
 		assert.equal(ref.displayName, "research-herdr");
-		assert.equal(ref.refs?.terminalId, "term_abc");
-		assert.equal(ref.refs?.paneId, "w1:p2");
+		assert.equal(ref.lastKnownRefs?.terminalId, "term_abc");
+		assert.equal(ref.lastKnownRefs?.paneId, "w1:p2");
 	});
 
 	it("uses host-neutral missing-target errors for messaging", () => {

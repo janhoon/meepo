@@ -14,34 +14,42 @@ import type { HerdrProbe } from "./herdr-compat.js";
 export type HostKind = "tmux" | "herdr";
 export type ProcessHostSelection = "auto" | HostKind;
 
+export interface HostIdentity {
+	kind: HostKind;
+	primaryId: string;
+	displayName: string | null;
+}
+
+export type HostTargetRefs = {
+	sessionId?: string;
+	sessionName?: string;
+	windowId?: string;
+	paneId?: string;
+	terminalId?: string;
+	workspaceId?: string;
+	tabId?: string;
+	agentName?: string;
+};
+
 export interface HostTarget {
 	hostKind: HostKind;
 	/** Stable id: tmux pane (prefer) or composite; herdr terminal_id */
 	primaryId: string;
 	/** Host-facing name when present (herdr agent name; optional tmux window label) */
 	displayName?: string;
-	refs: {
-		// tmux
-		sessionId?: string;
-		sessionName?: string;
-		windowId?: string;
-		paneId?: string;
-		// herdr
-		terminalId?: string;
-		workspaceId?: string;
-		tabId?: string;
-		/** herdr pane_id — may recycle; do not use alone for equality */
-		paneId?: string;
-		agentName?: string;
-	};
+	refs: HostTargetRefs;
 }
 
-export interface HostTargetRef {
-	hostKind?: HostKind;
+/** Token ProcessHost ops accept. lastKnownRefs is store-internal fallback, not a caller field. */
+export interface HostHandle {
+	kind?: HostKind;
 	primaryId?: string;
-	displayName?: string;
-	refs?: HostTarget["refs"];
+	displayName?: string | null;
+	lastKnownRefs?: HostTargetRefs;
 }
+
+/** @deprecated Use HostHandle. */
+export type HostTargetRef = HostHandle;
 
 export interface HostInventory {
 	/** Backend-specific membership sets used by targetExists / reconcile */
@@ -97,11 +105,11 @@ export interface ProcessHost {
 	isAvailable(): Promise<boolean>;
 	spawnWindow(input: HostSpawnWindowInput): Promise<HostTarget>;
 	getCurrentTarget(): Promise<HostTarget | null>;
-	focus(target: HostTargetRef): Promise<HostFocusResult>;
-	stop(target: HostTargetRef, options?: { force?: boolean }): Promise<HostStopResult>;
-	capture(target: HostTargetRef, options?: { lines?: number }): Promise<HostCaptureResult>;
+	focus(target: HostHandle): Promise<HostFocusResult>;
+	stop(target: HostHandle, options?: { force?: boolean }): Promise<HostStopResult>;
+	capture(target: HostHandle, options?: { lines?: number }): Promise<HostCaptureResult>;
 	listInventory(): Promise<HostInventory>;
-	targetExists(target: HostTargetRef, inventory?: HostInventory): Promise<boolean>;
+	targetExists(target: HostHandle, inventory?: HostInventory): Promise<boolean>;
 	/** Optional; TmuxProcessHost no-ops. HerdProcessHost → notification show + sound map. */
 	notify?(input: HostNotifyInput): Promise<void>;
 }
@@ -203,69 +211,87 @@ export function processHostSelectionFromConfig(config: MeepoConfig): ProcessHost
 	return config.runtime.processHost ?? "herdr";
 }
 
-/** Map registry-ish tmux columns + optional host_* into a HostTargetRef. */
-export function hostTargetRefFromLegacy(input: {
-	hostKind?: HostKind | string | null;
-	hostPrimaryId?: string | null;
-	hostDisplayName?: string | null;
-	hostTargetJson?: string | null;
-	tmuxSessionId?: string | null;
-	tmuxSessionName?: string | null;
-	tmuxWindowId?: string | null;
-	tmuxPaneId?: string | null;
-}): HostTargetRef {
-	let refs: HostTarget["refs"] = {};
-	if (input.hostTargetJson) {
-		try {
-			refs = { ...JSON.parse(input.hostTargetJson) };
-		} catch {
-			refs = {};
-		}
-	}
-	if (input.tmuxSessionId) refs.sessionId = input.tmuxSessionId;
-	if (input.tmuxSessionName) refs.sessionName = input.tmuxSessionName;
-	if (input.tmuxWindowId) refs.windowId = input.tmuxWindowId;
-	if (input.tmuxPaneId) refs.paneId = input.tmuxPaneId;
+export function parseHostKind(value: string | null | undefined): HostKind | undefined {
+	return value === "herdr" || value === "tmux" ? value : undefined;
+}
 
-	const hostKind =
-		input.hostKind === "herdr" || input.hostKind === "tmux"
-			? input.hostKind
-			: refs.terminalId
-				? "herdr"
-				: "tmux";
-
-	const primaryId =
-		input.hostPrimaryId ||
-		(hostKind === "herdr" ? refs.terminalId : refs.paneId || refs.windowId || refs.sessionId) ||
-		undefined;
-
+export function hostIdentityFromTarget(target: HostTarget): HostIdentity {
 	return {
-		hostKind,
-		primaryId: primaryId ?? undefined,
-		displayName: input.hostDisplayName ?? refs.agentName ?? undefined,
-		refs,
+		kind: target.hostKind,
+		primaryId: target.primaryId,
+		displayName: target.displayName ?? null,
 	};
 }
 
-/** Persistable host fields from a HostTarget (dual-write with legacy tmux_*). */
-export function hostFieldsFromTarget(target: HostTarget): {
+export function formatHost(host: HostIdentity | null | undefined): string {
+	if (!host?.primaryId && !host?.displayName) return "-";
+	const name = host.displayName ?? host.primaryId;
+	return `${host.kind} ${name}`;
+}
+
+function parseStoredRefs(json: string | null | undefined): HostTargetRefs {
+	if (!json) return {};
+	try {
+		const parsed = JSON.parse(json) as HostTargetRefs;
+		return parsed && typeof parsed === "object" ? parsed : {};
+	} catch {
+		return {};
+	}
+}
+
+/** Persistable host_* columns from a live HostTarget. Does not write tmux_*. */
+export function hostPersistFromTarget(target: HostTarget): {
+	host: HostIdentity;
 	hostKind: HostKind;
 	hostPrimaryId: string;
 	hostDisplayName: string | null;
 	hostTargetJson: string;
-	tmuxSessionId: string | null;
-	tmuxSessionName: string | null;
-	tmuxWindowId: string | null;
-	tmuxPaneId: string | null;
 } {
+	const host = hostIdentityFromTarget(target);
 	return {
-		hostKind: target.hostKind,
-		hostPrimaryId: target.primaryId,
-		hostDisplayName: target.displayName ?? null,
+		host,
+		hostKind: host.kind,
+		hostPrimaryId: host.primaryId,
+		hostDisplayName: host.displayName,
 		hostTargetJson: JSON.stringify(target.refs ?? {}),
-		tmuxSessionId: target.refs.sessionId ?? null,
-		tmuxSessionName: target.refs.sessionName ?? null,
-		tmuxWindowId: target.refs.windowId ?? null,
-		tmuxPaneId: target.refs.paneId ?? null,
+	};
+}
+
+/** Store-internal: token + last-known refs from host_* / host_target_json. */
+export function hostHandleFromRecord(input: {
+	host?: HostIdentity | null;
+	hostKind?: HostKind | string | null;
+	hostPrimaryId?: string | null;
+	hostDisplayName?: string | null;
+	hostTargetJson?: string | null;
+}): HostHandle {
+	const refs = parseStoredRefs(input.hostTargetJson);
+	const kind =
+		input.host?.kind ??
+		parseHostKind(input.hostKind) ??
+		(refs.terminalId ? "herdr" : refs.paneId || refs.sessionId ? "tmux" : undefined);
+	const primaryId = input.host?.primaryId || input.hostPrimaryId || refs.terminalId || refs.paneId || refs.windowId || refs.sessionId;
+	const displayName = input.host?.displayName ?? input.hostDisplayName ?? refs.agentName ?? null;
+	return {
+		kind,
+		primaryId,
+		displayName,
+		lastKnownRefs: Object.keys(refs).length > 0 ? refs : undefined,
+	};
+}
+
+export function hostIdentityFromRecord(input: {
+	host?: HostIdentity | null;
+	hostKind?: HostKind | string | null;
+	hostPrimaryId?: string | null;
+	hostDisplayName?: string | null;
+}): HostIdentity | null {
+	const kind = input.host?.kind ?? parseHostKind(input.hostKind);
+	const primaryId = input.host?.primaryId || input.hostPrimaryId;
+	if (!kind || !primaryId) return null;
+	return {
+		kind,
+		primaryId,
+		displayName: input.host?.displayName ?? input.hostDisplayName ?? null,
 	};
 }

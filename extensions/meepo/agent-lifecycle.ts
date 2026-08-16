@@ -88,7 +88,7 @@ import { getService, listServices, updateService } from "./service-registry.js";
 import { readServiceStatus, spawnService, tailFileLines } from "./service-spawn.js";
 import { spawnSubagent } from "./spawn.js";
 import { maybeNotifyHostAttention } from "./host-notify.js";
-import { getProcessHost, hostTargetRefFromLegacy } from "./process-host.js";
+import { getProcessHost, hostHandleFromRecord } from "./process-host.js";
 import {
 	mapDeliveryModeToBridgeCommand,
 	missingHostTargetMessage,
@@ -264,7 +264,7 @@ export async function listCleanupCandidates(
 	const candidates: CleanupCandidate[] = [];
 	for (const agent of agents.filter((agent) => TERMINAL_AGENT_STATES.includes(agent.state))) {
 		const items = (attentionByAgent.get(agent.id) ?? []).sort((left, right) => left.priority - right.priority || right.updatedAt - left.updatedAt);
-		const targetExists = await host.targetExists(hostTargetRefFromLegacy(agent), inventory);
+		const targetExists = await host.targetExists(hostHandleFromRecord(agent), inventory);
 		const blockingItems = items.filter((item) => item.kind !== "complete");
 		let cleanupAllowed = targetExists;
 		let reason = !targetExists ? "host target already gone" : items.length === 0 ? "no unresolved attention items" : "completion attention can be resolved during cleanup";
@@ -286,7 +286,7 @@ export async function cleanupAgentTarget(candidate: CleanupCandidate, force = fa
 	const db = getMeepoDb();
 	const agent = candidate.agent;
 	const host = getProcessHost();
-	const target = hostTargetRefFromLegacy(agent);
+	const target = hostHandleFromRecord(agent);
 	if (!(await host.targetExists(target))) {
 		return { agentId: agent.id, cleaned: false, reason: "host target already gone", command: "(already gone)" };
 	}
@@ -363,7 +363,7 @@ export async function stopAgentById(id: string, force: boolean, reason?: string)
 		throw new Error(`Agent ${agent.id} is already in terminal state ${agent.state}.`);
 	}
 	const host = getProcessHost();
-	const target = hostTargetRefFromLegacy(agent);
+	const target = hostHandleFromRecord(agent);
 	const targetExists = await host.targetExists(target);
 	if (!targetExists && force) {
 		updateAgent(getMeepoDb(), agent.id, {
@@ -510,7 +510,7 @@ export async function reconcileAgents(ctx: ExtensionContext, params: { scope?: "
 		const bridge = bridgeHealth.get(agent.id);
 		const bridgeStatus = bridge?.status ?? null;
 		const bridgeReachable = Boolean(bridge?.ping?.success);
-		const targetExists = await host.targetExists(hostTargetRefFromLegacy(agent), inventory);
+		const targetExists = await host.targetExists(hostHandleFromRecord(agent), inventory);
 		let patch: UpdateAgentInput = {};
 		let reason = "";
 		if (bridgeStatus && bridgeStatus.updatedAt > (agent.bridgeUpdatedAt ?? 0)) {

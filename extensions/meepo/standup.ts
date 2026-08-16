@@ -85,7 +85,7 @@ import { getService, listServices, updateService } from "./service-registry.js";
 import { readServiceStatus, spawnService, tailFileLines } from "./service-spawn.js";
 import { spawnSubagent } from "./spawn.js";
 import { maybeNotifyHostAttention } from "./host-notify.js";
-import { getProcessHost, hostTargetRefFromLegacy } from "./process-host.js";
+import { formatHost, getProcessHost, hostHandleFromRecord } from "./process-host.js";
 import {
 	mapDeliveryModeToBridgeCommand,
 	missingHostTargetMessage,
@@ -622,7 +622,7 @@ export async function runReplyFlow(ctx: ExtensionContext, agentId: string): Prom
 		throw new Error(`Cannot message agent ${agent.id} because it is in terminal state ${agent.state}.`);
 	}
 	if (
-		!(await getProcessHost().targetExists(hostTargetRefFromLegacy(agent)))
+		!(await getProcessHost().targetExists(hostHandleFromRecord(agent)))
 	) {
 		throw new Error(missingHostTargetMessage(agent.id));
 	}
@@ -828,7 +828,7 @@ export async function runTaskSpawnWizard(pi: ExtensionAPI, ctx: ExtensionContext
 			allowDuplicateOwner,
 		});
 		ctx.ui.notify(
-			`Spawned ${result.agentId} on ${result.hostKind ?? "host"} (${result.hostDisplayName ?? result.hostPrimaryId ?? result.tmuxSessionName ?? "?"}). RPC bridge launching — task will deliver when the child is ready.`,
+			`Spawned ${result.agentId} on ${formatHost(result.host)}. RPC bridge launching — task will deliver when the child is ready.`,
 			"info",
 		);
 		// Avoid ui.editor dump after spawn — it hijacks the parent composer.
@@ -981,7 +981,7 @@ export async function runServiceSpawnWizard(ctx: ExtensionContext): Promise<void
 			readySubstring: readySubstring?.trim() || undefined,
 		});
 		ctx.ui.notify(
-			`Started ${result.serviceId} on ${result.hostKind ?? "host"} (${result.hostDisplayName ?? result.hostPrimaryId ?? result.tmuxSessionName ?? "?"}).`,
+			`Started ${result.serviceId} on ${formatHost(result.host)}.`,
 			"info",
 		);
 		await ctx.ui.editor(`Started ${result.serviceId}`, formatServiceStartResult(result));

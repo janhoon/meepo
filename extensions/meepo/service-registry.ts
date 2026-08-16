@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "./sqlite.js";
+import { hostIdentityFromRecord, parseHostKind } from "./process-host.js";
 import { addSessionScopeFilter, makePlaceholders, safeJsonParse } from "./sql-util.js";
 import type {
 	CreateServiceInput,
@@ -21,13 +22,6 @@ const SERVICE_FIELD_TO_COLUMN: Record<keyof UpdateServiceInput, string> = {
 	readySubstring: "ready_substring",
 	readyMatchedAt: "ready_matched_at",
 	state: "state",
-	tmuxSessionId: "tmux_session_id",
-	tmuxSessionName: "tmux_session_name",
-	tmuxWindowId: "tmux_window_id",
-	tmuxPaneId: "tmux_pane_id",
-	hostKind: "host_kind",
-	hostPrimaryId: "host_primary_id",
-	hostDisplayName: "host_display_name",
 	hostTargetJson: "host_target_json",
 	runDir: "run_dir",
 	logFile: "log_file",
@@ -51,13 +45,11 @@ function toServiceSummary(row: Record<string, unknown>): ServiceSummary {
 		readySubstring: (row.ready_substring as string | null) ?? null,
 		readyMatchedAt: (row.ready_matched_at as number | null) ?? null,
 		state: row.state as ServiceSummary["state"],
-		tmuxSessionId: (row.tmux_session_id as string | null) ?? null,
-		tmuxSessionName: (row.tmux_session_name as string | null) ?? null,
-		tmuxWindowId: (row.tmux_window_id as string | null) ?? null,
-		tmuxPaneId: (row.tmux_pane_id as string | null) ?? null,
-		hostKind: (row.host_kind as string | null) ?? "tmux",
-		hostPrimaryId: (row.host_primary_id as string | null) ?? null,
-		hostDisplayName: (row.host_display_name as string | null) ?? null,
+		host: hostIdentityFromRecord({
+			hostKind: parseHostKind(row.host_kind as string | null) ?? "tmux",
+			hostPrimaryId: (row.host_primary_id as string | null) ?? null,
+			hostDisplayName: (row.host_display_name as string | null) ?? null,
+		}),
 		hostTargetJson: (row.host_target_json as string | null) ?? null,
 		runDir: row.run_dir as string,
 		logFile: row.log_file as string,
@@ -86,10 +78,6 @@ export function createService(db: DatabaseSync, input: CreateServiceInput): void
 			ready_substring,
 			ready_matched_at,
 			state,
-			tmux_session_id,
-			tmux_session_name,
-			tmux_window_id,
-			tmux_pane_id,
 			host_kind,
 			host_primary_id,
 			host_display_name,
@@ -102,7 +90,7 @@ export function createService(db: DatabaseSync, input: CreateServiceInput): void
 			created_at,
 			updated_at,
 			finished_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	).run(
 		input.id,
 		input.spawnSessionId ?? null,
@@ -115,13 +103,9 @@ export function createService(db: DatabaseSync, input: CreateServiceInput): void
 		input.readySubstring ?? null,
 		input.readyMatchedAt ?? null,
 		input.state,
-		input.tmuxSessionId ?? null,
-		input.tmuxSessionName ?? null,
-		input.tmuxWindowId ?? null,
-		input.tmuxPaneId ?? null,
-		input.hostKind ?? "tmux",
-		input.hostPrimaryId ?? null,
-		input.hostDisplayName ?? null,
+		input.host?.kind ?? "tmux",
+		input.host?.primaryId ?? null,
+		input.host?.displayName ?? null,
 		input.hostTargetJson ?? null,
 		input.runDir,
 		input.logFile,
@@ -137,8 +121,12 @@ export function createService(db: DatabaseSync, input: CreateServiceInput): void
 export function updateService(db: DatabaseSync, id: string, patch: UpdateServiceInput): void {
 	const assignments: string[] = [];
 	const params: unknown[] = [];
+	if (patch.host !== undefined) {
+		assignments.push("host_kind = ?", "host_primary_id = ?", "host_display_name = ?");
+		params.push(patch.host?.kind ?? null, patch.host?.primaryId ?? null, patch.host?.displayName ?? null);
+	}
 	for (const [field, value] of Object.entries(patch) as Array<[keyof UpdateServiceInput, UpdateServiceInput[keyof UpdateServiceInput]]>) {
-		if (value === undefined) continue;
+		if (value === undefined || field === "host") continue;
 		const column = SERVICE_FIELD_TO_COLUMN[field];
 		if (!column) continue;
 		assignments.push(`${column} = ?`);

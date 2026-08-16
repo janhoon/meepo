@@ -1,3 +1,4 @@
+import type { HostIdentity } from "./process-host.js";
 import type { TaskState, TaskWaitingOn } from "./task-types.js";
 
 export const AGENT_STATES = [
@@ -133,10 +134,6 @@ export interface SessionChildLinkEntryData {
 	transportState?: AgentTransportState;
 	bridgeSocketPath?: string | null;
 	bridgeStatusFile?: string | null;
-	tmuxSessionId?: string | null;
-	tmuxSessionName?: string | null;
-	tmuxWindowId?: string | null;
-	tmuxPaneId?: string | null;
 	taskId?: string | null;
 	createdAt: number;
 }
@@ -195,13 +192,7 @@ export interface SpawnSubagentResult {
 	bridgeSocketPath: string | null;
 	bridgeStatusFile: string | null;
 	bridgeLogFile: string | null;
-	tmuxSessionId: string;
-	tmuxSessionName: string;
-	tmuxWindowId: string;
-	tmuxPaneId: string;
-	hostKind: string;
-	hostPrimaryId: string;
-	hostDisplayName: string | null;
+	host: HostIdentity;
 	sessionLinkData: SessionChildLinkEntryData;
 }
 
@@ -323,15 +314,8 @@ export interface AgentSummary {
 	bridgeConnectedAt: number | null;
 	bridgeUpdatedAt: number | null;
 	bridgeLastError: string | null;
-	tmuxSessionId: string | null;
-	tmuxSessionName: string | null;
-	tmuxWindowId: string | null;
-	tmuxPaneId: string | null;
-	/** Process host backend: tmux | herdr (default tmux for legacy rows). */
-	hostKind: string | null;
-	hostPrimaryId: string | null;
-	hostDisplayName: string | null;
-	/** JSON blob of HostTarget.refs */
+	host: HostIdentity | null;
+	/** Store-internal last-known adapter refs. Not a caller field. */
 	hostTargetJson: string | null;
 	runDir: string;
 	sessionFile: string;
@@ -638,13 +622,7 @@ export interface CreateAgentInput {
 	bridgeConnectedAt?: number | null;
 	bridgeUpdatedAt?: number | null;
 	bridgeLastError?: string | null;
-	tmuxSessionId?: string | null;
-	tmuxSessionName?: string | null;
-	tmuxWindowId?: string | null;
-	tmuxPaneId?: string | null;
-	hostKind?: string | null;
-	hostPrimaryId?: string | null;
-	hostDisplayName?: string | null;
+	host?: HostIdentity | null;
 	hostTargetJson?: string | null;
 	runDir: string;
 	sessionFile: string;
@@ -684,13 +662,7 @@ export interface UpdateAgentInput {
 	bridgeConnectedAt?: number | null;
 	bridgeUpdatedAt?: number | null;
 	bridgeLastError?: string | null;
-	tmuxSessionId?: string | null;
-	tmuxSessionName?: string | null;
-	tmuxWindowId?: string | null;
-	tmuxPaneId?: string | null;
-	hostKind?: string | null;
-	hostPrimaryId?: string | null;
-	hostDisplayName?: string | null;
+	host?: HostIdentity | null;
 	hostTargetJson?: string | null;
 	runDir?: string;
 	sessionFile?: string;

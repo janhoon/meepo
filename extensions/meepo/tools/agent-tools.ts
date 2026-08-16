@@ -44,7 +44,7 @@ import {
 	deliverQueuedMessagesViaBridge,
 	queueDownwardMessage,
 } from "../bridge-delivery.js";
-import { getProcessHost, hostTargetRefFromLegacy } from "../process-host.js";
+import { getProcessHost, hostHandleFromRecord } from "../process-host.js";
 import { getProjectKey } from "../project.js";
 import { missingHostTargetMessage } from "../rpc-bridge-control.js";
 import {
@@ -208,7 +208,7 @@ export function register(registerTool: RegisterTool, pi: ExtensionAPI): void {
 					throw new Error(`Cannot message agent ${agent.id} because it is in terminal state ${agent.state}.`);
 				}
 				if (
-					!(await getProcessHost().targetExists(hostTargetRefFromLegacy(agent)))
+					!(await getProcessHost().targetExists(hostHandleFromRecord(agent)))
 				) {
 					throw new Error(missingHostTargetMessage(agent.id));
 				}

@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { getMeepoDb } from "./db.js";
 import { ensureMeepoRuntimePaths } from "./paths.js";
 import { getProjectKey } from "./project.js";
-import { getProcessHost, hostFieldsFromTarget } from "./process-host.js";
+import { getProcessHost, hostPersistFromTarget } from "./process-host.js";
 import { createService, updateService } from "./service-registry.js";
 import type { CreateServiceInput, ServiceStatusSnapshot, SpawnServiceInput, SpawnServiceResult } from "./service-types.js";
 
@@ -241,17 +241,11 @@ export async function spawnService(input: SpawnServiceInput): Promise<SpawnServi
 		updateService(db, serviceId, { state: "error", lastError: message, updatedAt: Date.now() });
 		throw error;
 	}
-	const fields = hostFieldsFromTarget(hostTarget);
+	const persisted = hostPersistFromTarget(hostTarget);
 	updateService(db, serviceId, {
 		state: "running",
-		tmuxSessionId: fields.tmuxSessionId,
-		tmuxSessionName: fields.tmuxSessionName,
-		tmuxWindowId: fields.tmuxWindowId,
-		tmuxPaneId: fields.tmuxPaneId,
-		hostKind: fields.hostKind,
-		hostPrimaryId: fields.hostPrimaryId,
-		hostDisplayName: fields.hostDisplayName,
-		hostTargetJson: fields.hostTargetJson,
+		host: persisted.host,
+		hostTargetJson: persisted.hostTargetJson,
 		updatedAt: Date.now(),
 	});
 	await sleep(READY_POLL_INTERVAL_MS);
@@ -298,12 +292,6 @@ export async function spawnService(input: SpawnServiceInput): Promise<SpawnServi
 		state: statusSnapshot?.state ?? "running",
 		statusSnapshot,
 		initialOutput,
-		tmuxSessionId: fields.tmuxSessionId ?? "",
-		tmuxSessionName: fields.tmuxSessionName ?? "",
-		tmuxWindowId: fields.tmuxWindowId ?? "",
-		tmuxPaneId: fields.tmuxPaneId ?? "",
-		hostKind: fields.hostKind,
-		hostPrimaryId: fields.hostPrimaryId,
-		hostDisplayName: fields.hostDisplayName,
+		host: persisted.host,
 	};
 }

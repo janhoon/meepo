@@ -10,6 +10,7 @@ import { deliverQueuedMessagesViaBridge } from "./bridge-delivery.js";
 import { registerChildRuntime } from "./child-runtime.js";
 import { configureSubtreeControlDeps } from "./subtree-control.js";
 import { closeMeepoDb, getMeepoDb } from "./db.js";
+import { getProcessHost, hostHandleFromRecord } from "./process-host.js";
 import { getProjectKey } from "./project.js";
 import { openAgentsBoard } from "./board.js";
 import { openAgentsDashboard } from "./dashboard.js";
@@ -435,7 +436,7 @@ export function registerMeepoCoordinatorTools(pi: ExtensionAPI, runtime: MeepoRu
 				const agent = getAgent(getMeepoDb(), id);
 				if (!agent) throw new Error(`Unknown agent id \"${id}\".`);
 				if (
-					!(await getProcessHost().targetExists(hostTargetRefFromLegacy(agent)))
+					!(await getProcessHost().targetExists(hostHandleFromRecord(agent)))
 				) {
 					throw new Error(missingHostTargetMessage(agent.id));
 				}

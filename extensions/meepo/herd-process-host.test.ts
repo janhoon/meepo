@@ -367,10 +367,10 @@ describe("HerdProcessHost lifecycle (mocked CLI)", () => {
 		});
 
 		const ref = {
-			hostKind: "herdr" as const,
+			kind: "herdr" as const,
 			primaryId: "term_live",
 			displayName: "child-one",
-			refs: {
+			lastKnownRefs: {
 				terminalId: "term_live",
 				paneId: "w4:p7",
 				agentName: "child-one",
@@ -412,7 +412,7 @@ describe("HerdProcessHost lifecycle (mocked CLI)", () => {
 			},
 		});
 		const result = await host.stop(
-			{ primaryId: "term_x", refs: { terminalId: "term_x", paneId: "w4:p9" } },
+			{ primaryId: "term_x", lastKnownRefs: { terminalId: "term_x", paneId: "w4:p9" } },
 			{ force: true },
 		);
 		assert.equal(result.stopped, true);

@@ -1,6 +1,7 @@
 /**
  * Pure-ish text/format helpers for Meepo coordinator surfaces.
  */
+import { formatHost } from "./process-host.js";
 import { truncateText } from "./text-util.js";
 import { deriveTaskHealth, taskLeaseKindForProfile } from "./task-registry.js";
 // Keep formatters free of DB access: callers that need live health pass a snapshot.
@@ -119,10 +120,7 @@ export function formatAgentDetails(agent: AgentSummary): string {
 		`bridgeConnectedAt: ${agent.bridgeConnectedAt ? new Date(agent.bridgeConnectedAt).toISOString() : "-"}`,
 		`bridgeUpdatedAt: ${agent.bridgeUpdatedAt ? new Date(agent.bridgeUpdatedAt).toISOString() : "-"}`,
 		`bridgeLastError: ${agent.bridgeLastError ?? "-"}`,
-		`tmuxSessionId: ${agent.tmuxSessionId ?? "-"}`,
-		`tmuxSessionName: ${agent.tmuxSessionName ?? "-"}`,
-		`tmuxWindowId: ${agent.tmuxWindowId ?? "-"}`,
-		`tmuxPaneId: ${agent.tmuxPaneId ?? "-"}`,
+		`host: ${formatHost(agent.host)}`,
 		`lastToolName: ${agent.lastToolName ?? "-"}`,
 		`lastAssistantPreview: ${agent.lastAssistantPreview ?? "-"}`,
 		`lastError: ${agent.lastError ?? "-"}`,
@@ -425,29 +423,17 @@ export function formatSpawnSuccess(result: SpawnSubagentResult): string {
 		`bridgeSocketPath: ${result.bridgeSocketPath ?? "-"}`,
 		`bridgeStatusFile: ${result.bridgeStatusFile ?? "-"}`,
 		`bridgeLogFile: ${result.bridgeLogFile ?? "-"}`,
-		`hostKind: ${result.hostKind}`,
-		`hostPrimaryId: ${result.hostPrimaryId}`,
-		`hostDisplayName: ${result.hostDisplayName ?? "-"}`,
-		// Legacy tmux_* fields remain when host is tmux (empty strings on herdr).
-		`tmuxSession: ${result.tmuxSessionName || "-"} ${result.tmuxSessionId || ""}`.trim(),
-		`tmuxWindow: ${result.tmuxWindowId || "-"}`,
-		`tmuxPane: ${result.tmuxPaneId || "-"}`,
+		`host: ${formatHost(result.host)}`,
 	].join("\n");
 }
 
 export function formatFocusResult(agent: AgentSummary, result: { focused: boolean; command: string; reason?: string }): string {
-	const hostLabel = agent.hostKind ?? "host";
 	return [
 		result.focused
-			? `Focused ${agent.id} on ${hostLabel}.`
+			? `Focused ${agent.id} on ${formatHost(agent.host)}.`
 			: `Could not switch the current pi client automatically for ${agent.id}.`,
 		result.reason ? `reason: ${result.reason}` : null,
-		`hostKind: ${agent.hostKind ?? "-"}`,
-		`hostPrimaryId: ${agent.hostPrimaryId ?? "-"}`,
-		`hostDisplayName: ${agent.hostDisplayName ?? "-"}`,
-		`tmuxSession: ${agent.tmuxSessionName ?? agent.tmuxSessionId ?? "-"}`,
-		`tmuxWindow: ${agent.tmuxWindowId ?? "-"}`,
-		`tmuxPane: ${agent.tmuxPaneId ?? "-"}`,
+		`host: ${formatHost(agent.host)}`,
 		`manual command: ${result.command}`,
 	]
 		.filter((line): line is string => Boolean(line))
@@ -522,10 +508,7 @@ export function formatServiceDetails(service: ServiceSummary): string {
 		`runDir: ${service.runDir}`,
 		`logFile: ${service.logFile}`,
 		`latestStatusFile: ${service.latestStatusFile}`,
-		`tmuxSessionId: ${service.tmuxSessionId ?? "-"}`,
-		`tmuxSessionName: ${service.tmuxSessionName ?? "-"}`,
-		`tmuxWindowId: ${service.tmuxWindowId ?? "-"}`,
-		`tmuxPaneId: ${service.tmuxPaneId ?? "-"}`,
+		`host: ${formatHost(service.host)}`,
 		`lastExitCode: ${service.lastExitCode ?? "-"}`,
 		`lastError: ${service.lastError ?? "-"}`,
 		`createdAt: ${new Date(service.createdAt).toISOString()}`,
@@ -559,24 +542,17 @@ export function formatServiceStartResult(result: SpawnServiceResult): string {
 		`runDir: ${result.runDir}`,
 		`logFile: ${result.logFile}`,
 		`latestStatusFile: ${result.latestStatusFile}`,
-		`hostKind: ${result.hostKind}`,
-		`hostPrimaryId: ${result.hostPrimaryId}`,
-		`hostDisplayName: ${result.hostDisplayName ?? "-"}`,
-		`tmuxSession: ${result.tmuxSessionName || "-"} ${result.tmuxSessionId || ""}`.trim(),
-		`tmuxWindow: ${result.tmuxWindowId || "-"}`,
-		`tmuxPane: ${result.tmuxPaneId || "-"}`,
+		`host: ${formatHost(result.host)}`,
 	].join("\n");
 }
 
 export function formatServiceFocusResult(service: ServiceSummary, result: { focused: boolean; command: string; reason?: string }): string {
 	return [
 		result.focused
-			? `Focused ${service.id} on ${service.hostKind ?? "host"}.`
+			? `Focused ${service.id} on ${formatHost(service.host)}.`
 			: `Could not switch the current pi client automatically for ${service.id}.`,
 		result.reason ? `reason: ${result.reason}` : null,
-		`tmuxSession: ${service.tmuxSessionName ?? service.tmuxSessionId ?? "-"}`,
-		`tmuxWindow: ${service.tmuxWindowId ?? "-"}`,
-		`tmuxPane: ${service.tmuxPaneId ?? "-"}`,
+		`host: ${formatHost(service.host)}`,
 		`manual command: ${result.command}`,
 	]
 		.filter((line): line is string => Boolean(line))
