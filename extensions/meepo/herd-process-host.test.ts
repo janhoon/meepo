@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import {
 	createHerdProcessHost,
-	HERD_PROCESS_HOST_LIFECYCLE_READY,
 	type HerdrCliResult,
 } from "./herd-process-host.js";
 import { createProcessHost } from "./process-host-factory.js";
@@ -29,11 +28,12 @@ function err(code: string, message: string): HerdrCliResult {
 }
 
 describe("HerdProcessHost lifecycle (mocked CLI)", () => {
-	it("marks lifecycle ready so auto can select herdr", () => {
-		assert.equal(HERD_PROCESS_HOST_LIFECYCLE_READY, true);
+	it("auto selects herdr when the version probe is ok", () => {
 		const host = createProcessHost({
 			selection: "auto",
-			probes: { herdrAvailable: () => true, tmuxAvailable: () => true },
+			probes: {
+				probeHerdr: () => ({ status: "ok", info: { version: "0.8.0", protocol: 20, raw: "herdr 0.8.0" } }),
+			},
 		});
 		assert.equal(host.hostKind, "herdr");
 	});
@@ -313,7 +313,8 @@ describe("HerdProcessHost lifecycle (mocked CLI)", () => {
 			cwd: "/tmp",
 		});
 		assert.equal(target.refs.paneId, "w4:pRoot");
-		assert.equal(target.displayName, "research");
+		assert.equal(target.displayName, undefined);
+		assert.equal(target.refs.agentName, undefined);
 	});
 
 	it("focus / capture / stop / targetExists round-trip on terminal_id", async () => {
@@ -346,7 +347,7 @@ describe("HerdProcessHost lifecycle (mocked CLI)", () => {
 					});
 				}
 				if (args[0] === "agent" && args[1] === "focus") {
-					assert.equal(args[2], "child-one");
+					assert.equal(args[2], "w4:p7");
 					return ok({ type: "ok" });
 				}
 				if (args[0] === "pane" && args[1] === "read") {

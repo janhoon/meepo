@@ -31,7 +31,7 @@ import type {
 } from "./types.js";
 import { getMeepoDb } from "./db.js";
 import { getProjectKey } from "./project.js";
-import { getProcessHost, hostFieldsFromTarget, resolveNodeExecutable } from "./process-host.js";
+import { getProcessHost, hostFieldsFromTarget } from "./process-host.js";
 import { buildBridgeLaunchCommand } from "./rpc-bridge-control.js";
 
 const RPC_BRIDGE_ENTRY_SCRIPT = fileURLToPath(new URL("./rpc-bridge.mjs", import.meta.url));
@@ -60,6 +60,18 @@ function resolvePiCommand(): string {
 	const result = spawnSync("bash", ["-lc", "command -v pi"], { encoding: "utf8" });
 	const command = result.stdout?.trim();
 	return command || "pi";
+}
+
+/** Compiled `pi` sets process.execPath to itself and cannot run rpc-bridge.mjs. */
+function resolveNodeExecutable(preferred?: string | null): string {
+	const base = (preferred ?? "").replace(/\\/g, "/").split("/").pop() ?? "";
+	if (base === "node" || base === "nodejs") return preferred as string;
+	const result = spawnSync("bash", ["-lc", "command -v node"], { encoding: "utf8" });
+	const found = result.stdout?.trim();
+	if (found) return found;
+	throw new Error(
+		"Meepo child launch needs a Node executable on PATH. process.execPath is not Node (compiled pi?).",
+	);
 }
 
 function buildTaskFileContent(options: CreateRunArtifactsOptions): string {

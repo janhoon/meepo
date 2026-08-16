@@ -8,39 +8,21 @@ import {
 	type ResolveProcessHostInput,
 	freezeProcessHost,
 	getFrozenProcessHost,
-	probeTmuxAvailable,
 	resolveProcessHostSelection,
 } from "./process-host.js";
-import {
-	type HerdrProbe,
-	missingHerdrMessage,
-	probeHerdr,
-	unsupportedHerdrMessage,
-} from "./herdr-compat.js";
-import { createHerdProcessHost, HERD_PROCESS_HOST_LIFECYCLE_READY } from "./herd-process-host.js";
+import { missingHerdrMessage, probeHerdr, unsupportedHerdrMessage } from "./herdr-compat.js";
+import { createHerdProcessHost } from "./herd-process-host.js";
 import { createTmuxProcessHost } from "./tmux-process-host.js";
-
-function resolveHerdrProbe(input: ResolveProcessHostInput): () => HerdrProbe {
-	if (input.probes?.probeHerdr) return input.probes.probeHerdr;
-	if (input.probes?.herdrAvailable) {
-		return () =>
-			input.probes!.herdrAvailable!()
-				? { status: "ok", info: { version: "0.8.0", protocol: 20, raw: "test" } }
-				: { status: "missing" };
-	}
-	return () => probeHerdr();
-}
 
 /**
  * Build a ProcessHost for the resolved selection without freezing the singleton.
  * Explicit `herdr` + failed probe throws (no silent fallback).
- * Default selection is `herdr`. `auto` prefers herdr when lifecycle-ready and probe is ok; else tmux.
+ * Default selection is `herdr`. `auto` uses herdr only when the probe is ok.
  */
 export function createProcessHost(input: ResolveProcessHostInput = {}): ProcessHost {
 	const selection = resolveProcessHostSelection(input);
-	const tmuxOk = input.probes?.tmuxAvailable ?? probeTmuxAvailable;
 	const options = input.hostOptions ?? {};
-	const herdrProbe = resolveHerdrProbe(input);
+	const herdrProbe = input.probes?.probeHerdr ?? probeHerdr;
 
 	if (selection === "tmux") {
 		return createTmuxProcessHost(options);
@@ -58,12 +40,7 @@ export function createProcessHost(input: ResolveProcessHostInput = {}): ProcessH
 		}
 	}
 
-	if (herdr.status === "ok" && HERD_PROCESS_HOST_LIFECYCLE_READY) {
-		return createHerdProcessHost(options);
-	}
-	if (!tmuxOk()) {
-		return createTmuxProcessHost(options);
-	}
+	if (herdr.status === "ok") return createHerdProcessHost(options);
 	return createTmuxProcessHost(options);
 }
 

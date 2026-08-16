@@ -13,7 +13,6 @@ import {
 	allocateUniqueHostName,
 	fallbackAgentHostName,
 	fallbackServiceHostName,
-	rememberAllocatedHostName,
 } from "./host-naming.js";
 import {
 	type HostCaptureResult,
@@ -26,11 +25,8 @@ import {
 	type HostTargetRef,
 	type ProcessHost,
 	type ProcessHostOptions,
-	probeHerdrAvailable,
 } from "./process-host.js";
-
-/** Lifecycle ops are implemented — auto may select herdr when probe succeeds. */
-export const HERD_PROCESS_HOST_LIFECYCLE_READY = true;
+import { probeHerdr } from "./herdr-compat.js";
 
 export interface HerdrCliResult {
 	status: number | null;
@@ -131,14 +127,9 @@ function toHostTarget(agent: HerdrAgentInfo, displayName?: string): HostTarget {
 	};
 }
 
-/** herdr 0.8 agent commands accept a live name or pane id — not terminal_id. */
+/** herdr 0.8 command target: pane id first, then a name that actually renamed. */
 function resolveFocusTarget(target: HostTargetRef): string | null {
-	return (
-		target.displayName ||
-		target.refs?.agentName ||
-		target.refs?.paneId ||
-		null
-	);
+	return target.refs?.paneId || target.displayName || target.refs?.agentName || null;
 }
 
 function resolvePaneId(target: HostTargetRef): string | null {
@@ -219,7 +210,7 @@ export class HerdProcessHost implements ProcessHost {
 
 	constructor(options: HerdProcessHostOptions = {}) {
 		this.runHerdr = options.runHerdr ?? defaultRunHerdr;
-		this.isAvailableProbe = options.isAvailableProbe ?? probeHerdrAvailable;
+		this.isAvailableProbe = options.isAvailableProbe ?? (() => probeHerdr().status === "ok");
 	}
 
 	private shouldDeliverNotify(input: HostNotifyInput, now: number): boolean {
@@ -449,12 +440,12 @@ export class HerdProcessHost implements ProcessHost {
 			return toHostTarget(
 				{
 					...pane,
-					name: named,
+					name: named ?? undefined,
 					pane_id: pane.pane_id ?? rootPaneId,
 					tab_id: pane.tab_id ?? tabId,
 					terminal_id: pane.terminal_id ?? shell.terminal_id,
 				},
-				named,
+				named ?? undefined,
 			);
 		} catch (error) {
 			this.closeTabBestEffort(tabId);
@@ -467,7 +458,7 @@ export class HerdProcessHost implements ProcessHost {
 		desiredName: string,
 		entityId: string,
 		inventory: HostInventory,
-	): string {
+	): string | null {
 		let name = desiredName;
 		for (let attempt = 0; attempt < 8; attempt += 1) {
 			try {
@@ -476,12 +467,12 @@ export class HerdProcessHost implements ProcessHost {
 			} catch (error) {
 				const err = error as Error & { herdrCode?: string };
 				if (err.herdrCode === "agent_name_taken") {
-					rememberAllocatedHostName(inventory, name);
+					inventory.displayNames.add(name);
 					name = allocateUniqueHostName({ desired: desiredName, entityId, inventory });
 					continue;
 				}
-				// pane run has not produced a herdr-detected agent yet; keep pane_id as the target.
-				if (err.herdrCode === "agent_not_found") return desiredName;
+				// pane run has not produced a herdr-detected agent yet; pane_id is the handle.
+				if (err.herdrCode === "agent_not_found") return null;
 				throw error;
 			}
 		}
@@ -497,7 +488,7 @@ export class HerdProcessHost implements ProcessHost {
 			return {
 				focused: false,
 				command,
-				reason: "Missing herdr target (displayName / pane_id).",
+				reason: "Missing herdr target (pane_id / displayName).",
 			};
 		}
 		try {

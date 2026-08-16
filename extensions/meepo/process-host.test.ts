@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import { loadMeepoConfig } from "./config.js";
-import { HERD_PROCESS_HOST_LIFECYCLE_READY } from "./herd-process-host.js";
 import {
 	createProcessHost,
 	ensureProcessHost,
@@ -11,7 +10,6 @@ import {
 	hostTargetRefFromLegacy,
 	parseProcessHostSelection,
 	resetProcessHostForTests,
-	resolveNodeExecutable,
 	resolveProcessHostSelection,
 	type HostTarget,
 } from "./process-host.js";
@@ -69,11 +67,17 @@ describe("process host selection", () => {
 		assert.equal(loadMeepoConfig({ env: {}, preset: "full" }).runtime.processHost, "herdr");
 	});
 
-	it("auto prefers herdr when lifecycle is ready and probe passes", () => {
-		assert.equal(HERD_PROCESS_HOST_LIFECYCLE_READY, true);
+	const okHerdr = {
+		probeHerdr: () => ({ status: "ok" as const, info: { version: "0.8.0", protocol: 20, raw: "herdr 0.8.0" } }),
+	};
+	const missingHerdr = {
+		probeHerdr: () => ({ status: "missing" as const }),
+	};
+
+	it("auto prefers herdr when the probe is ok", () => {
 		const host = createProcessHost({
 			selection: "auto",
-			probes: { herdrAvailable: () => true, tmuxAvailable: () => true },
+			probes: okHerdr,
 		});
 		assert.equal(host.hostKind, "herdr");
 	});
@@ -81,7 +85,7 @@ describe("process host selection", () => {
 	it("auto falls back to tmux when herdr probe fails", () => {
 		const host = createProcessHost({
 			selection: "auto",
-			probes: { herdrAvailable: () => false, tmuxAvailable: () => true },
+			probes: missingHerdr,
 		});
 		assert.equal(host.hostKind, "tmux");
 	});
@@ -89,7 +93,7 @@ describe("process host selection", () => {
 	it("explicit tmux never requires herdr", () => {
 		const host = createProcessHost({
 			selection: "tmux",
-			probes: { herdrAvailable: () => false, tmuxAvailable: () => true },
+			probes: missingHerdr,
 		});
 		assert.equal(host.hostKind, "tmux");
 	});
@@ -99,7 +103,7 @@ describe("process host selection", () => {
 			() =>
 				createProcessHost({
 					selection: "herdr",
-					probes: { herdrAvailable: () => false, tmuxAvailable: () => true },
+					probes: missingHerdr,
 				}),
 			/herdr is not available/,
 		);
@@ -122,19 +126,10 @@ describe("process host selection", () => {
 		);
 	});
 
-	it("resolveNodeExecutable keeps a node path and rejects compiled pi", () => {
-		assert.equal(resolveNodeExecutable("/usr/bin/node"), "/usr/bin/node");
-		assert.notEqual(
-			resolveNodeExecutable("/home/janhoon/.local/share/mise/installs/pi/0.84.2/pi/pi"),
-			"/home/janhoon/.local/share/mise/installs/pi/0.84.2/pi/pi",
-		);
-		assert.match(resolveNodeExecutable("/home/janhoon/.local/share/mise/installs/pi/0.84.2/pi/pi"), /node/);
-	});
-
 	it("explicit herdr returns HerdProcessHost when probe succeeds", () => {
 		const host = createProcessHost({
 			selection: "herdr",
-			probes: { herdrAvailable: () => true, tmuxAvailable: () => true },
+			probes: okHerdr,
 		});
 		assert.equal(host.hostKind, "herdr");
 	});
@@ -142,11 +137,11 @@ describe("process host selection", () => {
 	it("freezes host once per session via ensureProcessHost", () => {
 		const first = ensureProcessHost({
 			selection: "tmux",
-			probes: { herdrAvailable: () => false, tmuxAvailable: () => true },
+			probes: missingHerdr,
 		});
 		const second = ensureProcessHost({
 			selection: "tmux",
-			probes: { herdrAvailable: () => true, tmuxAvailable: () => true },
+			probes: okHerdr,
 		});
 		assert.equal(first, second);
 		assert.equal(first.hostKind, "tmux");
