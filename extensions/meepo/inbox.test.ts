@@ -5,8 +5,8 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { describe, it } from "node:test";
 import { bootstrapMeepoDatabase } from "./db.js";
-import { inboxEntryFromRecord, listInboxForChild, markInbox, publishDownward } from "./inbox.js";
-import { createAgent, createRootActorContext, getAgent, listMessagesForRecipient } from "./registry.js";
+import { inboxEntryFromRecord, listInboxForChild, listOpenAttention, markInbox, publishDownward } from "./inbox.js";
+import { createAgent, createAgentAttentionItemV2, createRootActorContext, getAgent, listMessagesForRecipient } from "./registry.js";
 import { DatabaseSync } from "./sqlite.js";
 
 function seedAgent(db: DatabaseSync, id: string, projectKey = "test-project"): void {
@@ -63,5 +63,28 @@ describe("inbox", () => {
 		assert.equal(after[0]!.status, "acked");
 		const stillQueued = listInboxForChild(db, childId, { limit: 20 });
 		assert.equal(stillQueued.length, 0);
+	});
+
+	it("listOpenAttention returns one Attention list", () => {
+		const db = new DatabaseSync(":memory:");
+		bootstrapMeepoDatabase(db);
+		const childId = `child_${randomUUID().slice(0, 8)}`;
+		const projectKey = `proj_${randomUUID().slice(0, 8)}`;
+		seedAgent(db, childId, projectKey);
+		createAgentAttentionItemV2(db, {
+			projectKey,
+			subjectAgentId: childId,
+			ownerKind: "root",
+			kind: "question",
+			priority: 2,
+			summary: "need a decision",
+			state: "waiting_on_owner",
+		});
+		const items = listOpenAttention(db, { projectKey, childIds: [childId] });
+		assert.equal(items.length, 1);
+		assert.equal(items[0]!.agentId, childId);
+		assert.equal(items[0]!.kind, "question");
+		assert.equal(items[0]!.state, "waiting_on_coordinator");
+		assert.equal(items[0]!.audience, "coordinator");
 	});
 });

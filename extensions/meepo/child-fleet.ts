@@ -21,7 +21,7 @@ import { deliverQueuedMessagesViaBridge, queueDownwardMessage } from "./bridge-d
 import type { CleanupCandidate } from "./cleanup-types.js";
 import { OPEN_ATTENTION_STATES, TERMINAL_AGENT_STATES } from "./registry-shared.js";
 import { resolveAgentFilters } from "./session-scope.js";
-import type { AgentSummary, AttentionItemRecord, RuntimeStatusSnapshot, UpdateAgentInput } from "./types.js";
+import type { AgentSummary, RuntimeStatusSnapshot, UpdateAgentInput } from "./types.js";
 
 function requireHost(agent: AgentSummary): HostIdentity {
 	if (!agent.host) {
@@ -66,46 +66,16 @@ export async function listCleanupCandidates(
 		params.ids && params.ids.length > 0
 			? listAgents(db, { ids: params.ids, limit: params.limit ?? params.ids.length })
 			: listAgents(db, resolveAgentFilters(ctx, params.scope ?? "current_project", { limit: params.limit }));
-	const { v2, leftover } = listOpenAttention(db, {
-		legacy: { agentIds: agents.map((agent) => agent.id), states: OPEN_ATTENTION_STATES, limit: 500 },
+	const openItems = listOpenAttention(db, {
+		childIds: agents.map((agent) => agent.id),
+		states: OPEN_ATTENTION_STATES,
+		limit: 500,
 	});
-	const attentionByAgent = new Map<string, AttentionItemRecord[]>();
-	for (const item of leftover) {
+	const attentionByAgent = new Map<string, typeof openItems>();
+	for (const item of openItems) {
 		const items = attentionByAgent.get(item.agentId) ?? [];
 		items.push(item);
 		attentionByAgent.set(item.agentId, items);
-	}
-	for (const item of v2) {
-		const agentId = item.subjectAgentId;
-		if (!agentId) continue;
-		const mapped: AttentionItemRecord = {
-			id: item.id,
-			messageId: item.messageId,
-			agentId,
-			threadId: agentId,
-			projectKey: item.projectKey,
-			spawnSessionId: null,
-			spawnSessionFile: null,
-			audience: item.ownerKind === "user" ? "user" : "coordinator",
-			kind: (item.kind === "approval" || item.kind === "change_request" ? "question" : item.kind) as AttentionItemRecord["kind"],
-			priority: item.priority,
-			state:
-				item.state === "waiting_on_owner"
-					? item.ownerKind === "user"
-						? "waiting_on_user"
-						: "waiting_on_coordinator"
-					: (item.state as AttentionItemRecord["state"]),
-			summary: item.summary,
-			payload: item.payload,
-			createdAt: item.createdAt,
-			updatedAt: item.updatedAt,
-			resolvedAt: item.resolvedAt,
-			resolutionKind: item.resolutionKind,
-			resolutionSummary: item.resolutionSummary,
-		};
-		const items = attentionByAgent.get(agentId) ?? [];
-		items.push(mapped);
-		attentionByAgent.set(agentId, items);
 	}
 	const candidates: CleanupCandidate[] = [];
 	for (const agent of agents.filter((agent) => TERMINAL_AGENT_STATES.includes(agent.state))) {

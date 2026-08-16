@@ -70,7 +70,6 @@ export const AGENT_FIELD_TO_COLUMN: Record<Exclude<keyof UpdateAgentInput, "host
 	bridgeConnectedAt: "bridge_connected_at",
 	bridgeUpdatedAt: "bridge_updated_at",
 	bridgeLastError: "bridge_last_error",
-	hostTargetJson: "host_target_json",
 	runDir: "run_dir",
 	sessionFile: "session_file",
 	lastToolName: "last_tool_name",

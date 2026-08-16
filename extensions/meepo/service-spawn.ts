@@ -245,7 +245,6 @@ export async function spawnService(input: SpawnServiceInput): Promise<SpawnServi
 	updateService(db, serviceId, {
 		state: "running",
 		host: persisted.host,
-		hostTargetJson: persisted.hostTargetJson,
 		updatedAt: Date.now(),
 	});
 	await sleep(READY_POLL_INTERVAL_MS);

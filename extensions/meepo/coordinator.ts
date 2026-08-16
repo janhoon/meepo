@@ -511,8 +511,13 @@ export function registerMeepoCoordinatorTools(pi: ExtensionAPI, runtime: MeepoRu
 				return;
 			}
 			const filters = resolveAttentionFilters(ctx, scope, { limit: 200 });
-			const attention = listOpenAttention(getMeepoDb(), { legacy: filters });
-			const items = attention.leftover;
+			const items = listOpenAttention(getMeepoDb(), {
+				projectKey: filters.projectKey,
+				childIds: filters.agentIds,
+				audiences: filters.audiences,
+				states: filters.states,
+				limit: 200,
+			});
 			const agentsById = new Map(
 				listAgents(getMeepoDb(), { ids: [...new Set(items.map((item) => item.agentId))], limit: 200 }).map((agent) => [agent.id, agent]),
 			);

@@ -65,21 +65,6 @@ export function attentionV2MatchesAudience(item: AgentAttentionV2Record, audienc
 	return true;
 }
 
-export function legacyAttentionDuplicatesV2(item: AttentionItemRecord, v2MessageIds: Set<string>, v2RecipientRowIds: Set<string>): boolean {
-	if (item.messageId && v2MessageIds.has(item.messageId)) return true;
-	const payload = item.payload && typeof item.payload === "object" ? (item.payload as Record<string, unknown>) : null;
-	const payloadV2MessageId = typeof payload?.v2MessageId === "string" ? payload.v2MessageId : null;
-	const payloadV2RecipientRowId = typeof payload?.v2RecipientRowId === "string" ? payload.v2RecipientRowId : null;
-	return !!((payloadV2MessageId && v2MessageIds.has(payloadV2MessageId)) || (payloadV2RecipientRowId && v2RecipientRowIds.has(payloadV2RecipientRowId)));
-}
-
-export function suppressDuplicateLegacyAttentionItems(legacyItems: AttentionItemRecord[], v2Items: AgentAttentionV2Record[]): AttentionItemRecord[] {
-	const v2MessageIds = new Set(v2Items.map((item) => item.messageId).filter((value): value is string => Boolean(value)));
-	const v2RecipientRowIds = new Set(v2Items.map((item) => item.recipientRowId).filter((value): value is string => Boolean(value)));
-	if (v2MessageIds.size === 0 && v2RecipientRowIds.size === 0) return legacyItems;
-	return legacyItems.filter((item) => !legacyAttentionDuplicatesV2(item, v2MessageIds, v2RecipientRowIds));
-}
-
 export function payloadRecord(payload: unknown): Record<string, unknown> {
 	return payload && typeof payload === "object" && !Array.isArray(payload) ? (payload as Record<string, unknown>) : {};
 }
@@ -178,9 +163,11 @@ export function buildTaskInteractionActions(
 }
 
 export function taskInteractionFromLegacyAttention(item: AttentionItemRecord, agent: AgentSummary | undefined): TaskInteractionRecord | null {
-	const taskId = agent?.taskId ?? null;
+	const taskId = payloadString(item.payload, "taskId") ?? agent?.taskId ?? null;
 	if (!taskId) return null;
-	const ownerKind: AgentRecipientKind = item.audience === "user" ? "user" : "root";
+	const ownerKind: AgentRecipientKind =
+		(payloadString(item.payload, "ownerKind") as AgentRecipientKind | null) ??
+		(item.audience === "user" ? "user" : "root");
 	const messageId = payloadString(item.payload, "v2MessageId") ?? item.messageId;
 	const recipientRowId = payloadString(item.payload, "v2RecipientRowId");
 	const kind = taskInteractionKindFromAttention(item.kind, ownerKind);
@@ -216,43 +203,6 @@ export function taskInteractionFromLegacyAttention(item: AttentionItemRecord, ag
 	};
 }
 
-export function taskInteractionFromAgentAttentionV2(item: AgentAttentionV2Record, agentsById: Map<string, AgentSummary>): TaskInteractionRecord | null {
-	const subject = item.subjectAgentId ? agentsById.get(item.subjectAgentId) : undefined;
-	const taskId = item.taskId ?? subject?.taskId ?? null;
-	if (!taskId) return null;
-	const kind = taskInteractionKindFromAttention(item.kind, item.ownerKind);
-	const interactionId = `v2:${item.id}`;
-	const actionInfo = buildTaskInteractionActions(kind, taskId, item.subjectAgentId, item.messageId, {
-		interactionId,
-		canMessageAgent: Boolean(subject && !TERMINAL_AGENT_STATES.includes(subject.state)),
-	});
-	return {
-		id: interactionId,
-		source: "hierarchy_attention",
-		sourceId: item.id,
-		taskId,
-		agentId: item.subjectAgentId,
-		actorLabel: actorLabelForInteraction(subject, item.subjectAgentId),
-		ownerKind: item.ownerKind,
-		ownerAgentId: item.ownerAgentId,
-		kind,
-		state: item.state,
-		priority: item.priority,
-		summary: item.summary,
-		details: payloadString(item.payload, "details"),
-		answerNeeded: payloadString(item.payload, "answerNeeded"),
-		recommendedNextAction: payloadString(item.payload, "recommendedNextAction"),
-		files: payloadStringArray(item.payload, "files"),
-		messageId: item.messageId,
-		recipientRowId: item.recipientRowId,
-		nextAction: actionInfo.nextAction,
-		actions: actionInfo.actions,
-		payload: item.payload,
-		createdAt: item.createdAt,
-		updatedAt: item.updatedAt,
-	};
-}
-
 export function addTaskInteraction(result: Map<string, TaskInteractionRecord[]>, interaction: TaskInteractionRecord | null, taskIds?: Set<string>): void {
 	if (!interaction) return;
 	if (taskIds && !taskIds.has(interaction.taskId)) return;
@@ -266,30 +216,18 @@ export function sortTaskInteractionsByPriority(items: TaskInteractionRecord[]): 
 }
 
 export function buildTaskInteractionsByTask(
-	legacyItems: AttentionItemRecord[],
-	v2Items: AgentAttentionV2Record[],
+	items: AttentionItemRecord[],
 	agentsById: Map<string, AgentSummary>,
 	taskIds?: Set<string>,
 ): Map<string, TaskInteractionRecord[]> {
 	const result = new Map<string, TaskInteractionRecord[]>();
-	for (const item of v2Items) {
-		addTaskInteraction(result, taskInteractionFromAgentAttentionV2(item, agentsById), taskIds);
-	}
-	for (const item of suppressDuplicateLegacyAttentionItems(legacyItems, v2Items)) {
+	for (const item of items) {
 		addTaskInteraction(result, taskInteractionFromLegacyAttention(item, agentsById.get(item.agentId)), taskIds);
 	}
 	for (const [taskId, interactions] of result.entries()) {
 		result.set(taskId, sortTaskInteractionsByPriority(interactions));
 	}
 	return result;
-}
-
-export function mergeAgentAttentionV2Items(...groups: AgentAttentionV2Record[][]): AgentAttentionV2Record[] {
-	const byId = new Map<string, AgentAttentionV2Record>();
-	for (const group of groups) {
-		for (const item of group) byId.set(item.id, item);
-	}
-	return [...byId.values()];
 }
 
 export function listTaskInteractionsForTaskIds(taskIds: string[]): Map<string, TaskInteractionRecord[]> {
@@ -299,11 +237,13 @@ export function listTaskInteractionsForTaskIds(taskIds: string[]): Map<string, T
 	const agentIds = Array.from(new Set(links.map((link) => link.agentId)));
 	const agents = agentIds.length > 0 ? listAgents(db, { ids: agentIds, limit: agentIds.length }) : [];
 	const agentsById = new Map(agents.map((agent) => [agent.id, agent]));
-	const attention = listOpenAttention(db, {
-		v2: { taskIds, subjectAgentIds: agentIds, states: OPEN_AGENT_ATTENTION_V2_STATES, limit: 500 },
-		legacy: { agentIds, states: OPEN_ATTENTION_STATES, limit: 500 },
+	const items = listOpenAttention(db, {
+		childIds: agentIds,
+		taskIds,
+		states: OPEN_ATTENTION_STATES,
+		limit: 500,
 	});
-	return buildTaskInteractionsByTask(attention.leftover, attention.v2, agentsById, new Set(taskIds));
+	return buildTaskInteractionsByTask(items, agentsById, new Set(taskIds));
 }
 
 export function getTaskInteractions(taskId: string): TaskInteractionRecord[] {

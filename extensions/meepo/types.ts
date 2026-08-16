@@ -620,7 +620,6 @@ export interface CreateAgentInput {
 	bridgeUpdatedAt?: number | null;
 	bridgeLastError?: string | null;
 	host?: HostIdentity | null;
-	hostTargetJson?: string | null;
 	runDir: string;
 	sessionFile: string;
 	lastToolName?: string | null;
@@ -660,7 +659,6 @@ export interface UpdateAgentInput {
 	bridgeUpdatedAt?: number | null;
 	bridgeLastError?: string | null;
 	host?: HostIdentity | null;
-	hostTargetJson?: string | null;
 	runDir?: string;
 	sessionFile?: string;
 	lastToolName?: string | null;

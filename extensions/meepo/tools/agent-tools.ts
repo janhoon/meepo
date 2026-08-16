@@ -25,8 +25,7 @@ import {
 import { spawnChildFromParams } from "../spawn-ops.js";
 import { resolveAdminAttentionV2Filters } from "../task-interactions.js";
 import {
-	buildAdminAttentionText,
-	buildAttentionV2Text,
+	buildAttentionText,
 	buildInboxText,
 	buildInboxV2Text,
 	defaultDownwardActionPolicy,
@@ -54,13 +53,11 @@ import {
 	canSendMessage,
 	fetchAgentInboxV2,
 	getAgent,
-	listAgentAttentionItemsV2,
 	listAgents,
 	listHierarchyVisibleAgentIds,
 } from "../registry.js";
 import { reconcileTasks } from "../task-registry.js";
 import type {
-	AgentAttentionV2Record,
 	AgentRecipientRef,
 	AgentSummary,
 } from "../types.js";
@@ -448,46 +445,28 @@ export function register(registerTool: RegisterTool, pi: ExtensionAPI): void {
 				const scope = params.scope ?? "current_project";
 				const db = getMeepoDb();
 				const actor = resolveToolActorContext(ctx);
-				if (actor.kind === "agent") {
-					const visibleSubjectAgentIds = params.audience === "user" ? listHierarchyVisibleAgentIds(db, actor, { projectKey: getProjectKey(ctx.cwd) }) : undefined;
-					const v2Filters = {
-						projectKey: getProjectKey(ctx.cwd),
-						ownerKind: params.audience === "user" ? ("user" as const) : ("agent" as const),
-						ownerAgentId: params.audience === "user" ? null : actor.agentId,
-						subjectAgentIds: visibleSubjectAgentIds,
-						states: params.includeResolved ? undefined : (["open", "acknowledged", "waiting_on_owner"] as AgentAttentionV2Record["state"][]),
-						limit: params.limit,
-					};
-					const items = listAgentAttentionItemsV2(db, v2Filters);
-					const agentIds = [...new Set(items.flatMap((item) => [item.subjectAgentId, item.ownerAgentId]).filter((value): value is string => Boolean(value)))];
-					const agentsById = new Map(listAgents(db, { ids: agentIds, limit: 200 }).map((agent) => [agent.id, agent]));
-					updateFleetUi(ctx);
-					return {
-						content: [{ type: "text", text: buildAttentionV2Text(items, agentsById, params.includeResolved ?? false) }],
-						details: { scope, actor, filters: v2Filters, items, version: "v2" },
-					};
-				}
 				const filters = resolveAttentionFilters(ctx, scope, params);
-				const v2Filters = resolveAdminAttentionV2Filters(ctx, scope, params);
-				const { v2: v2Items, leftover: items } = listOpenAttention(db, { v2: v2Filters, legacy: filters });
-				const suppressedLegacyDuplicateCount = 0;
-				const agentIds = [
-					...items.map((item) => item.agentId),
-					...v2Items.flatMap((item) => [item.subjectAgentId, item.ownerAgentId]).filter((value): value is string => Boolean(value)),
-				];
-				const agentsById = new Map(listAgents(db, { ids: [...new Set(agentIds)], limit: 200 }).map((agent) => [agent.id, agent]));
+				const adminFilters = actor.kind === "agent" ? undefined : resolveAdminAttentionV2Filters(ctx, scope, params);
+				const items = listOpenAttention(db, {
+					projectKey: adminFilters?.projectKey ?? filters.projectKey ?? getProjectKey(ctx.cwd),
+					childIds: actor.kind === "agent" && params.audience === "user"
+						? listHierarchyVisibleAgentIds(db, actor, { projectKey: getProjectKey(ctx.cwd) })
+						: adminFilters?.subjectAgentIds ?? filters.agentIds,
+					taskIds: adminFilters?.taskIds,
+					ownerKinds: actor.kind === "agent"
+						? [params.audience === "user" ? "user" : "agent"]
+						: adminFilters?.ownerKinds ?? (adminFilters?.ownerKind ? [adminFilters.ownerKind] : undefined),
+					audiences: filters.audiences,
+					states: params.includeResolved ? undefined : filters.states,
+					limit: params.limit,
+				});
+				const agentsById = new Map(
+					listAgents(db, { ids: [...new Set(items.map((item) => item.agentId))], limit: 200 }).map((agent) => [agent.id, agent]),
+				);
 				updateFleetUi(ctx);
 				return {
-					content: [{ type: "text", text: buildAdminAttentionText(items, v2Items, agentsById, params.includeResolved ?? false) }],
-					details: {
-						scope,
-						actor,
-						filters: { legacy: filters, v2: v2Filters },
-						items,
-						v2Items,
-						suppressedLegacyDuplicateCount,
-						version: "legacy+v2",
-					},
+					content: [{ type: "text", text: buildAttentionText(items, agentsById, params.includeResolved ?? false) }],
+					details: { scope, actor, items },
 				};
 			},
 		});

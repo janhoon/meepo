@@ -8,9 +8,13 @@ Meepo is a Pi package that orchestrates plain child sessions on a process host. 
 The seam that places, focuses, stops, and captures Child and Service processes. Two adapters exist: tmux and herdr.
 _Avoid_: backend, substrate, runner
 
-**HostTarget**:
-The identity of a live pane, window, or tab on a ProcessHost. Callers see `kind`, `primaryId`, and `displayName` only. Adapters resolve live refs from inventory. A Child or Service has no host until spawn succeeds.
+**HostIdentity**:
+The caller-facing token for a live pane, window, or tab. `kind`, `primaryId`, and `displayName` only. A Child or Service has no host until spawn succeeds.
 _Avoid_: tmux target, pane id, host fields, HostHandle
+
+**HostTarget**:
+The live adapter token returned by ProcessHost.spawnWindow. Includes adapter refs. Callers keep HostIdentity; adapters keep refs.
+_Avoid_: exposing refs to callers
 
 **Child**:
 A tracked Pi replica launched against a Task. The live process sits on a ProcessHost; the registry row is the source of truth for host identity.
@@ -42,7 +46,7 @@ _Avoid_: dashboard (except the existing TUI surface)
 
 ## Relationships
 
-- A Child or Service has at most one HostTarget.
-- ProcessHost adapters resolve a HostTarget to a live pane or window. Callers pass the token, never adapter refs.
-- Inbox and Attention share one write path. Legacy tables are a read adapter.
+- A Child or Service has at most one HostIdentity.
+- ProcessHost adapters resolve a HostIdentity to a live pane or window. Callers pass the token, never adapter refs.
+- Inbox and Attention share one write path. Legacy tables are a private read adapter. Callers see one Attention list.
 - The coordinator talks to Children through Inbox, not by polling host panes.

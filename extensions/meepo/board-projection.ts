@@ -7,11 +7,11 @@ import { getMeepoDb } from "./db.js";
 import { listOpenAttention } from "./inbox.js";
 import { getProjectKey } from "./project.js";
 import { listAgents } from "./registry.js";
-import { OPEN_AGENT_ATTENTION_V2_STATES, OPEN_ATTENTION_STATES } from "./registry-shared.js";
+import { OPEN_ATTENTION_STATES } from "./registry-shared.js";
 import { resolveAgentFilters, resolveAttentionFilters, resolveTaskFilters } from "./session-scope.js";
 import { buildTaskInteractionsByTask, resolveAdminAttentionV2Filters } from "./task-interactions.js";
 import { deriveTaskHealth, listTaskAgentLinks, listTaskHealth, listTasks, taskLeaseKindForProfile } from "./task-registry.js";
-import type { AgentAttentionV2Record, AgentSummary, AttentionItemRecord } from "./types.js";
+import type { AgentSummary, AttentionItemRecord } from "./types.js";
 import type { TaskRecord } from "./task-types.js";
 
 export type { AgentsBoardData, BoardLaneId, BoardTicket };
@@ -52,7 +52,6 @@ export function buildBoardScopeData(
 	tasks: TaskRecord[],
 	agents: AgentSummary[],
 	attentionItems: AttentionItemRecord[],
-	v2AttentionItems: AgentAttentionV2Record[] = [],
 ): AgentsBoardData["scopes"]["all"] {
 	const db = getMeepoDb();
 	const taskIds = tasks.map((task) => task.id);
@@ -68,7 +67,7 @@ export function buildBoardScopeData(
 		existing.push(agent);
 		agentsByTaskId.set(link.taskId, existing);
 	}
-	const interactionsByTaskId = buildTaskInteractionsByTask(attentionItems, v2AttentionItems, agentsById, taskIdSet);
+	const interactionsByTaskId = buildTaskInteractionsByTask(attentionItems, agentsById, taskIdSet);
 	const healthByTaskId = listTaskHealth(db, tasks);
 	const openAttentionCounts = new Map<string, number>();
 	for (const [taskId, interactions] of interactionsByTaskId.entries()) {
@@ -133,16 +132,17 @@ export function buildBoardScopeData(
 function attentionForScope(
 	ctx: ExtensionContext,
 	scope: "all" | "current_project" | "current_session" | "descendants",
-): { leftover: AttentionItemRecord[]; v2: AgentAttentionV2Record[] } {
+): AttentionItemRecord[] {
+	const legacy = scope === "all" ? { states: OPEN_ATTENTION_STATES, limit: 500 } : resolveAttentionFilters(ctx, scope, { limit: 500 });
+	const v2 = scope === "all" ? {} : resolveAdminAttentionV2Filters(ctx, scope, { limit: 500 });
 	return listOpenAttention(getMeepoDb(), {
-		legacy:
-			scope === "all"
-				? { states: OPEN_ATTENTION_STATES, limit: 500 }
-				: resolveAttentionFilters(ctx, scope, { limit: 500 }),
-		v2:
-			scope === "all"
-				? { states: OPEN_AGENT_ATTENTION_V2_STATES, limit: 500 }
-				: resolveAdminAttentionV2Filters(ctx, scope, { limit: 500 }),
+		projectKey: legacy.projectKey ?? v2.projectKey,
+		childIds: legacy.agentIds ?? v2.subjectAgentIds,
+		taskIds: v2.taskIds,
+		ownerKinds: v2.ownerKinds,
+		audiences: legacy.audiences,
+		states: legacy.states ?? OPEN_ATTENTION_STATES,
+		limit: 500,
 	});
 }
 
@@ -172,25 +172,10 @@ export function buildBoardData(ctx: ExtensionContext): AgentsBoardData {
 	const descendantAttention = attentionForScope(ctx, "descendants");
 	return {
 		scopes: {
-			all: buildBoardScopeData(scopeTasks.all, scopeAgents.all, allAttention.leftover, allAttention.v2),
-			current_project: buildBoardScopeData(
-				scopeTasks.current_project,
-				scopeAgents.current_project,
-				projectAttention.leftover,
-				projectAttention.v2,
-			),
-			current_session: buildBoardScopeData(
-				scopeTasks.current_session,
-				scopeAgents.current_session,
-				sessionAttention.leftover,
-				sessionAttention.v2,
-			),
-			descendants: buildBoardScopeData(
-				scopeTasks.descendants,
-				scopeAgents.descendants,
-				descendantAttention.leftover,
-				descendantAttention.v2,
-			),
+			all: buildBoardScopeData(scopeTasks.all, scopeAgents.all, allAttention),
+			current_project: buildBoardScopeData(scopeTasks.current_project, scopeAgents.current_project, projectAttention),
+			current_session: buildBoardScopeData(scopeTasks.current_session, scopeAgents.current_session, sessionAttention),
+			descendants: buildBoardScopeData(scopeTasks.descendants, scopeAgents.descendants, descendantAttention),
 		},
 	};
 }

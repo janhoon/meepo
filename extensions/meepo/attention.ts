@@ -5,11 +5,11 @@ import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-age
 import { getMeepoDb } from "./db.js";
 import { maybeNotifyHostAttention } from "./host-notify.js";
 import { listOpenAttention } from "./inbox.js";
+export { attentionItemFromV2 } from "./inbox.js";
 import { listAgents } from "./registry.js";
 import { attentionItemIcon, formatAttentionWakeup } from "./formatters.js";
 import { childRuntimeEnvironment, resolveAttentionFilters } from "./session-scope.js";
 import { resolveAdminAttentionV2Filters } from "./task-interactions.js";
-import type { AgentAttentionV2Record, AttentionItemRecord } from "./types.js";
 
 export const ATTENTION_WAKE_POLL_MS = 2000;
 export let attentionWakePoll: ReturnType<typeof setInterval> | undefined;
@@ -20,34 +20,6 @@ export const sentCoordinatorAttentionIds = new Set<string>();
 export const notifiedUserAttentionIds = new Set<string>();
 /** Attention item ids that already triggered a ProcessHost toast (herdr). */
 export const hostNotifiedAttentionIds = new Set<string>();
-
-export function attentionItemFromV2(item: AgentAttentionV2Record): AttentionItemRecord {
-	return {
-		id: item.id,
-		messageId: item.messageId,
-		agentId: item.subjectAgentId ?? "unknown",
-		threadId: item.subjectAgentId ?? item.id,
-		projectKey: item.projectKey,
-		spawnSessionId: null,
-		spawnSessionFile: null,
-		audience: item.ownerKind === "user" ? "user" : "coordinator",
-		kind: (item.kind === "approval" || item.kind === "change_request" ? "question" : item.kind) as AttentionItemRecord["kind"],
-		priority: item.priority,
-		state:
-			item.state === "waiting_on_owner"
-				? item.ownerKind === "user"
-					? "waiting_on_user"
-					: "waiting_on_coordinator"
-				: (item.state as AttentionItemRecord["state"]),
-		summary: item.summary,
-		payload: item.payload,
-		createdAt: item.createdAt,
-		updatedAt: item.updatedAt,
-		resolvedAt: item.resolvedAt,
-		resolutionKind: item.resolutionKind,
-		resolutionSummary: item.resolutionSummary,
-	};
-}
 
 export async function wakeCoordinatorFromAttention(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
 	if (childRuntimeEnvironment) return;
@@ -61,10 +33,14 @@ export async function wakeCoordinatorFromAttention(pi: ExtensionAPI, ctx: Extens
 		limit: 25,
 		states: ["open", "waiting_on_coordinator", "waiting_on_user"],
 	});
-	const { v2: v2Items, leftover: legacyItems } = listOpenAttention(db, { v2: v2Filters, legacy: legacyFilters });
-	const items = [...v2Items.map(attentionItemFromV2), ...legacyItems].sort(
-		(a, b) => b.priority - a.priority || a.createdAt - b.createdAt,
-	);
+	const items = listOpenAttention(db, {
+		projectKey: v2Filters.projectKey ?? legacyFilters.projectKey,
+		childIds: v2Filters.subjectAgentIds ?? legacyFilters.agentIds,
+		ownerKinds: v2Filters.ownerKinds,
+		audiences: legacyFilters.audiences,
+		states: ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user"],
+		limit: 25,
+	});
 	if (items.length === 0) return;
 	const ownedSubjectIds = v2Filters.subjectAgentIds ?? legacyFilters.agentIds ?? [];
 	const agents = new Map(

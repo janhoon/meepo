@@ -49,7 +49,6 @@ export interface CreateServiceInput {
 	readyMatchedAt?: number | null;
 	state: ServiceState;
 	host?: HostIdentity | null;
-	hostTargetJson?: string | null;
 	runDir: string;
 	logFile: string;
 	latestStatusFile: string;
@@ -72,7 +71,6 @@ export interface UpdateServiceInput {
 	readyMatchedAt?: number | null;
 	state?: ServiceState;
 	host?: HostIdentity | null;
-	hostTargetJson?: string | null;
 	runDir?: string;
 	logFile?: string;
 	latestStatusFile?: string;

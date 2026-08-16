@@ -6,7 +6,7 @@
 ### Entry & coordinator
 - `index.ts` (~20) — `MeepoRuntime` boot
 - `coordinator.ts` (~700) — wires tool modules, commands, shortcuts, lifecycle
-- `coordinator-helpers.ts` — leftover compatibility barrel. Callers import named modules; delete this file once nothing re-exports it.
+- Named modules:
   - `child-fleet` — stop/focus/capture/reconcile Children
   - `attention` — inbox snapshot → notify / wake
   - `board-projection` — Tasks + Children + Attention → operator view

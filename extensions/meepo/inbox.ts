@@ -10,23 +10,26 @@ import {
 	listMessagesForRecipient,
 	markAgentMessageRecipientsByIds,
 } from "./registry.js";
+import { OPEN_AGENT_ATTENTION_V2_STATES, OPEN_ATTENTION_STATES } from "./registry-shared.js";
 import type {
 	AgentActorContext,
 	AgentAttentionV2Record,
 	AgentMessageRecord,
+	AgentRecipientKind,
 	AgentSummary,
+	AttentionItemAudience,
+	AttentionItemKind,
 	AttentionItemRecord,
+	AttentionItemState,
 	DeliveryMode,
 	DownwardMessageActionPolicy,
 	DownwardMessagePayload,
 	InboxDirection,
 	InboxEntry,
-	ListAttentionItemsFilters,
 	ListInboxFilters,
 	MessageKind,
 	MessageStatus,
 } from "./types.js";
-import type { ListAgentAttentionItemsV2Filters } from "./registry.js";
 
 function payloadObject(payload: unknown): Record<string, unknown> {
 	return payload && typeof payload === "object" && !Array.isArray(payload) ? (payload as Record<string, unknown>) : {};
@@ -148,6 +151,17 @@ export function publishDownward(
 	};
 }
 
+export interface ListOpenAttentionFilters {
+	projectKey?: string;
+	childIds?: string[];
+	taskIds?: string[];
+	ownerKinds?: AgentRecipientKind[];
+	audiences?: AttentionItemAudience[];
+	states?: AttentionItemState[];
+	kinds?: AttentionItemKind[];
+	limit?: number;
+}
+
 function leftoverAttentionDuplicatesV2(
 	item: AttentionItemRecord,
 	v2MessageIds: Set<string>,
@@ -160,21 +174,115 @@ function leftoverAttentionDuplicatesV2(
 	return Boolean((v2MessageId && v2MessageIds.has(v2MessageId)) || (v2RecipientRowId && v2RecipientRowIds.has(v2RecipientRowId)));
 }
 
-/** Attention list: v2 first, leftover legacy rows that are not v2 shadows. */
-export function listOpenAttention(
-	db: DatabaseSync,
-	filters: {
-		v2?: ListAgentAttentionItemsV2Filters;
-		legacy?: ListAttentionItemsFilters;
-	} = {},
-): { v2: AgentAttentionV2Record[]; leftover: AttentionItemRecord[] } {
-	const v2 = listAgentAttentionItemsV2(db, filters.v2 ?? {});
-	const rawLegacy = listAttentionItems(db, filters.legacy ?? {});
+function toV2States(states?: AttentionItemState[]): AgentAttentionV2Record["state"][] | undefined {
+	if (!states) return undefined;
+	const mapped = new Set<AgentAttentionV2Record["state"]>();
+	for (const state of states) {
+		if (state === "waiting_on_user" || state === "waiting_on_coordinator") mapped.add("waiting_on_owner");
+		else if (state === "open" || state === "acknowledged" || state === "resolved" || state === "cancelled" || state === "superseded") {
+			mapped.add(state);
+		}
+	}
+	return [...mapped];
+}
+
+function toV2OwnerKinds(filters: ListOpenAttentionFilters): AgentRecipientKind[] | undefined {
+	if (filters.ownerKinds && filters.ownerKinds.length > 0) return filters.ownerKinds;
+	if (!filters.audiences || filters.audiences.length === 0) return undefined;
+	const kinds = new Set<AgentRecipientKind>();
+	for (const audience of filters.audiences) {
+		if (audience === "user") kinds.add("user");
+		else kinds.add("root");
+	}
+	return [...kinds];
+}
+
+function toLegacyAudiences(filters: ListOpenAttentionFilters): AttentionItemAudience[] | undefined {
+	if (filters.audiences && filters.audiences.length > 0) return filters.audiences;
+	if (!filters.ownerKinds || filters.ownerKinds.length === 0) return undefined;
+	const audiences = new Set<AttentionItemAudience>();
+	for (const kind of filters.ownerKinds) {
+		if (kind === "user") audiences.add("user");
+		else if (kind === "root") audiences.add("coordinator");
+	}
+	return audiences.size > 0 ? [...audiences] : undefined;
+}
+
+function toV2Kinds(kinds?: AttentionItemKind[]): AgentAttentionV2Record["kind"][] | undefined {
+	if (!kinds || kinds.length === 0) return undefined;
+	const mapped = new Set<AgentAttentionV2Record["kind"]>(kinds);
+	if (kinds.includes("question")) {
+		mapped.add("approval");
+		mapped.add("change_request");
+	}
+	return [...mapped];
+}
+
+export function attentionItemFromV2(item: AgentAttentionV2Record): AttentionItemRecord {
+	return {
+		id: item.id,
+		messageId: item.messageId,
+		agentId: item.subjectAgentId ?? "unknown",
+		threadId: item.subjectAgentId ?? item.id,
+		projectKey: item.projectKey,
+		spawnSessionId: null,
+		spawnSessionFile: null,
+		audience: item.ownerKind === "user" ? "user" : "coordinator",
+		kind: (item.kind === "approval" || item.kind === "change_request" ? "question" : item.kind) as AttentionItemRecord["kind"],
+		priority: item.priority,
+		state:
+			item.state === "waiting_on_owner"
+				? item.ownerKind === "user"
+					? "waiting_on_user"
+					: "waiting_on_coordinator"
+				: (item.state as AttentionItemRecord["state"]),
+		summary: item.summary,
+		payload: {
+			...payloadObject(item.payload),
+			_source: "v2",
+			taskId: item.taskId,
+			v2MessageId: item.messageId,
+			v2RecipientRowId: item.recipientRowId,
+			ownerKind: item.ownerKind,
+			ownerAgentId: item.ownerAgentId,
+		},
+		createdAt: item.createdAt,
+		updatedAt: item.updatedAt,
+		resolvedAt: item.resolvedAt,
+		resolutionKind: item.resolutionKind,
+		resolutionSummary: item.resolutionSummary,
+	};
+}
+
+/** Attention list. Leftover legacy rows stay a private read adapter. */
+export function listOpenAttention(db: DatabaseSync, filters: ListOpenAttentionFilters = {}): AttentionItemRecord[] {
+	if (filters.childIds && filters.childIds.length === 0 && (!filters.taskIds || filters.taskIds.length === 0)) {
+		return [];
+	}
+	const v2 = listAgentAttentionItemsV2(db, {
+		projectKey: filters.projectKey,
+		subjectAgentIds: filters.childIds,
+		taskIds: filters.taskIds,
+		ownerKinds: toV2OwnerKinds(filters),
+		states: toV2States(filters.states) ?? OPEN_AGENT_ATTENTION_V2_STATES,
+		kinds: toV2Kinds(filters.kinds),
+		limit: filters.limit,
+	});
+	const rawLegacy = listAttentionItems(db, {
+		projectKey: filters.projectKey,
+		agentIds: filters.childIds,
+		states: filters.states ?? OPEN_ATTENTION_STATES,
+		audiences: toLegacyAudiences(filters),
+		kinds: filters.kinds,
+		limit: filters.limit,
+	});
 	const v2MessageIds = new Set(v2.map((item) => item.messageId).filter((value): value is string => Boolean(value)));
 	const v2RecipientRowIds = new Set(v2.map((item) => item.recipientRowId).filter((value): value is string => Boolean(value)));
 	const leftover =
 		v2MessageIds.size === 0 && v2RecipientRowIds.size === 0
 			? rawLegacy
 			: rawLegacy.filter((item) => !leftoverAttentionDuplicatesV2(item, v2MessageIds, v2RecipientRowIds));
-	return { v2, leftover };
+	return [...v2.map(attentionItemFromV2), ...leftover].sort(
+		(left, right) => right.priority - left.priority || left.createdAt - right.createdAt,
+	);
 }

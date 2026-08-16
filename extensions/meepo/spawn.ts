@@ -637,7 +637,6 @@ export async function spawnSubagent(input: SpawnSubagentInput): Promise<SpawnSub
 	const persisted = hostPersistFromTarget(hostTarget);
 	updateAgent(db, agentId, {
 		host: persisted.host,
-		hostTargetJson: persisted.hostTargetJson,
 		transportKind: "rpc_bridge",
 		transportState: "launching",
 		bridgeUpdatedAt: Date.now(),

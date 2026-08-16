@@ -98,7 +98,7 @@ export function createAgent(db: DatabaseSync, input: CreateAgentInput): void {
 		input.host?.kind ?? "",
 		input.host?.primaryId ?? null,
 		input.host?.displayName ?? null,
-		input.hostTargetJson ?? null,
+		null,
 		input.runDir,
 		input.sessionFile,
 		input.lastToolName ?? null,

@@ -2,7 +2,6 @@
  * Coordinator session state: active runtime, last-focused Child, fleet UI chrome.
  */
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { attentionItemFromV2 } from "./attention.js";
 import { getMeepoDb } from "./db.js";
 import { attentionItemIcon, attentionItemLabel, formatFleetSummary } from "./formatters.js";
 import { listOpenAttention } from "./inbox.js";
@@ -41,13 +40,17 @@ export function updateFleetUi(ctx: ExtensionContext): void {
 		);
 		return;
 	}
-	const { v2, leftover } = listOpenAttention(db, {
-		legacy: resolveAttentionFilters(ctx, "current_session", {
-			states: ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user"],
-			limit: 4,
-		}),
+	const sessionFilters = resolveAttentionFilters(ctx, "current_session", {
+		states: ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user"],
+		limit: 4,
 	});
-	const attentionItems = [...v2.map(attentionItemFromV2), ...leftover];
+	const attentionItems = listOpenAttention(db, {
+		projectKey: sessionFilters.projectKey,
+		childIds: sessionFilters.agentIds,
+		audiences: sessionFilters.audiences,
+		states: sessionFilters.states,
+		limit: 4,
+	});
 	if (attentionItems.length === 0) {
 		ctx.ui.setWidget("meepo", undefined);
 		return;
