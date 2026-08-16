@@ -233,13 +233,13 @@ import {
 	OPEN_ATTENTION_STATES,
 	TERMINAL_AGENT_STATES,
 } from "./registry-shared.js";
-import { listCleanupCandidates, reconcileAgents, stopAgentById } from "./agent-lifecycle.js";
+import { listCleanupCandidates, reconcileAgents, stopAgentById } from "./child-fleet.js";
 import {
 	buildBoardData,
 	buildDashboardData,
 	captureAgentById,
 	focusAgentById,
-} from "./board-ops.js";
+} from "./board-projection.js";
 import { setLastFocusedActiveAgentId, updateFleetUi } from "./coordinator-session.js";
 import { spawnServiceFromParams } from "./service-ops.js";
 import { loadAttentionGate, resolveTaskFilters } from "./session-scope.js";

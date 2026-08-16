@@ -1,8 +1,5 @@
 /**
- * agent-lifecycle — split from coordinator-helpers.
- */
-/**
- * Coordinator helpers (spawn/reconcile/wake/UI). Tool registration lives in tools/*.
+ * Child fleet: stop, focus, capture, reconcile Children.
  */
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";

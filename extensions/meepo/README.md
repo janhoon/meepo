@@ -6,13 +6,14 @@
 ### Entry & coordinator
 - `index.ts` (~20) — `MeepoRuntime` boot
 - `coordinator.ts` (~700) — wires tool modules, commands, shortcuts, lifecycle
-- `coordinator-helpers.ts` — barrel for helper modules:
-  - `coordinator-session` — session state, wake, filters
+- `coordinator-helpers.ts` — compatibility barrel. Prefer named modules:
+  - `child-fleet` — stop/focus/capture/reconcile Children
+  - `attention` — inbox snapshot → notify / wake
+  - `board-projection` — Tasks + Children + Attention → operator view
+  - `coordinator-session` — session state, fleet UI chrome
   - `task-interactions` — task interaction projection
-  - `agent-lifecycle` — stop/cleanup/reconcile agents
-  - `service-ops` — service start/stop/reconcile
-  - `spawn-ops` — spawn/dispatch
-  - `board-ops` — dashboard/board data
+  - `service-ops` — Service start/stop/reconcile
+  - `spawn-ops` — Child launch / dispatch
   - `standup` — standup digest builders
 - `tools/agent-tools.ts` / `task-tools.ts` / `service-tools.ts`
 - `formatters.ts`, `subtree-control.ts`, `bridge-delivery.ts`, `tool-schemas.ts`
@@ -29,7 +30,7 @@
 - `child-status.ts` — status snapshot disk/DB
 
 ### Platform defaults
-- Messaging: v2 canonical upward publish; legacy mailbox for downward + read-compat
+- Messaging: Inbox publish/list/mark on v2; leftover legacy rows are a read adapter
 - Default preset: **core** (`MEEPO_PRESET=full` for doctrine)
 - Services: `service_*` + legacy `tmux_service_*` aliases
 - **BYO agents:** profiles load from consumer dirs only (`~/.pi/agent/agents` and/or `profiles.dirs`). Meepo does not ship `agents/` role prompts.
