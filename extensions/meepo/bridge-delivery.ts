@@ -7,12 +7,9 @@ import {
 	createAgentEvent,
 	createRootActorContext,
 	getAgent,
-
 	updateAgent,
-	updateAgentAttentionItemsV2ForOwner,
-	updateAttentionItemsForAgent,
 } from "./registry.js";
-import { listChildDeliveryQueue, listInboxForChild, markInbox, publishDownward } from "./inbox.js";
+import { listChildDeliveryQueue, listInboxForChild, markAttention, markInbox, publishDownward } from "./inbox.js";
 import { getRpcBridgeSocketPath, sendRpcBridgeCommand } from "./rpc-client.js";
 import { mapDeliveryModeToBridgeCommand } from "./rpc-bridge-control.js";
 import { collectQueuedWakeCoalescingContext } from "./wake-coalescing.js";
@@ -249,39 +246,10 @@ export function queueDownwardMessage(
 		summary: fullPayload.summary,
 		payload: { messageId, deliveryMode, coalescedWake, ...fullPayload },
 	});
-	if (kind === "cancel") {
-		updateAttentionItemsForAgent(
+	if (kind === "cancel" || ["answer", "redirect", "priority"].includes(kind)) {
+		markAttention(
 			db,
 			agent.id,
-			{
-				state: "cancelled",
-				updatedAt: Date.now(),
-				resolvedAt: Date.now(),
-				resolutionKind: kind,
-				resolutionSummary: fullPayload.summary,
-			},
-			{ states: ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user"] },
-		);
-	} else if (["answer", "redirect", "priority"].includes(kind)) {
-		updateAttentionItemsForAgent(
-			db,
-			agent.id,
-			{
-				state: "acknowledged",
-				updatedAt: Date.now(),
-				resolutionKind: kind,
-				resolutionSummary: fullPayload.summary,
-			},
-			{
-				states: ["open", "waiting_on_coordinator", "waiting_on_user"],
-				kinds: ["question", "question_for_user", "blocked"],
-			},
-		);
-	}
-	if (actor.kind === "agent") {
-		updateAgentAttentionItemsV2ForOwner(
-			db,
-			{ kind: "agent", agentId: actor.agentId },
 			{
 				state: kind === "cancel" ? "cancelled" : "acknowledged",
 				updatedAt: Date.now(),
@@ -289,28 +257,12 @@ export function queueDownwardMessage(
 				resolutionKind: kind,
 				resolutionSummary: fullPayload.summary,
 			},
-			{
-				states: ["open", "waiting_on_owner"],
-				kinds: ["question", "question_for_user", "blocked"],
-				subjectAgentIds: [agent.id],
-			},
-		);
-	} else {
-		updateAgentAttentionItemsV2ForOwner(
-			db,
-			{ kind: "root" },
-			{
-				state: kind === "cancel" ? "cancelled" : "acknowledged",
-				updatedAt: Date.now(),
-				resolvedAt: kind === "cancel" ? Date.now() : undefined,
-				resolutionKind: kind,
-				resolutionSummary: fullPayload.summary,
-			},
-			{
-				states: ["open", "waiting_on_owner"],
-				kinds: ["question", "question_for_user", "blocked"],
-				subjectAgentIds: [agent.id],
-			},
+			kind === "cancel"
+				? { states: ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user"] }
+				: {
+						states: ["open", "waiting_on_coordinator", "waiting_on_user"],
+						kinds: ["question", "question_for_user", "blocked"],
+				  },
 		);
 	}
 	updateAgent(db, agent.id, { updatedAt: Date.now() });

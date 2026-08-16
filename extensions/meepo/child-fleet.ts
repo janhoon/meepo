@@ -12,10 +12,9 @@ import {
 	getAgent,
 	listAgents,
 	updateAgent,
-	updateAttentionItemsForAgent,
 } from "./registry.js";
 import { unlinkTaskAgent } from "./task-registry.js";
-import { listOpenAttention } from "./inbox.js";
+import { listOpenAttention, markAttention } from "./inbox.js";
 import { getProcessHost, type HostIdentity } from "./process-host.js";
 import { deliverQueuedMessagesViaBridge, queueDownwardMessage } from "./bridge-delivery.js";
 import type { CleanupCandidate } from "./cleanup-types.js";
@@ -118,7 +117,7 @@ export async function cleanupAgentTarget(
 	const now = Date.now();
 	const completionItems = candidate.attentionItems.filter((item) => item.kind === "complete");
 	if (completionItems.length > 0) {
-		updateAttentionItemsForAgent(
+		markAttention(
 			db,
 			agent.id,
 			{
@@ -134,7 +133,7 @@ export async function cleanupAgentTarget(
 	if (force) {
 		const blockingKinds = candidate.attentionItems.filter((item) => item.kind !== "complete").map((item) => item.kind);
 		if (blockingKinds.length > 0) {
-			updateAttentionItemsForAgent(
+			markAttention(
 				db,
 				agent.id,
 				{
@@ -198,7 +197,7 @@ export async function stopAgentById(
 		if (agent.taskId) {
 			unlinkTaskAgent(getMeepoDb(), agent.taskId, agent.id, reason?.trim() || "force_stop_missing_host_target");
 		}
-		updateAttentionItemsForAgent(
+		markAttention(
 			getMeepoDb(),
 			agent.id,
 			{
@@ -275,7 +274,7 @@ export async function stopAgentById(
 		if (agent.taskId) {
 			unlinkTaskAgent(getMeepoDb(), agent.taskId, agent.id, reason?.trim() || "force_stop");
 		}
-		updateAttentionItemsForAgent(
+		markAttention(
 			getMeepoDb(),
 			agent.id,
 			{

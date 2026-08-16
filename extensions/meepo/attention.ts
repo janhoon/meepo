@@ -5,11 +5,9 @@ import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-age
 import { getMeepoDb } from "./db.js";
 import { maybeNotifyHostAttention } from "./host-notify.js";
 import { listOpenAttention } from "./inbox.js";
-export { attentionItemFromV2 } from "./inbox.js";
 import { listAgents } from "./registry.js";
 import { attentionItemIcon, formatAttentionWakeup } from "./formatters.js";
-import { childRuntimeEnvironment, resolveAttentionFilters } from "./session-scope.js";
-import { resolveAdminAttentionV2Filters } from "./task-interactions.js";
+import { childRuntimeEnvironment, resolveOpenAttentionFilters } from "./session-scope.js";
 
 export const ATTENTION_WAKE_POLL_MS = 2000;
 export let attentionWakePoll: ReturnType<typeof setInterval> | undefined;
@@ -24,25 +22,14 @@ export const hostNotifiedAttentionIds = new Set<string>();
 export async function wakeCoordinatorFromAttention(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
 	if (childRuntimeEnvironment) return;
 	const db = getMeepoDb();
-	const v2Filters = resolveAdminAttentionV2Filters(ctx, "current_session", {
+	const filters = resolveOpenAttentionFilters(ctx, "current_session", {
 		limit: 25,
-		states: ["open", "acknowledged", "waiting_on_owner"],
-	});
-	if (v2Filters.subjectAgentIds && v2Filters.subjectAgentIds.length === 0) return;
-	const legacyFilters = resolveAttentionFilters(ctx, "current_session", {
-		limit: 25,
-		states: ["open", "waiting_on_coordinator", "waiting_on_user"],
-	});
-	const items = listOpenAttention(db, {
-		projectKey: v2Filters.projectKey ?? legacyFilters.projectKey,
-		childIds: v2Filters.subjectAgentIds ?? legacyFilters.agentIds,
-		ownerKinds: v2Filters.ownerKinds,
-		audiences: legacyFilters.audiences,
 		states: ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user"],
-		limit: 25,
 	});
+	if (filters.childIds && filters.childIds.length === 0) return;
+	const items = listOpenAttention(db, filters);
 	if (items.length === 0) return;
-	const ownedSubjectIds = v2Filters.subjectAgentIds ?? legacyFilters.agentIds ?? [];
+	const ownedSubjectIds = filters.childIds ?? [];
 	const agents = new Map(
 		(ownedSubjectIds.length > 0
 			? listAgents(db, { ids: ownedSubjectIds, limit: Math.max(ownedSubjectIds.length, 1) })

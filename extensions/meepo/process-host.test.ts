@@ -169,7 +169,7 @@ describe("host target mapping", () => {
 		});
 		assert.equal(fields.hostKind, "tmux");
 		assert.equal(fields.hostPrimaryId, "%12");
-		assert.ok(fields.hostTargetJson.includes("paneId"));
+		assert.equal("hostTargetJson" in fields, false);
 		assert.equal("tmuxPaneId" in fields, false);
 	});
 

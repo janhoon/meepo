@@ -224,7 +224,6 @@ export function hostPersistFromTarget(target: HostTarget): {
 	hostKind: HostKind;
 	hostPrimaryId: string;
 	hostDisplayName: string | null;
-	hostTargetJson: string;
 } {
 	const host = hostIdentityFromTarget(target);
 	return {
@@ -232,7 +231,6 @@ export function hostPersistFromTarget(target: HostTarget): {
 		hostKind: host.kind,
 		hostPrimaryId: host.primaryId,
 		hostDisplayName: host.displayName,
-		hostTargetJson: JSON.stringify(target.refs ?? {}),
 	};
 }
 

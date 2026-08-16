@@ -8,8 +8,8 @@ import { listOpenAttention } from "./inbox.js";
 import { getProjectKey } from "./project.js";
 import { listAgents } from "./registry.js";
 import { OPEN_ATTENTION_STATES } from "./registry-shared.js";
-import { resolveAgentFilters, resolveAttentionFilters, resolveTaskFilters } from "./session-scope.js";
-import { buildTaskInteractionsByTask, resolveAdminAttentionV2Filters } from "./task-interactions.js";
+import { resolveAgentFilters, resolveOpenAttentionFilters, resolveTaskFilters } from "./session-scope.js";
+import { buildTaskInteractionsByTask } from "./task-interactions.js";
 import { deriveTaskHealth, listTaskAgentLinks, listTaskHealth, listTasks, taskLeaseKindForProfile } from "./task-registry.js";
 import type { AgentSummary, AttentionItemRecord } from "./types.js";
 import type { TaskRecord } from "./task-types.js";
@@ -133,17 +133,12 @@ function attentionForScope(
 	ctx: ExtensionContext,
 	scope: "all" | "current_project" | "current_session" | "descendants",
 ): AttentionItemRecord[] {
-	const legacy = scope === "all" ? { states: OPEN_ATTENTION_STATES, limit: 500 } : resolveAttentionFilters(ctx, scope, { limit: 500 });
-	const v2 = scope === "all" ? {} : resolveAdminAttentionV2Filters(ctx, scope, { limit: 500 });
-	return listOpenAttention(getMeepoDb(), {
-		projectKey: legacy.projectKey ?? v2.projectKey,
-		childIds: legacy.agentIds ?? v2.subjectAgentIds,
-		taskIds: v2.taskIds,
-		ownerKinds: v2.ownerKinds,
-		audiences: legacy.audiences,
-		states: legacy.states ?? OPEN_ATTENTION_STATES,
-		limit: 500,
-	});
+	return listOpenAttention(
+		getMeepoDb(),
+		scope === "all"
+			? { states: OPEN_ATTENTION_STATES, limit: 500 }
+			: resolveOpenAttentionFilters(ctx, scope, { limit: 500 }),
+	);
 }
 
 export function buildBoardData(ctx: ExtensionContext): AgentsBoardData {

@@ -8,7 +8,7 @@ import { listOpenAttention } from "./inbox.js";
 import { getProjectKey } from "./project.js";
 import { getFleetSummary, listAgents } from "./registry.js";
 import type { MeepoRuntime } from "./runtime.js";
-import { resolveAgentFilters, resolveAttentionFilters } from "./session-scope.js";
+import { resolveAgentFilters, resolveOpenAttentionFilters } from "./session-scope.js";
 import { getTaskSummary, listTaskAttention } from "./task-registry.js";
 import { truncateText } from "./text-util.js";
 
@@ -40,17 +40,13 @@ export function updateFleetUi(ctx: ExtensionContext): void {
 		);
 		return;
 	}
-	const sessionFilters = resolveAttentionFilters(ctx, "current_session", {
-		states: ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user"],
-		limit: 4,
-	});
-	const attentionItems = listOpenAttention(db, {
-		projectKey: sessionFilters.projectKey,
-		childIds: sessionFilters.agentIds,
-		audiences: sessionFilters.audiences,
-		states: sessionFilters.states,
-		limit: 4,
-	});
+	const attentionItems = listOpenAttention(
+		db,
+		resolveOpenAttentionFilters(ctx, "current_session", {
+			states: ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user"],
+			limit: 4,
+		}),
+	);
 	if (attentionItems.length === 0) {
 		ctx.ui.setWidget("meepo", undefined);
 		return;

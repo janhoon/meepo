@@ -9,6 +9,7 @@ import {
 	listInboxMessages,
 	listMessagesForRecipient,
 	markAgentMessageRecipientsByIds,
+	updateAttentionItemsForAgent,
 } from "./registry.js";
 import { OPEN_AGENT_ATTENTION_V2_STATES, OPEN_ATTENTION_STATES } from "./registry-shared.js";
 import type {
@@ -29,6 +30,7 @@ import type {
 	ListInboxFilters,
 	MessageKind,
 	MessageStatus,
+	UpdateAttentionItemInput,
 } from "./types.js";
 
 function payloadObject(payload: unknown): Record<string, unknown> {
@@ -221,6 +223,7 @@ function toV2Kinds(kinds?: AttentionItemKind[]): AgentAttentionV2Record["kind"][
 export function attentionItemFromV2(item: AgentAttentionV2Record): AttentionItemRecord {
 	return {
 		id: item.id,
+		source: "hierarchy_attention",
 		messageId: item.messageId,
 		agentId: item.subjectAgentId ?? "unknown",
 		threadId: item.subjectAgentId ?? item.id,
@@ -239,7 +242,6 @@ export function attentionItemFromV2(item: AgentAttentionV2Record): AttentionItem
 		summary: item.summary,
 		payload: {
 			...payloadObject(item.payload),
-			_source: "v2",
 			taskId: item.taskId,
 			v2MessageId: item.messageId,
 			v2RecipientRowId: item.recipientRowId,
@@ -285,4 +287,69 @@ export function listOpenAttention(db: DatabaseSync, filters: ListOpenAttentionFi
 	return [...v2.map(attentionItemFromV2), ...leftover].sort(
 		(left, right) => right.priority - left.priority || left.createdAt - right.createdAt,
 	);
+}
+
+function toV2PatchState(state: AttentionItemState | undefined): AgentAttentionV2Record["state"] | undefined {
+	if (!state) return undefined;
+	if (state === "waiting_on_user" || state === "waiting_on_coordinator") return "waiting_on_owner";
+	return state;
+}
+
+/** Mark Attention for a Child. Leftover + v2 writes stay private. */
+export function markAttention(
+	db: DatabaseSync,
+	childId: string,
+	patch: UpdateAttentionItemInput,
+	filters: { states?: AttentionItemState[]; kinds?: AttentionItemKind[] } = {},
+): number {
+	const leftover = updateAttentionItemsForAgent(db, childId, patch, {
+		states: filters.states,
+		kinds: filters.kinds,
+	});
+	const assignments: string[] = [];
+	const params: unknown[] = [];
+	const v2State = toV2PatchState(patch.state);
+	if (v2State !== undefined) {
+		assignments.push("state = ?");
+		params.push(v2State);
+	}
+	if (patch.priority !== undefined) {
+		assignments.push("priority = ?");
+		params.push(patch.priority);
+	}
+	if (patch.summary !== undefined) {
+		assignments.push("summary = ?");
+		params.push(patch.summary);
+	}
+	if (patch.updatedAt !== undefined) {
+		assignments.push("updated_at = ?");
+		params.push(patch.updatedAt);
+	}
+	if (patch.resolvedAt !== undefined) {
+		assignments.push("resolved_at = ?");
+		params.push(patch.resolvedAt);
+	}
+	if (patch.resolutionKind !== undefined) {
+		assignments.push("resolution_kind = ?");
+		params.push(patch.resolutionKind);
+	}
+	if (patch.resolutionSummary !== undefined) {
+		assignments.push("resolution_summary = ?");
+		params.push(patch.resolutionSummary);
+	}
+	if (assignments.length === 0) return leftover;
+	const where = ["subject_agent_id = ?"];
+	params.push(childId);
+	const v2States = toV2States(filters.states) ?? OPEN_AGENT_ATTENTION_V2_STATES;
+	if (v2States.length > 0) {
+		where.push(`state IN (${v2States.map(() => "?").join(", ")})`);
+		params.push(...v2States);
+	}
+	const v2Kinds = toV2Kinds(filters.kinds);
+	if (v2Kinds && v2Kinds.length > 0) {
+		where.push(`kind IN (${v2Kinds.map(() => "?").join(", ")})`);
+		params.push(...v2Kinds);
+	}
+	const result = db.prepare(`UPDATE agent_attention_items_v2 SET ${assignments.join(", ")} WHERE ${where.join(" AND ")}`).run(...params) as { changes?: number };
+	return leftover + Number(result.changes ?? 0);
 }

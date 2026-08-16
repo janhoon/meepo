@@ -8,7 +8,6 @@ import { deriveTaskHealth, taskLeaseKindForProfile } from "./task-registry.js";
 import type { TaskEventRecord } from "./task-types.js";
 // Keep formatters free of DB access: callers that need live health pass a snapshot.
 import type {
-	AgentAttentionV2Record,
 	AgentInboxMessageV2Record,
 	AgentMessageRecord,
 	AgentSummary,
@@ -312,31 +311,6 @@ export function buildAttentionText(items: AttentionItemRecord[], agentsById: Map
 			return `${formatAttentionItemLine(item, agent)}\nsummary: ${item.summary}\npayload: ${payloadText}`;
 		})
 		.join("\n\n");
-}
-
-export function buildAttentionV2Text(items: AgentAttentionV2Record[], agentsById: Map<string, AgentSummary>, includeResolved: boolean): string {
-	if (items.length === 0) return includeResolved ? "No hierarchy attention items matched." : "No open hierarchy attention items.";
-	return items
-		.map((item) => {
-			const subject = item.subjectAgentId ? agentsById.get(item.subjectAgentId) : undefined;
-			const owner = item.ownerKind === "agent" && item.ownerAgentId ? agentsById.get(item.ownerAgentId) : undefined;
-			const payloadText = truncateText(JSON.stringify(item.payload), 180);
-			return `${item.kind} · ${item.state} · owner=${item.ownerKind}:${item.ownerAgentId ?? "-"}${owner ? ` (${owner.profile})` : ""} · subject=${item.subjectAgentId ?? "-"}${subject ? ` (${truncateText(subject.title, 32)})` : ""}\nsummary: ${item.summary}\nmessageId: ${item.messageId ?? "-"}\nrecipientRowId: ${item.recipientRowId ?? "-"}\npayload: ${payloadText}`;
-		})
-		.join("\n\n");
-}
-
-export function buildAdminAttentionText(
-	legacyItems: AttentionItemRecord[],
-	v2Items: AgentAttentionV2Record[],
-	agentsById: Map<string, AgentSummary>,
-	includeResolved: boolean,
-): string {
-	if (legacyItems.length === 0 && v2Items.length === 0) return includeResolved ? "No attention items matched." : "No open attention items.";
-	const sections: string[] = [];
-	if (legacyItems.length > 0) sections.push(`Legacy attention\n${buildAttentionText(legacyItems, agentsById, includeResolved)}`);
-	if (v2Items.length > 0) sections.push(`Hierarchy attention\n${buildAttentionV2Text(v2Items, agentsById, includeResolved)}`);
-	return sections.join("\n\n");
 }
 
 export function buildInboxText(messages: InboxEntry[], readReceiptCount = 0): string {

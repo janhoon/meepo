@@ -169,6 +169,7 @@ export function toMailboxRecord(row: Record<string, unknown>): AgentMessageRecor
 export function toAttentionItemRecord(row: Record<string, unknown>): AttentionItemRecord {
 	return {
 		id: row.id as string,
+		source: "legacy_attention",
 		messageId: (row.message_id as string | null) ?? null,
 		agentId: row.agent_id as string,
 		threadId: row.thread_id as string,

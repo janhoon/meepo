@@ -7,23 +7,20 @@ import { getMeepoDb } from "./db.js";
 import type { CleanupCandidate } from "./cleanup-types.js";
 import { appendPreviewSection, formatTaskStatusCounts, taskStatusCounts } from "./formatters.js";
 import { truncateText } from "./text-util.js";
-import {
-	listAgentAttentionItemsV2,
-	listAgents,
-	listAttentionItems,
-} from "./registry.js";
+import { listAgents } from "./registry.js";
+import { listOpenAttention } from "./inbox.js";
 import {
 	createTaskEvent,
 	getTask,
 	listTaskAgentLinks,
 	listTaskSubtreeWithMeta,
+	refreshTaskDependencyBlockState,
 	updateTask,
 } from "./task-registry.js";
-import type { AgentAttentionV2Record, AgentSummary, AttentionItemRecord } from "./types.js";
-import type { TaskRecord, TaskState } from "./task-types.js";
+import type { AgentSummary, AttentionItemRecord } from "./types.js";
+import type { TaskAgentLinkRecord, TaskRecord, TaskState } from "./task-types.js";
 
 const OPEN_ATTENTION_STATES: AttentionItemRecord["state"][] = ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user"];
-const OPEN_AGENT_ATTENTION_V2_STATES: AgentAttentionV2Record["state"][] = ["open", "acknowledged", "waiting_on_owner"];
 const ACTIVE_AGENT_STATES: AgentSummary["state"][] = ["launching", "running", "idle", "waiting", "blocked"];
 
 export type SubtreeStopAgent = (
@@ -84,7 +81,6 @@ export interface TaskSubtreeControlPreview {
 	agentsByTaskId: Map<string, AgentSummary[]>;
 	blockers: TaskRecord[];
 	attentionItems: AttentionItemRecord[];
-	agentAttentionItems: AgentAttentionV2Record[];
 	cleanupCandidates: CleanupCandidate[];
 }
 
@@ -230,13 +226,16 @@ export async function buildTaskSubtreeControlPreview(
 	}
 	const activeAgents = linkedAgents.filter((agent) => isActiveAgent(agent) && ((agent.taskId ? taskIdSet.has(agent.taskId) : false) || activeLinkAgentIds.has(agent.id)));
 	const agentIds = linkedAgents.map((agent) => agent.id);
-	const attentionItems = agentIds.length > 0 ? listAttentionItems(db, { agentIds, states: OPEN_ATTENTION_STATES, limit: SUBTREE_QUERY_ATTENTION_LIMIT }) : [];
-	if (attentionItems.length >= SUBTREE_QUERY_ATTENTION_LIMIT) truncationWarnings.push(`legacy attention reached safety cap ${SUBTREE_QUERY_ATTENTION_LIMIT}; apply is disabled until attention fanout is narrowed`);
-	const directAgentAttentionItems = taskIds.length > 0 ? listAgentAttentionItemsV2(db, { taskIds, states: OPEN_AGENT_ATTENTION_V2_STATES, limit: SUBTREE_QUERY_ATTENTION_LIMIT }) : [];
-	if (directAgentAttentionItems.length >= SUBTREE_QUERY_ATTENTION_LIMIT) truncationWarnings.push(`direct hierarchy attention reached safety cap ${SUBTREE_QUERY_ATTENTION_LIMIT}; apply is disabled until attention fanout is narrowed`);
-	const subjectAgentAttentionItems = agentIds.length > 0 ? listAgentAttentionItemsV2(db, { subjectAgentIds: agentIds, states: OPEN_AGENT_ATTENTION_V2_STATES, limit: SUBTREE_QUERY_ATTENTION_LIMIT }) : [];
-	if (subjectAgentAttentionItems.length >= SUBTREE_QUERY_ATTENTION_LIMIT) truncationWarnings.push(`subject hierarchy attention reached safety cap ${SUBTREE_QUERY_ATTENTION_LIMIT}; apply is disabled until attention fanout is narrowed`);
-	const agentAttentionItems = [...new Map([...directAgentAttentionItems, ...subjectAgentAttentionItems].map((item) => [item.id, item])).values()];
+	const attentionItems =
+		agentIds.length > 0 || taskIds.length > 0
+			? listOpenAttention(db, {
+					childIds: agentIds.length > 0 ? agentIds : undefined,
+					taskIds: taskIds.length > 0 ? taskIds : undefined,
+					states: OPEN_ATTENTION_STATES,
+					limit: SUBTREE_QUERY_ATTENTION_LIMIT,
+			  })
+			: [];
+	if (attentionItems.length >= SUBTREE_QUERY_ATTENTION_LIMIT) truncationWarnings.push(`attention reached safety cap ${SUBTREE_QUERY_ATTENTION_LIMIT}; apply is disabled until attention fanout is narrowed`);
 	const cleanupCandidates = agentIds.length > 0 ? await listCleanupCandidates(ctx, { ids: agentIds, limit: agentIds.length, force: false }) : [];
 	if (agentIds.length > SUBTREE_QUERY_AGENT_LIMIT) truncationWarnings.push(`cleanup candidate lookup is incomplete for ${agentIds.length} agents due agent list cap ${SUBTREE_QUERY_AGENT_LIMIT}; apply is disabled`);
 	const taskIdsToUpdate = tasks.filter((task) => taskShouldUpdateForSubtreeAction(task, action)).map((task) => task.id);
@@ -260,7 +259,6 @@ export async function buildTaskSubtreeControlPreview(
 		agentsByTaskId,
 		blockers: tasks.filter((task) => task.status === "blocked" || Boolean(task.waitingOn) || Boolean(task.blockedReason)),
 		attentionItems,
-		agentAttentionItems,
 		cleanupCandidates,
 	};
 }
@@ -284,10 +282,7 @@ export function formatTaskSubtreePreviewAttentionLine(item: AttentionItemRecord)
 	return `- ${item.agentId} · ${item.kind} · ${item.state} · ${truncateText(item.summary, 140)}`;
 }
 
-export function formatTaskSubtreePreviewAgentAttentionLine(item: AgentAttentionV2Record): string {
-	const owner = `${item.ownerKind}:${item.ownerAgentId ?? "-"}`;
-	return `- ${item.kind} · ${item.state} · task=${item.taskId ?? "-"} · subject=${item.subjectAgentId ?? "-"} · owner=${owner} · ${truncateText(item.summary, 140)}`;
-}
+
 
 export function formatTaskSubtreeCleanupLine(candidate: CleanupCandidate): string {
 	const attention = candidate.attentionItems.length > 0 ? candidate.attentionItems.map((item) => item.kind).join(",") : "none";
@@ -328,7 +323,7 @@ export function formatTaskSubtreeControlPreview(preview: TaskSubtreeControlPrevi
 		`previewToken: ${preview.previewToken}`,
 		`previewComplete: ${preview.isComplete ? "yes" : "no — apply is disabled until warnings are resolved"}`,
 		preview.reason ? `reason: ${preview.reason}` : null,
-		`counts: ${preview.tasks.length} task(s) (${formatTaskStatusCounts(preview.tasks)}) · ${preview.linkedAgents.length} linked agent(s) · ${preview.activeAgents.length} active · ${preview.blockers.length} blocked task(s) · ${preview.attentionItems.length + preview.agentAttentionItems.length} open attention · ${preview.cleanupCandidates.length} cleanup candidate(s)`,
+		`counts: ${preview.tasks.length} task(s) (${formatTaskStatusCounts(preview.tasks)}) · ${preview.linkedAgents.length} linked agent(s) · ${preview.activeAgents.length} active · ${preview.blockers.length} blocked task(s) · ${preview.attentionItems.length} open attention · ${preview.cleanupCandidates.length} cleanup candidate(s)`,
 		...preview.truncationWarnings.map((warning) => `warning: ${warning}`),
 	]
 		.filter((line): line is string => Boolean(line));
@@ -336,8 +331,7 @@ export function formatTaskSubtreeControlPreview(preview: TaskSubtreeControlPrevi
 	appendPreviewSection(lines, "Affected tasks", preview.tasks, (task) => formatTaskSubtreePreviewTaskLine(preview, task), preview.includeRoot ? "- none (root task not found)" : "- none (root excluded and no descendants)", 60);
 	appendPreviewSection(lines, "Active linked agents", preview.activeAgents, (agent) => formatTaskSubtreePreviewAgentLine(preview, agent), "- none", 40);
 	appendPreviewSection(lines, "Task blockers", preview.blockers, (task) => `- ${task.id} · waiting=${task.waitingOn ?? "-"} · ${truncateText(task.blockedReason ?? task.summary ?? task.title, 140)}`, "- none", 40);
-	appendPreviewSection(lines, "Open linked-agent attention", preview.attentionItems, formatTaskSubtreePreviewAttentionLine, "- none", 40);
-	appendPreviewSection(lines, "Open hierarchy attention", preview.agentAttentionItems, formatTaskSubtreePreviewAgentAttentionLine, "- none", 40);
+	appendPreviewSection(lines, "Open attention", preview.attentionItems, formatTaskSubtreePreviewAttentionLine, "- none", 40);
 	appendPreviewSection(lines, "Terminal cleanup candidates", preview.cleanupCandidates, formatTaskSubtreeCleanupLine, "- none", 40);
 	return lines.join("\n");
 }
@@ -346,7 +340,7 @@ export function formatTaskSubtreeControlConfirmation(preview: TaskSubtreeControl
 	return [
 		`Apply subtree ${preview.action} to ${preview.rootTask.id}?`,
 		`${preview.taskIdsToUpdate.length} task(s) will be updated; ${preview.agentIdsToStop.length} active linked agent(s) will receive graceful stop requests.`,
-		`${preview.blockers.length} blocked task(s), ${preview.attentionItems.length + preview.agentAttentionItems.length} open attention item(s), and ${preview.cleanupCandidates.length} cleanup candidate(s) were shown in the preview.`,
+		`${preview.blockers.length} blocked task(s), ${preview.attentionItems.length} open attention item(s), and ${preview.cleanupCandidates.length} cleanup candidate(s) were shown in the preview`,
 		`Preview token required for tool/API apply: ${preview.previewToken}.`,
 		preview.isComplete ? "Preview is complete; apply may proceed after confirmation." : "Preview is incomplete; apply is disabled until warnings are resolved.",
 		"No force stop or cleanup will run from this action.",

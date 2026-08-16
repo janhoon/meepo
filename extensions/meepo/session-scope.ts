@@ -12,10 +12,10 @@ import {
 	SESSION_CHILD_LINK_ENTRY_TYPE,
 } from "./paths.js";
 import { getProjectKey } from "./project.js";
+import { listOpenAttention, type ListOpenAttentionFilters } from "./inbox.js";
 import {
 	createRootActorContext,
 	listAgents,
-	listAttentionItems,
 	listDescendantAgentIds,
 	listHierarchyVisibleAgentIds,
 	resolveAgentActorContext,
@@ -23,6 +23,7 @@ import {
 import { OPEN_ATTENTION_STATES } from "./registry-shared.js";
 import type {
 	AgentActorContext,
+	AgentRecipientKind,
 	AgentSummary,
 	AttentionItemRecord,
 	ListAgentsFilters,
@@ -230,16 +231,16 @@ export function resolveRootInboxSenderIds(
  * without forcing projectKey (labels differ; subject pin does not).
  */
 export function withOwnedSubjectPin<
-	T extends { projectKey?: string; ids?: string[]; agentIds?: string[]; subjectAgentIds?: string[] },
+	T extends { projectKey?: string; ids?: string[]; agentIds?: string[]; subjectAgentIds?: string[]; childIds?: string[] },
 >(
 	filters: T,
 	scope: OwnershipScope,
 	owned: string[] | null,
-	options: { projectKey: string; idField: "ids" | "agentIds" | "subjectAgentIds" },
+	options: { projectKey: string; idField: "ids" | "agentIds" | "subjectAgentIds" | "childIds" },
 ): T {
 	const next = { ...filters };
 	if (owned !== null) {
-		(next as { ids?: string[]; agentIds?: string[]; subjectAgentIds?: string[] })[options.idField] = owned;
+		(next as { ids?: string[]; agentIds?: string[]; subjectAgentIds?: string[]; childIds?: string[] })[options.idField] = owned;
 	}
 	if (scope === "current_project") {
 		next.projectKey = options.projectKey;
@@ -289,6 +290,42 @@ export function getVisibleAgentIdsForTool(ctx: ExtensionContext, requestedIds?: 
 	if (!requestedIds) return visibleIds;
 	const visibleSet = new Set(visibleIds);
 	return requestedIds.filter((id) => visibleSet.has(id));
+}
+
+export function attentionOwnerKindsForAudience(audience?: "all" | "coordinator" | "user"): AgentRecipientKind[] | undefined {
+	if (audience === "user") return ["user"];
+	if (audience === "coordinator") return ["root"];
+	if (audience === undefined) return [...ROOT_SURFACE_OWNER_KINDS];
+	return undefined;
+}
+
+export function resolveOpenAttentionFilters(
+	ctx: ExtensionContext,
+	scope: OwnershipScope,
+	params: {
+		audience?: "all" | "coordinator" | "user";
+		includeResolved?: boolean;
+		limit?: number;
+		states?: import("./types.js").ListAttentionItemsFilters["states"];
+	} = {},
+): ListOpenAttentionFilters {
+	const projectKey = getProjectKey(ctx.cwd);
+	const filters: ListOpenAttentionFilters = {
+		limit: params.limit,
+		ownerKinds: attentionOwnerKindsForAudience(params.audience),
+		states:
+			params.states !== undefined
+				? params.states
+				: params.includeResolved
+					? undefined
+					: OPEN_ATTENTION_STATES,
+	};
+	if (params.audience === "coordinator") filters.audiences = ["coordinator"];
+	if (params.audience === "user") filters.audiences = ["user"];
+	return withOwnedSubjectPin(filters, scope, resolveOwnedSubjectIds(ctx, scope, { projectKey }), {
+		projectKey,
+		idField: "childIds",
+	});
 }
 
 export function resolveAttentionFilters(
@@ -351,10 +388,7 @@ export function loadAttentionGate(
 	params: { itemLimit?: number; agentLimit?: number } = {},
 ): { items: AttentionItemRecord[]; agents: Map<string, AgentSummary> } {
 	const db = getMeepoDb();
-	const items = listAttentionItems(
-		db,
-		resolveAttentionFilters(ctx, scope, { limit: params.itemLimit ?? 5 }),
-	);
+	const items = listOpenAttention(db, resolveOpenAttentionFilters(ctx, scope, { limit: params.itemLimit ?? 5 }));
 	// Fail-closed owned pin (same scope as items) — never ambient projectKey-only listAgents.
 	const agents = new Map(
 		listAgents(db, resolveAgentFilters(ctx, scope, { limit: params.agentLimit ?? 100 })).map((agent) => [

@@ -329,6 +329,7 @@ export interface AgentSummary {
 
 export interface AttentionItemRecord {
 	id: string;
+	source: TaskInteractionSource;
 	messageId: string | null;
 	agentId: string;
 	threadId: string;

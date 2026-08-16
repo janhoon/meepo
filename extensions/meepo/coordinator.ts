@@ -39,7 +39,7 @@ import { missingHostTargetMessage } from "./rpc-bridge-control.js";
 import type { MeepoRuntime } from "./runtime.js";
 import { captureServiceById, focusServiceById, reconcileServices, resolveServiceFilters, stopServiceById } from "./service-ops.js";
 import { listServices } from "./service-registry.js";
-import { childRuntimeEnvironment, resolveAttentionFilters, resolveTaskFilters } from "./session-scope.js";
+import { childRuntimeEnvironment, resolveOpenAttentionFilters, resolveTaskFilters } from "./session-scope.js";
 import { getTaskLinkedAgents } from "./spawn-ops.js";
 import {
 	buildStandupText,
@@ -510,14 +510,7 @@ export function registerMeepoCoordinatorTools(pi: ExtensionAPI, runtime: MeepoRu
 				ctx.ui.notify("Usage: /agent-attention [all|current_project|current_session|descendants]", "warning");
 				return;
 			}
-			const filters = resolveAttentionFilters(ctx, scope, { limit: 200 });
-			const items = listOpenAttention(getMeepoDb(), {
-				projectKey: filters.projectKey,
-				childIds: filters.agentIds,
-				audiences: filters.audiences,
-				states: filters.states,
-				limit: 200,
-			});
+			const items = listOpenAttention(getMeepoDb(), resolveOpenAttentionFilters(ctx, scope, { limit: 200 }));
 			const agentsById = new Map(
 				listAgents(getMeepoDb(), { ids: [...new Set(items.map((item) => item.agentId))], limit: 200 }).map((agent) => [agent.id, agent]),
 			);

@@ -17,13 +17,12 @@ import {
 	getVisibleAgentIdsForTool,
 	loadAttentionGate,
 	resolveAgentFilters,
-	resolveAttentionFilters,
+	resolveOpenAttentionFilters,
 	resolveRootInboxSenderIds,
 	resolveTaskFilters,
 	resolveToolActorContext,
 } from "../session-scope.js";
 import { spawnChildFromParams } from "../spawn-ops.js";
-import { resolveAdminAttentionV2Filters } from "../task-interactions.js";
 import {
 	buildAttentionText,
 	buildInboxText,
@@ -54,7 +53,6 @@ import {
 	fetchAgentInboxV2,
 	getAgent,
 	listAgents,
-	listHierarchyVisibleAgentIds,
 } from "../registry.js";
 import { reconcileTasks } from "../task-registry.js";
 import type {
@@ -445,21 +443,14 @@ export function register(registerTool: RegisterTool, pi: ExtensionAPI): void {
 				const scope = params.scope ?? "current_project";
 				const db = getMeepoDb();
 				const actor = resolveToolActorContext(ctx);
-				const filters = resolveAttentionFilters(ctx, scope, params);
-				const adminFilters = actor.kind === "agent" ? undefined : resolveAdminAttentionV2Filters(ctx, scope, params);
-				const items = listOpenAttention(db, {
-					projectKey: adminFilters?.projectKey ?? filters.projectKey ?? getProjectKey(ctx.cwd),
-					childIds: actor.kind === "agent" && params.audience === "user"
-						? listHierarchyVisibleAgentIds(db, actor, { projectKey: getProjectKey(ctx.cwd) })
-						: adminFilters?.subjectAgentIds ?? filters.agentIds,
-					taskIds: adminFilters?.taskIds,
-					ownerKinds: actor.kind === "agent"
-						? [params.audience === "user" ? "user" : "agent"]
-						: adminFilters?.ownerKinds ?? (adminFilters?.ownerKind ? [adminFilters.ownerKind] : undefined),
-					audiences: filters.audiences,
-					states: params.includeResolved ? undefined : filters.states,
-					limit: params.limit,
-				});
+				const items = listOpenAttention(
+					db,
+					resolveOpenAttentionFilters(ctx, scope, {
+						audience: params.audience,
+						includeResolved: params.includeResolved,
+						limit: params.limit,
+					}),
+				);
 				const agentsById = new Map(
 					listAgents(db, { ids: [...new Set(items.map((item) => item.agentId))], limit: 200 }).map((agent) => [agent.id, agent]),
 				);

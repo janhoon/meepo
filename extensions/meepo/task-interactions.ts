@@ -9,6 +9,7 @@ import { listAgents } from "./registry.js";
 import type { ListAgentAttentionItemsV2Filters } from "./registry.js";
 import { OPEN_AGENT_ATTENTION_V2_STATES, OPEN_ATTENTION_STATES, TERMINAL_AGENT_STATES } from "./registry-shared.js";
 import {
+	attentionOwnerKindsForAudience,
 	ROOT_SURFACE_OWNER_KINDS,
 	resolveOwnedSubjectIds,
 	withOwnedSubjectPin,
@@ -19,15 +20,7 @@ import { actorLabelForInteraction } from "./formatters.js";
 import type { AgentAttentionV2Record, AgentRecipientKind, AgentSummary, AttentionItemRecord, TaskInteractionRecord } from "./types.js";
 
 /** Active Meepo config for this extension process (set on register). */
-export function attentionOwnerKindsForAudience(audience?: "all" | "coordinator" | "user"): AgentRecipientKind[] | undefined {
-	if (audience === "user") return ["user"];
-	// Coordinator surfaces own root-bound attention only. Agent-owned items are 1:1 with the parent agent.
-	if (audience === "coordinator") return ["root"];
-	// Default (no audience) stays fail-closed on root surfaces: root+user, never agent-owned broadcast.
-	if (audience === undefined) return [...ROOT_SURFACE_OWNER_KINDS];
-	// audience === "all": no ownerKind pin (still subject-pinned by ownership seam when scope ≠ all).
-	return undefined;
-}
+export { attentionOwnerKindsForAudience } from "./session-scope.js";
 
 export function resolveAdminAttentionV2Filters(
 	ctx: ExtensionContext,
@@ -171,14 +164,15 @@ export function taskInteractionFromLegacyAttention(item: AttentionItemRecord, ag
 	const messageId = payloadString(item.payload, "v2MessageId") ?? item.messageId;
 	const recipientRowId = payloadString(item.payload, "v2RecipientRowId");
 	const kind = taskInteractionKindFromAttention(item.kind, ownerKind);
-	const interactionId = `legacy:${item.id}`;
+	const source = item.source ?? "legacy_attention";
+	const interactionId = `${source === "hierarchy_attention" ? "v2" : "legacy"}:${item.id}`;
 	const actionInfo = buildTaskInteractionActions(kind, taskId, item.agentId, messageId, {
 		interactionId,
 		canMessageAgent: Boolean(agent && !TERMINAL_AGENT_STATES.includes(agent.state)),
 	});
 	return {
 		id: interactionId,
-		source: "legacy_attention",
+		source,
 		sourceId: item.id,
 		taskId,
 		agentId: item.agentId,
