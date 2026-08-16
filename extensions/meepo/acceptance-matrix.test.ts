@@ -3,7 +3,7 @@
  * No tmux / live Pi required. Failures name the matrix case.
  */
 import assert from "node:assert/strict";
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync } from "./sqlite.js";
 import { afterEach, describe, it } from "node:test";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import {
@@ -13,6 +13,7 @@ import {
 	createFullDefaultConfig,
 	loadMeepoConfig,
 	type MeepoCapability,
+	type MeepoConfig,
 } from "./config.js";
 import { evaluateHierarchySpawn } from "./hierarchy-policy.js";
 import {
@@ -46,6 +47,16 @@ function recordingPi(): ExtensionAPI {
 		registerShortcut() {},
 		on() {},
 	} as unknown as ExtensionAPI;
+}
+
+function withTmuxHost(config: MeepoConfig): MeepoConfig {
+	return {
+		...config,
+		runtime: {
+			...config.runtime,
+			processHost: "tmux",
+		},
+	};
 }
 
 function registerAllTools(pi: ExtensionAPI): void {
@@ -219,7 +230,7 @@ describe("acceptance matrix: runtime start paths", () => {
 			);
 		`);
 		const runtime = createMeepoRuntime({
-			config: createFullDefaultConfig(),
+			config: withTmuxHost(createFullDefaultConfig()),
 			getDb: () => db,
 			registerCoordinatorTools: () => {},
 		});
@@ -246,7 +257,7 @@ describe("acceptance matrix: runtime start paths", () => {
 			);
 		`);
 		const runtime = createMeepoRuntime({
-			config: createCoreDefaultConfig(),
+			config: withTmuxHost(createCoreDefaultConfig()),
 			getDb: () => db,
 			registerCoordinatorTools: () => {},
 		});

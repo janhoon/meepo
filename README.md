@@ -3,7 +3,7 @@
 > One Pi agent, many replicas.
 > Process-hosted subagents (tmux or herdr), tracked services, and enough coordination to keep the whole pack moving together.
 
-`meepo` is a Pi package for running child agents in tracked host windows/panes and managing long-running services alongside them. The default process host is **auto**: use **herdr** when it is on `PATH`, otherwise **tmux**. Force a backend with `MEEPO_PROCESS_HOST=tmux|herdr|auto` or `runtime.processHost` in config.
+`meepo` is a Pi package for running child agents in tracked host windows/panes and managing long-running services alongside them. The default process host is **herdr**. Force a backend with `MEEPO_PROCESS_HOST=tmux|herdr|auto` or `runtime.processHost` in config.
 
 It is named after the Dota 2 hero for a very specific reason: Meepo is strongest when one becomes many, and this repo gives Pi that same trick. You can spawn focused replicas, keep each one in its own host context, let them report questions or blockers upward, and message them back without losing track of the squad.
 
@@ -184,14 +184,14 @@ Canonical names are `service_*` (ProcessHost-neutral). Legacy `tmux_service_*` a
 ### Process host switch
 
 ```bash
-# Prefer herdr when installed (default)
+# Force herdr (default; spawn fails if herdr is unavailable)
+export MEEPO_PROCESS_HOST=herdr
+
+# Prefer herdr when installed, otherwise tmux
 export MEEPO_PROCESS_HOST=auto
 
 # Force tmux even if herdr is on PATH
 export MEEPO_PROCESS_HOST=tmux
-
-# Force herdr (spawn fails if herdr is unavailable)
-export MEEPO_PROCESS_HOST=herdr
 ```
 
 Backend is frozen once per primary Pi session — restart Pi to switch. See [`docs/MEEPO_RUNTIME_CONFIG.md`](docs/MEEPO_RUNTIME_CONFIG.md).

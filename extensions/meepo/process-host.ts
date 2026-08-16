@@ -168,7 +168,7 @@ export function resolveProcessHostSelection(input: ResolveProcessHostInput = {})
 	const fromEnv = parseProcessHostSelection(env.MEEPO_PROCESS_HOST);
 	if (fromEnv) return fromEnv;
 	if (input.configSelection) return input.configSelection;
-	return "auto";
+	return "herdr";
 }
 
 /** Freeze host for this primary session. Throws if already frozen with a different kind (restart required). */
@@ -206,7 +206,7 @@ export function resetProcessHostForTests(): void {
 }
 
 export function processHostSelectionFromConfig(config: MeepoConfig): ProcessHostSelection {
-	return config.runtime.processHost ?? "auto";
+	return config.runtime.processHost ?? "herdr";
 }
 
 /** Map registry-ish tmux columns + optional host_* into a HostTargetRef. */

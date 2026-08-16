@@ -60,7 +60,7 @@ Set `MEEPO_PRESET=full` (or pass `preset: "full"` to `loadMeepoConfig`):
     agentDir: string | null,  // reserved; null = Pi getAgentDir defaults
     detachedSessionName: string, // default "pi-subagents" (tmux agent pool)
     serviceDetachedSessionName: string, // default "pi-services" (tmux service pool)
-    processHost: "auto" | "tmux" | "herdr", // default "auto"
+    processHost: "auto" | "tmux" | "herdr", // default "herdr"
   },
 }
 ```
@@ -71,11 +71,11 @@ Meepo freezes **one** process host per primary session at `MeepoRuntime.start`:
 
 | Selection | Behavior |
 |---|---|
-| `auto` (default) | Prefer **herdr** when on `PATH` and `herdr --version` succeeds; else **tmux** |
+| `herdr` (default) | Always use the herdr adapter (fails if herdr is unavailable) |
+| `auto` | Prefer **herdr** when on `PATH` and `herdr --version` succeeds; else **tmux** |
 | `tmux` | Always use the tmux adapter |
-| `herdr` | Always use the herdr adapter (fails spawn if herdr unavailable) |
 
-**Precedence:** env `MEEPO_PROCESS_HOST` → config `runtime.processHost` → `auto`.
+**Precedence:** env `MEEPO_PROCESS_HOST` → config `runtime.processHost` → `herdr`.
 
 Registry stores host-neutral `host_kind` / `host_primary_id` / `host_display_name` / `host_target_json` plus legacy `tmux_*` columns for compatibility.
 

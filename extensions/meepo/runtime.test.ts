@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync } from "./sqlite.js";
 import { describe, it } from "node:test";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import {
@@ -11,9 +11,20 @@ import {
 	createFullDefaultConfig,
 	loadMeepoConfig,
 	type MeepoCapability,
+	type MeepoConfig,
 } from "./config.js";
 import { countOrgRoleSeeds } from "./org-preset.js";
 import { createCapabilityFilteredExtensionApi, createMeepoRuntime } from "./runtime.js";
+
+function withTmuxHost(config: MeepoConfig): MeepoConfig {
+	return {
+		...config,
+		runtime: {
+			...config.runtime,
+			processHost: "tmux",
+		},
+	};
+}
 
 function createRecordingPi(): { pi: ExtensionAPI } {
 	const pi = {
@@ -190,7 +201,7 @@ describe("capability-gated registration", () => {
 	it("MeepoRuntime.start applies the filter when a registrar is provided", () => {
 		const rec = createRecordingPi();
 		const runtime = createMeepoRuntime({
-			config: createCoreDefaultConfig(),
+			config: withTmuxHost(createCoreDefaultConfig()),
 			registerCoordinatorTools: (pi) => {
 				registerAllKnownSurface(pi);
 			},
@@ -221,7 +232,7 @@ describe("capability-gated registration", () => {
 		`);
 		const rec = createRecordingPi();
 		const runtime = createMeepoRuntime({
-			config: createFullDefaultConfig(),
+			config: withTmuxHost(createFullDefaultConfig()),
 			getDb: () => db,
 			registerCoordinatorTools: () => {},
 		});
@@ -247,7 +258,7 @@ describe("capability-gated registration", () => {
 		`);
 		const rec = createRecordingPi();
 		const runtime = createMeepoRuntime({
-			config: createCoreDefaultConfig(),
+			config: withTmuxHost(createCoreDefaultConfig()),
 			getDb: () => db,
 			registerCoordinatorTools: () => {},
 		});

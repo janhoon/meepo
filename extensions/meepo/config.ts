@@ -67,7 +67,7 @@ export interface MeepoRuntimePathsConfig {
 	/** Detached tmux session name for services when primary is not inside tmux. */
 	serviceDetachedSessionName: string;
 	/**
-	 * Process host backend: auto (herdr if PATH+probe else tmux) | tmux | herdr.
+	 * Process host backend: herdr (default) | auto (herdr if PATH+probe else tmux) | tmux.
 	 * Overridden by env MEEPO_PROCESS_HOST. Frozen once per primary session at start.
 	 */
 	processHost: ProcessHostSelectionConfig;
@@ -226,7 +226,7 @@ export function createFullDefaultConfig(): MeepoConfig {
 			agentDir: null,
 			detachedSessionName: "pi-subagents",
 			serviceDetachedSessionName: "pi-services",
-			processHost: "auto",
+			processHost: "herdr",
 		},
 	};
 }
@@ -251,7 +251,7 @@ export function createCoreDefaultConfig(): MeepoConfig {
 			agentDir: null,
 			detachedSessionName: "pi-subagents",
 			serviceDetachedSessionName: "pi-services",
-			processHost: "auto",
+			processHost: "herdr",
 		},
 	};
 }

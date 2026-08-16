@@ -18,7 +18,7 @@ import { createTmuxProcessHost } from "./tmux-process-host.js";
 /**
  * Build a ProcessHost for the resolved selection without freezing the singleton.
  * Explicit `herdr` + failed probe throws (no silent fallback).
- * `auto` prefers herdr when lifecycle-ready and probe succeeds; else tmux.
+ * Default selection is `herdr`. `auto` prefers herdr when lifecycle-ready and probe succeeds; else tmux.
  */
 export function createProcessHost(input: ResolveProcessHostInput = {}): ProcessHost {
 	const selection = resolveProcessHostSelection(input);

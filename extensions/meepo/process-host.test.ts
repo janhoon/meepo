@@ -52,7 +52,7 @@ describe("process host selection", () => {
 			}),
 			"tmux",
 		);
-		assert.equal(resolveProcessHostSelection({ env: {} }), "auto");
+		assert.equal(resolveProcessHostSelection({ env: {} }), "herdr");
 	});
 
 	it("loadMeepoConfig reads MEEPO_PROCESS_HOST into runtime.processHost", () => {
@@ -60,7 +60,12 @@ describe("process host selection", () => {
 		assert.equal(config.runtime.processHost, "tmux");
 		assert.equal(config.runtime.serviceDetachedSessionName, "pi-services");
 		const defaulted = loadMeepoConfig({ env: {} });
-		assert.equal(defaulted.runtime.processHost, "auto");
+		assert.equal(defaulted.runtime.processHost, "herdr");
+	});
+
+	it("core and full presets default processHost to herdr", () => {
+		assert.equal(loadMeepoConfig({ env: {}, preset: "core" }).runtime.processHost, "herdr");
+		assert.equal(loadMeepoConfig({ env: {}, preset: "full" }).runtime.processHost, "herdr");
 	});
 
 	it("auto prefers herdr when lifecycle is ready and probe passes", () => {
