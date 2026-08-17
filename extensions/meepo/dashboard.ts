@@ -279,7 +279,7 @@ class AgentsDashboardComponent {
 		lines.push(`summary: ${short(agent.finalSummary, 54)}`);
 		lines.push(`error: ${short(agent.lastError, 54)}`);
 		lines.push(`bridge: ${short(agent.bridgeSocketPath ?? agent.bridgeStatusFile, 54)}`);
-		lines.push(`host: ${agent.host ? `${agent.host.kind} ${agent.host.displayName ?? agent.host.primaryId}` : "-"}`);
+		lines.push(`host: ${agent.host ? `${agent.host.hostKind} ${agent.host.displayName ?? agent.host.primaryId}` : "-"}`);
 		lines.push(`runDir: ${short(agent.runDir, 54)}`);
 		return lines.map((line) => truncateToWidth(line, width));
 	}

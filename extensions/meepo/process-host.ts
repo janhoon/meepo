@@ -10,15 +10,10 @@
 import { spawnSync } from "node:child_process";
 import type { MeepoConfig } from "./config.js";
 import type { HerdrProbe } from "./herdr-compat.js";
+import { shellQuote } from "./text-util.js";
 
 export type HostKind = "tmux" | "herdr";
 export type ProcessHostSelection = "auto" | HostKind;
-
-export interface HostIdentity {
-	kind: HostKind;
-	primaryId: string;
-	displayName: string | null;
-}
 
 export type HostTargetRefs = {
 	sessionId?: string;
@@ -94,11 +89,11 @@ export interface ProcessHost {
 	isAvailable(): Promise<boolean>;
 	spawnWindow(input: HostSpawnWindowInput): Promise<HostTarget>;
 	getCurrentTarget(): Promise<HostTarget | null>;
-	focus(target: HostIdentity): Promise<HostFocusResult>;
-	stop(target: HostIdentity, options?: { force?: boolean }): Promise<HostStopResult>;
-	capture(target: HostIdentity, options?: { lines?: number }): Promise<HostCaptureResult>;
+	focus(target: HostTarget): Promise<HostFocusResult>;
+	stop(target: HostTarget, options?: { force?: boolean }): Promise<HostStopResult>;
+	capture(target: HostTarget, options?: { lines?: number }): Promise<HostCaptureResult>;
 	listInventory(): Promise<HostInventory>;
-	targetExists(target: HostIdentity, inventory?: HostInventory): Promise<boolean>;
+	targetExists(target: HostTarget, inventory?: HostInventory): Promise<boolean>;
 	/** Optional; TmuxProcessHost no-ops. HerdProcessHost → notification show + sound map. */
 	notify?(input: HostNotifyInput): Promise<void>;
 }
@@ -127,10 +122,6 @@ export interface ResolveProcessHostInput {
 }
 
 let frozenHost: ProcessHost | null = null;
-
-function shellQuote(value: string): string {
-	return `'${value.replace(/'/g, `'"'"'`)}'`;
-}
 
 export function commandExists(command: string): boolean {
 	const result = spawnSync("bash", ["-lc", `command -v ${shellQuote(command)} >/dev/null 2>&1`], {
@@ -204,48 +195,66 @@ export function parseHostKind(value: string | null | undefined): HostKind | unde
 	return value === "herdr" || value === "tmux" ? value : undefined;
 }
 
-export function hostIdentityFromTarget(target: HostTarget): HostIdentity {
-	return {
-		kind: target.hostKind,
-		primaryId: target.primaryId,
-		displayName: target.displayName ?? null,
-	};
-}
-
-export function formatHost(host: HostIdentity | null | undefined): string {
+export function formatHost(host: HostTarget | null | undefined): string {
 	if (!host?.primaryId && !host?.displayName) return "-";
 	const name = host.displayName ?? host.primaryId;
-	return `${host.kind} ${name}`;
+	return `${host.hostKind} ${name}`;
 }
 
-/** Persistable host_* columns from a live HostTarget. Does not write tmux_*. */
-export function hostPersistFromTarget(target: HostTarget): {
-	host: HostIdentity;
+/** Persistable host_* columns from a live HostTarget. */
+export function persistHostFields(target: HostTarget): {
 	hostKind: HostKind;
 	hostPrimaryId: string;
 	hostDisplayName: string | null;
+	hostTargetJson: string;
 } {
-	const host = hostIdentityFromTarget(target);
 	return {
-		host,
-		hostKind: host.kind,
-		hostPrimaryId: host.primaryId,
-		hostDisplayName: host.displayName,
+		hostKind: target.hostKind,
+		hostPrimaryId: target.primaryId,
+		hostDisplayName: target.displayName ?? null,
+		hostTargetJson: JSON.stringify(target.refs ?? {}),
 	};
 }
 
-export function hostIdentityFromRecord(input: {
-	host?: HostIdentity | null;
+function parseHostTargetRefs(json: string | null | undefined): HostTargetRefs | null {
+	if (!json) return null;
+	try {
+		const parsed = JSON.parse(json) as unknown;
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+		return parsed as HostTargetRefs;
+	} catch {
+		return null;
+	}
+}
+
+/** Best-effort refs for leftover rows that never stored host_target_json. */
+function inferLegacyRefs(kind: HostKind, primaryId: string, displayName: string | null | undefined): HostTargetRefs {
+	if (kind === "herdr") {
+		return { terminalId: primaryId, ...(displayName ? { agentName: displayName } : {}) };
+	}
+	const refs: HostTargetRefs = {};
+	if (primaryId.startsWith("$")) refs.sessionId = primaryId;
+	if (displayName) refs.sessionName = displayName;
+	if (primaryId.startsWith("@")) refs.windowId = primaryId;
+	if (primaryId.startsWith("%")) refs.paneId = primaryId;
+	return refs;
+}
+
+export function hostFromRecord(input: {
+	host?: HostTarget | null;
 	hostKind?: HostKind | string | null;
 	hostPrimaryId?: string | null;
 	hostDisplayName?: string | null;
-}): HostIdentity | null {
-	const kind = input.host?.kind ?? parseHostKind(input.hostKind);
-	const primaryId = input.host?.primaryId || input.hostPrimaryId;
+	hostTargetJson?: string | null;
+}): HostTarget | null {
+	if (input.host?.hostKind && input.host.primaryId) return input.host;
+	const kind = parseHostKind(input.hostKind);
+	const primaryId = input.hostPrimaryId;
 	if (!kind || !primaryId) return null;
 	return {
-		kind,
+		hostKind: kind,
 		primaryId,
-		displayName: input.host?.displayName ?? input.hostDisplayName ?? null,
+		displayName: input.hostDisplayName ?? undefined,
+		refs: parseHostTargetRefs(input.hostTargetJson) ?? inferLegacyRefs(kind, primaryId, input.hostDisplayName),
 	};
 }

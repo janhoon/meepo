@@ -1,5 +1,5 @@
 import type { DatabaseSync } from "./sqlite.js";
-import { hostIdentityFromRecord, parseHostKind } from "./process-host.js";
+import { hostFromRecord, persistHostFields } from "./process-host.js";
 import { addSessionScopeFilter, makePlaceholders, safeJsonParse } from "./sql-util.js";
 import type {
 	CreateServiceInput,
@@ -44,10 +44,11 @@ function toServiceSummary(row: Record<string, unknown>): ServiceSummary {
 		readySubstring: (row.ready_substring as string | null) ?? null,
 		readyMatchedAt: (row.ready_matched_at as number | null) ?? null,
 		state: row.state as ServiceSummary["state"],
-		host: hostIdentityFromRecord({
-			hostKind: parseHostKind(row.host_kind as string | null),
+		host: hostFromRecord({
+			hostKind: row.host_kind as string | null,
 			hostPrimaryId: (row.host_primary_id as string | null) ?? null,
 			hostDisplayName: (row.host_display_name as string | null) ?? null,
+			hostTargetJson: (row.host_target_json as string | null) ?? null,
 		}),
 		runDir: row.run_dir as string,
 		logFile: row.log_file as string,
@@ -63,6 +64,7 @@ function toServiceSummary(row: Record<string, unknown>): ServiceSummary {
 export function createService(db: DatabaseSync, input: CreateServiceInput): void {
 	const createdAt = input.createdAt ?? Date.now();
 	const updatedAt = input.updatedAt ?? createdAt;
+	const host = input.host ? persistHostFields(input.host) : null;
 	db.prepare(
 		`INSERT INTO tmux_services (
 			id,
@@ -101,10 +103,10 @@ export function createService(db: DatabaseSync, input: CreateServiceInput): void
 		input.readySubstring ?? null,
 		input.readyMatchedAt ?? null,
 		input.state,
-		input.host?.kind ?? "",
-		input.host?.primaryId ?? null,
-		input.host?.displayName ?? null,
-		null,
+		host?.hostKind ?? "",
+		host?.hostPrimaryId ?? null,
+		host?.hostDisplayName ?? null,
+		host?.hostTargetJson ?? null,
 		input.runDir,
 		input.logFile,
 		input.latestStatusFile,
@@ -120,8 +122,13 @@ export function updateService(db: DatabaseSync, id: string, patch: UpdateService
 	const assignments: string[] = [];
 	const params: unknown[] = [];
 	if (patch.host !== undefined) {
-		assignments.push("host_kind = ?", "host_primary_id = ?", "host_display_name = ?");
-		params.push(patch.host?.kind ?? null, patch.host?.primaryId ?? null, patch.host?.displayName ?? null);
+		assignments.push("host_kind = ?", "host_primary_id = ?", "host_display_name = ?", "host_target_json = ?");
+		if (patch.host) {
+			const persisted = persistHostFields(patch.host);
+			params.push(persisted.hostKind, persisted.hostPrimaryId, persisted.hostDisplayName, persisted.hostTargetJson);
+		} else {
+			params.push(null, null, null, null);
+		}
 	}
 	for (const [field, value] of Object.entries(patch) as Array<[keyof UpdateServiceInput, UpdateServiceInput[keyof UpdateServiceInput]]>) {
 		if (value === undefined || field === "host") continue;

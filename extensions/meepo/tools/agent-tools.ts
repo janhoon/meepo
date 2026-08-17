@@ -26,8 +26,6 @@ import { spawnChildFromParams } from "../spawn-ops.js";
 import {
 	buildAttentionText,
 	buildInboxText,
-	buildInboxV2Text,
-	defaultDownwardActionPolicy,
 	formatAgentDetails,
 	formatAgentLine,
 	formatAttentionGateWarning,
@@ -40,7 +38,8 @@ import {
 	summarizeFilters,
 } from "../formatters.js";
 import { getMeepoDb } from "../db.js";
-import { listInbox, listOpenAttention, markInbox } from "../inbox.js";
+import { defaultDownwardActionPolicy } from "../downward-policy.js";
+import { listInbox, listInboxForChild, listOpenAttention, markInbox } from "../inbox.js";
 import {
 	deliverQueuedMessagesViaBridge,
 	queueDownwardMessage,
@@ -50,7 +49,6 @@ import { getProjectKey } from "../project.js";
 import { missingHostTargetMessage } from "../rpc-bridge-control.js";
 import {
 	canSendMessage,
-	fetchAgentInboxV2,
 	getAgent,
 	listAgents,
 } from "../registry.js";
@@ -384,36 +382,18 @@ export function register(registerTool: RegisterTool, pi: ExtensionAPI): void {
 								projectKey: agentFilters.projectKey ?? getProjectKey(ctx.cwd),
 						  })
 						: undefined;
-				const v2Messages = fetchAgentInboxV2(db, {
-					actor,
-					includeRead: params.includeDelivered ?? false,
-					markRead: !(params.includeDelivered ?? false),
-					projectKey: agentFilters.projectKey ?? (actor.kind === "agent" ? actor.projectKey : undefined),
-					senderAgentIds: ownedSenderIds,
-					limit: params.limit,
-				});
-				const v2ReadReceiptCount = params.includeDelivered ? 0 : v2Messages.length;
-				if (actor.kind === "agent" || v2Messages.length > 0) {
-					updateFleetUi(ctx);
-					return {
-						content: [{ type: "text", text: buildInboxV2Text(v2Messages, v2ReadReceiptCount) }],
-						details: {
-							scope,
-							actor,
-							messages: v2Messages,
-							readReceipt: { status: "read", ids: v2Messages.map((entry) => entry.recipient.id), count: v2ReadReceiptCount },
-							version: "v2",
-						},
-					};
-				}
-				const messages = listInbox(db, {
-					projectKey: agentFilters.projectKey,
-					spawnSessionId: agentFilters.spawnSessionId,
-					spawnSessionFile: agentFilters.spawnSessionFile,
-					agentIds: ownedSenderIds ?? agentFilters.ids ?? agentFilters.descendantOf,
-					includeDelivered: params.includeDelivered,
-					limit: params.limit,
-				});
+				const messages =
+					actor.kind === "agent"
+						? listInboxForChild(db, actor.agentId, {
+								includeDelivered: params.includeDelivered,
+								limit: params.limit,
+						  })
+						: listInbox(db, {
+								projectKey: agentFilters.projectKey,
+								agentIds: ownedSenderIds ?? agentFilters.ids ?? agentFilters.descendantOf,
+								includeDelivered: params.includeDelivered,
+								limit: params.limit,
+						  });
 				const deliveredIds = params.includeDelivered ? [] : messages.filter((message) => message.status === "queued").map((message) => message.id);
 				const readReceiptCount = markInbox(db, deliveredIds, "delivered");
 				const deliveredIdSet = new Set(deliveredIds);

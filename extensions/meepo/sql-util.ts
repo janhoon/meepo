@@ -5,6 +5,20 @@
 
 import type { DatabaseSync } from "./sqlite.js";
 
+export function payloadObject(payload: unknown): Record<string, unknown> {
+	return payload && typeof payload === "object" && !Array.isArray(payload) ? (payload as Record<string, unknown>) : {};
+}
+
+export function payloadString(payload: unknown, key: string): string | undefined {
+	const value = payloadObject(payload)[key];
+	return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+export function payloadStringArray(payload: unknown, key: string): string[] {
+	const value = payloadObject(payload)[key];
+	return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : [];
+}
+
 export function safeJsonParse<T>(value: string | null | undefined, fallback: T): T {
 	if (value == null || value === "") return fallback;
 	try {

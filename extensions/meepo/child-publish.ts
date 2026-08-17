@@ -81,7 +81,6 @@ export function publishChildUpdate(
 	messageId: string;
 	routeKind: string;
 	recipientRowIds: string[];
-	legacyMessageIds: string[];
 } {
 	const db = getMeepoDb();
 	const fullPayload: SubagentPublishPayload = { kind, ...payload };
@@ -114,12 +113,8 @@ export function publishChildUpdate(
 		thread: { kind: publishThreadKind(kind), title: payload.summary },
 	});
 	const routeKind = messageResult.routes[0]?.routeKind ?? "multi_hop";
-	const v2RecipientRowId = messageResult.recipients[0]?.id;
-	// Canonical upward path is v2 only (message + optional attention). No legacy dual-write.
-	const v2Payload: SubagentPublishPayload & DownwardMessagePayload = {
+	const publishedPayload: SubagentPublishPayload & DownwardMessagePayload = {
 		...fullPayload,
-		v2MessageId: messageResult.message.id,
-		v2RecipientRowId,
 		senderKind: "agent",
 		senderAgentId: environment.childId,
 		routeKind,
@@ -139,10 +134,10 @@ export function publishChildUpdate(
 			priority,
 			state: "waiting_on_owner",
 			summary: payload.summary,
-			payload: v2Payload,
+			payload: publishedPayload,
 		});
 	}
-	appendRunEvent(environment, kind, payload.summary, { ...v2Payload, recipient });
+	appendRunEvent(environment, kind, payload.summary, { ...publishedPayload, recipient });
 	const dbAgent = getAgent(db, environment.childId);
 	const dbBridgeOwnedTerminal = !!dbAgent && BRIDGE_TERMINAL_STATES.has(dbAgent.state as RuntimeStatusSnapshot["state"]);
 	// Also honor on-disk latest-status.json when the bridge (source === "rpc_bridge")
@@ -185,8 +180,6 @@ export function publishChildUpdate(
 		messageId: messageResult.message.id,
 		routeKind,
 		recipientRowIds: messageResult.recipients.map((item) => item.id),
-		// Kept for tool payload compatibility; upward publishes no longer dual-write legacy rows.
-		legacyMessageIds: [] as string[],
 	};
 }
 

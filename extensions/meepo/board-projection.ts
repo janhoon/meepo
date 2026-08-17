@@ -11,6 +11,7 @@ import { OPEN_ATTENTION_STATES } from "./registry-shared.js";
 import { resolveAgentFilters, resolveOpenAttentionFilters, resolveTaskFilters } from "./session-scope.js";
 import { buildTaskInteractionsByTask } from "./task-interactions.js";
 import { deriveTaskHealth, listTaskAgentLinks, listTaskHealth, listTasks, taskLeaseKindForProfile } from "./task-registry.js";
+import type { DatabaseSync } from "./sqlite.js";
 import type { AgentSummary, AttentionItemRecord } from "./types.js";
 import type { TaskRecord } from "./task-types.js";
 
@@ -49,11 +50,11 @@ export function boardLaneForTask(task: TaskRecord): BoardLaneId {
 }
 
 export function buildBoardScopeData(
+	db: DatabaseSync,
 	tasks: TaskRecord[],
 	agents: AgentSummary[],
 	attentionItems: AttentionItemRecord[],
 ): AgentsBoardData["scopes"]["all"] {
-	const db = getMeepoDb();
 	const taskIds = tasks.map((task) => task.id);
 	const taskIdSet = new Set(taskIds);
 	const links = listTaskAgentLinks(db, { taskIds, limit: 500 });
@@ -167,10 +168,10 @@ export function buildBoardData(ctx: ExtensionContext): AgentsBoardData {
 	const descendantAttention = attentionForScope(ctx, "descendants");
 	return {
 		scopes: {
-			all: buildBoardScopeData(scopeTasks.all, scopeAgents.all, allAttention),
-			current_project: buildBoardScopeData(scopeTasks.current_project, scopeAgents.current_project, projectAttention),
-			current_session: buildBoardScopeData(scopeTasks.current_session, scopeAgents.current_session, sessionAttention),
-			descendants: buildBoardScopeData(scopeTasks.descendants, scopeAgents.descendants, descendantAttention),
+			all: buildBoardScopeData(db, scopeTasks.all, scopeAgents.all, allAttention),
+			current_project: buildBoardScopeData(db, scopeTasks.current_project, scopeAgents.current_project, projectAttention),
+			current_session: buildBoardScopeData(db, scopeTasks.current_session, scopeAgents.current_session, sessionAttention),
+			descendants: buildBoardScopeData(db, scopeTasks.descendants, scopeAgents.descendants, descendantAttention),
 		},
 	};
 }

@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { shellQuote } from "./text-util.js";
 
 export interface TmuxTargetInput {
 	sessionId?: string | null;
@@ -30,10 +31,6 @@ export interface TmuxInventory {
 	sessionNames: Set<string>;
 	windows: Set<string>;
 	panes: Set<string>;
-}
-
-function shellQuote(value: string): string {
-	return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
 function runTmux(args: string[]): string {

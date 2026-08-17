@@ -1,75 +1,22 @@
 /**
  * Task interaction projection from Inbox / Attention.
  */
-import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { getMeepoDb } from "./db.js";
-import { listOpenAttention } from "./inbox.js";
-import { getProjectKey } from "./project.js";
+import { listOpenAttention, markAttentionById } from "./inbox.js";
 import { listAgents } from "./registry.js";
-import type { ListAgentAttentionItemsV2Filters } from "./registry.js";
-import { OPEN_AGENT_ATTENTION_V2_STATES, OPEN_ATTENTION_STATES, TERMINAL_AGENT_STATES } from "./registry-shared.js";
-import {
-	attentionOwnerKindsForAudience,
-	ROOT_SURFACE_OWNER_KINDS,
-	resolveOwnedSubjectIds,
-	withOwnedSubjectPin,
-	type OwnershipScope,
-} from "./session-scope.js";
-import { listTaskAgentLinks } from "./task-registry.js";
+import { OPEN_ATTENTION_STATES, TERMINAL_AGENT_STATES } from "./registry-shared.js";
 import { actorLabelForInteraction } from "./formatters.js";
+import { attentionOwnerKindsForAudience } from "./session-scope.js";
+import { payloadString, payloadStringArray } from "./sql-util.js";
+import { listTaskAgentLinks } from "./task-registry.js";
 import type { AgentAttentionV2Record, AgentRecipientKind, AgentSummary, AttentionItemRecord, TaskInteractionRecord } from "./types.js";
 
-/** Active Meepo config for this extension process (set on register). */
-export { attentionOwnerKindsForAudience } from "./session-scope.js";
-
-export function resolveAdminAttentionV2Filters(
-	ctx: ExtensionContext,
-	scope: OwnershipScope,
-	params: {
-		audience?: "all" | "coordinator" | "user";
-		includeResolved?: boolean;
-		limit?: number;
-		/** Override default open-state set instead of mutating the returned bag. */
-		states?: ListAgentAttentionItemsV2Filters["states"];
-	} = {},
-): ListAgentAttentionItemsV2Filters {
-	const projectKey = getProjectKey(ctx.cwd);
-	const filters: ListAgentAttentionItemsV2Filters = {
-		limit: params.limit,
-		ownerKinds: attentionOwnerKindsForAudience(params.audience),
-		states:
-			params.states !== undefined
-				? params.states
-				: params.includeResolved
-					? undefined
-					: ["open", "acknowledged", "waiting_on_owner"],
-	};
-	// Single ownership seam via withOwnedSubjectPin — empty array means no subjects (never fall-open).
-	return withOwnedSubjectPin(filters, scope, resolveOwnedSubjectIds(ctx, scope, { projectKey }), {
-		projectKey,
-		idField: "subjectAgentIds",
-	});
-}
+export { attentionOwnerKindsForAudience };
 
 export function attentionV2MatchesAudience(item: AgentAttentionV2Record, audience?: "all" | "coordinator" | "user"): boolean {
 	if (audience === "user") return item.ownerKind === "user";
-	// Coordinator triage is root-owned (or agent-self path elsewhere); do not treat other agents' mail as coordinator mail.
 	if (audience === "coordinator") return item.ownerKind === "root";
 	return true;
-}
-
-export function payloadRecord(payload: unknown): Record<string, unknown> {
-	return payload && typeof payload === "object" && !Array.isArray(payload) ? (payload as Record<string, unknown>) : {};
-}
-
-export function payloadString(payload: unknown, key: string): string | null {
-	const value = payloadRecord(payload)[key];
-	return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
-export function payloadStringArray(payload: unknown, key: string): string[] {
-	const value = payloadRecord(payload)[key];
-	return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : [];
 }
 
 export function taskInteractionKindFromAttention(
@@ -155,25 +102,20 @@ export function buildTaskInteractionActions(
 	}
 }
 
-export function taskInteractionFromLegacyAttention(item: AttentionItemRecord, agent: AgentSummary | undefined): TaskInteractionRecord | null {
+export function taskInteractionFromAttention(item: AttentionItemRecord, agent: AgentSummary | undefined): TaskInteractionRecord | null {
 	const taskId = payloadString(item.payload, "taskId") ?? agent?.taskId ?? null;
 	if (!taskId) return null;
 	const ownerKind: AgentRecipientKind =
-		(payloadString(item.payload, "ownerKind") as AgentRecipientKind | null) ??
+		(payloadString(item.payload, "ownerKind") as AgentRecipientKind | undefined) ??
 		(item.audience === "user" ? "user" : "root");
-	const messageId = payloadString(item.payload, "v2MessageId") ?? item.messageId;
-	const recipientRowId = payloadString(item.payload, "v2RecipientRowId");
+	const messageId = item.messageId;
 	const kind = taskInteractionKindFromAttention(item.kind, ownerKind);
-	const source = item.source ?? "legacy_attention";
-	const interactionId = `${source === "hierarchy_attention" ? "v2" : "legacy"}:${item.id}`;
 	const actionInfo = buildTaskInteractionActions(kind, taskId, item.agentId, messageId, {
-		interactionId,
+		interactionId: item.id,
 		canMessageAgent: Boolean(agent && !TERMINAL_AGENT_STATES.includes(agent.state)),
 	});
 	return {
-		id: interactionId,
-		source,
-		sourceId: item.id,
+		id: item.id,
 		taskId,
 		agentId: item.agentId,
 		actorLabel: actorLabelForInteraction(agent, item.agentId),
@@ -183,12 +125,11 @@ export function taskInteractionFromLegacyAttention(item: AttentionItemRecord, ag
 		state: item.state,
 		priority: item.priority,
 		summary: item.summary,
-		details: payloadString(item.payload, "details"),
-		answerNeeded: payloadString(item.payload, "answerNeeded"),
-		recommendedNextAction: payloadString(item.payload, "recommendedNextAction"),
+		details: payloadString(item.payload, "details") ?? null,
+		answerNeeded: payloadString(item.payload, "answerNeeded") ?? null,
+		recommendedNextAction: payloadString(item.payload, "recommendedNextAction") ?? null,
 		files: payloadStringArray(item.payload, "files"),
 		messageId,
-		recipientRowId,
 		nextAction: actionInfo.nextAction,
 		actions: actionInfo.actions,
 		payload: item.payload,
@@ -216,7 +157,7 @@ export function buildTaskInteractionsByTask(
 ): Map<string, TaskInteractionRecord[]> {
 	const result = new Map<string, TaskInteractionRecord[]>();
 	for (const item of items) {
-		addTaskInteraction(result, taskInteractionFromLegacyAttention(item, agentsById.get(item.agentId)), taskIds);
+		addTaskInteraction(result, taskInteractionFromAttention(item, agentsById.get(item.agentId)), taskIds);
 	}
 	for (const [taskId, interactions] of result.entries()) {
 		result.set(taskId, sortTaskInteractionsByPriority(interactions));
@@ -251,37 +192,27 @@ export function resolvedInteractionState(resolutionKind: string): "resolved" | "
 	return "resolved";
 }
 
-export function sqlPlaceholders(count: number): string {
-	return Array.from({ length: count }, () => "?").join(", ");
-}
-
-export function resolveTaskInteractionWithNote(taskId: string, interactionId: string, resolutionKind: string, resolutionSummary: string): { source: "legacy" | "v2"; changes: number } {
-	const [source, ...rest] = interactionId.split(":");
-	const sourceId = rest.join(":");
-	if (!sourceId || (source !== "legacy" && source !== "v2")) {
-		throw new Error(`Invalid task interaction id \"${interactionId}\". Expected legacy:<id> or v2:<id>.`);
+export function resolveTaskInteractionWithNote(taskId: string, interactionId: string, resolutionKind: string, resolutionSummary: string): { changes: number } {
+	const id = interactionId.trim();
+	if (!id) {
+		throw new Error(`Invalid task interaction id \"${interactionId}\".`);
 	}
-	const db = getMeepoDb();
 	const now = Date.now();
 	const state = resolvedInteractionState(resolutionKind);
-	if (source === "legacy") {
-		const result = db.prepare(
-			`UPDATE attention_items
-			 SET state = ?, updated_at = ?, resolved_at = ?, resolution_kind = ?, resolution_summary = ?
-			 WHERE id = ?
-				AND state IN (${sqlPlaceholders(OPEN_ATTENTION_STATES.length)})
-				AND agent_id IN (SELECT id FROM agents WHERE task_id = ?)`,
-		).run(state, now, now, resolutionKind, resolutionSummary, sourceId, ...OPEN_ATTENTION_STATES, taskId) as { changes?: number };
-		return { source, changes: Number(result.changes ?? 0) };
-	}
-	const result = db.prepare(
-		`UPDATE agent_attention_items_v2
-		 SET state = ?, updated_at = ?, resolved_at = ?, resolution_kind = ?, resolution_summary = ?
-		 WHERE id = ?
-			AND state IN (${sqlPlaceholders(OPEN_AGENT_ATTENTION_V2_STATES.length)})
-			AND (task_id = ? OR subject_agent_id IN (SELECT id FROM agents WHERE task_id = ?))`,
-	).run(state, now, now, resolutionKind, resolutionSummary, sourceId, ...OPEN_AGENT_ATTENTION_V2_STATES, taskId, taskId) as { changes?: number };
-	return { source, changes: Number(result.changes ?? 0) };
+	return {
+		changes: markAttentionById(
+			getMeepoDb(),
+			id,
+			{
+				state,
+				updatedAt: now,
+				resolvedAt: now,
+				resolutionKind,
+				resolutionSummary,
+			},
+			{ states: OPEN_ATTENTION_STATES, taskId },
+		),
+	};
 }
 
 

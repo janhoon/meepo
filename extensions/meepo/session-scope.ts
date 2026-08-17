@@ -188,7 +188,7 @@ export function resolveOwnedSubjectIdsFromParts(scope: OwnershipScope, parts: Re
  *
  * `current_project` and `current_session` share the same parent-owned agent id set — see
  * {@link resolveOwnedSubjectIdsFromParts}. Prefer {@link resolveAgentFilters} /
- * {@link resolveAttentionFilters} / {@link resolveRootInboxSenderIds} at call sites instead of
+ * {@link resolveOpenAttentionFilters} / {@link resolveRootInboxSenderIds} at call sites instead of
  * composing this helper ad hoc.
  */
 export function resolveOwnedSubjectIds(
@@ -320,41 +320,9 @@ export function resolveOpenAttentionFilters(
 					? undefined
 					: OPEN_ATTENTION_STATES,
 	};
-	if (params.audience === "coordinator") filters.audiences = ["coordinator"];
-	if (params.audience === "user") filters.audiences = ["user"];
 	return withOwnedSubjectPin(filters, scope, resolveOwnedSubjectIds(ctx, scope, { projectKey }), {
 		projectKey,
 		idField: "childIds",
-	});
-}
-
-export function resolveAttentionFilters(
-	ctx: ExtensionContext,
-	scope: OwnershipScope,
-	params: {
-		audience?: "all" | "coordinator" | "user";
-		includeResolved?: boolean;
-		limit?: number;
-		/** Override default open-state set (e.g. wake omits acknowledged). */
-		states?: import("./types.js").ListAttentionItemsFilters["states"];
-	},
-) {
-	const projectKey = getProjectKey(ctx.cwd);
-	const filters: import("./types.js").ListAttentionItemsFilters = {
-		limit: params.limit,
-		states:
-			params.states !== undefined
-				? params.states
-				: params.includeResolved
-					? undefined
-					: OPEN_ATTENTION_STATES,
-	};
-	if (params.audience === "coordinator") filters.audiences = ["coordinator"];
-	if (params.audience === "user") filters.audiences = ["user"];
-	// Ownership pin only — never stack spawnSession* (would drop linked + descendants).
-	return withOwnedSubjectPin(filters, scope, resolveOwnedSubjectIds(ctx, scope, { projectKey }), {
-		projectKey,
-		idField: "agentIds",
 	});
 }
 

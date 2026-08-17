@@ -5,6 +5,7 @@
  * herdr (or tmux) only hosts the process; delivery never uses host PTY typing.
  */
 
+import { shellQuote } from "./text-util.js";
 import type { DeliveryMode } from "./types.js";
 
 export type RpcBridgeDownwardCommand = "prompt" | "steer" | "follow_up";
@@ -38,10 +39,8 @@ export function buildBridgeLaunchCommand(options: {
 	nodeExecutable: string;
 	bridgeEntryScript: string;
 	bridgeConfigFile: string;
-	shellQuote?: (value: string) => string;
 }): string {
-	const q = options.shellQuote ?? ((value: string) => `'${value.replace(/'/g, `'"'"'`)}'`);
-	return `exec ${q(options.nodeExecutable)} ${q(options.bridgeEntryScript)} --config ${q(options.bridgeConfigFile)}`;
+	return `exec ${shellQuote(options.nodeExecutable)} ${shellQuote(options.bridgeEntryScript)} --config ${shellQuote(options.bridgeConfigFile)}`;
 }
 
 /** Operator-facing label for missing process-host targets (tmux pane or herdr terminal). */

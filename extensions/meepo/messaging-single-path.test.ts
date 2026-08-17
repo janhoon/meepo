@@ -133,10 +133,7 @@ describe("messaging single-path (v2 canonical)", () => {
 
 		const inbox = listInboxMessages(db, { projectKey, limit: 20 });
 		assert.ok(
-			inbox.some((m) => {
-				const payload = m.payload as { v2MessageId?: string };
-				return payload?.v2MessageId === result.message.id;
-			}),
+			inbox.some((m) => m.kind === "question" && m.senderAgentId === childId),
 			"inbox should surface v2-only publish",
 		);
 
@@ -150,12 +147,7 @@ describe("messaging single-path (v2 canonical)", () => {
 
 		// No legacy dual-write expected for this synthetic path.
 		const legacyAttention = listAttentionItems(db, { projectKey, limit: 50 });
-		assert.ok(
-			!legacyAttention.some((item) => {
-				const payload = item.payload as { v2MessageId?: string } | null;
-				return payload?.v2MessageId === result.message.id;
-			}),
-		);
+		assert.equal(legacyAttention.length, 0);
 
 		const fleet = getFleetSummary(db, { projectKey });
 		assert.ok(fleet.unread >= 1);

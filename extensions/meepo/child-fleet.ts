@@ -15,18 +15,208 @@ import {
 } from "./registry.js";
 import { unlinkTaskAgent } from "./task-registry.js";
 import { listOpenAttention, markAttention } from "./inbox.js";
-import { getProcessHost, type HostIdentity } from "./process-host.js";
+import { getProcessHost, type HostTarget } from "./process-host.js";
 import { deliverQueuedMessagesViaBridge, queueDownwardMessage } from "./bridge-delivery.js";
 import type { CleanupCandidate } from "./cleanup-types.js";
 import { OPEN_ATTENTION_STATES, TERMINAL_AGENT_STATES } from "./registry-shared.js";
 import { resolveAgentFilters } from "./session-scope.js";
 import type { AgentSummary, RuntimeStatusSnapshot, UpdateAgentInput } from "./types.js";
 
-function requireHost(agent: AgentSummary): HostIdentity {
+function requireHost(agent: AgentSummary): HostTarget {
 	if (!agent.host) {
-		throw new Error(`Child ${agent.id} has no HostTarget. Reconcile or spawn first.`);
+		throw new Error(`Child ${agent.id} has no host target. Reconcile or spawn first.`);
 	}
 	return agent.host;
+}
+
+function forceStopRegistry(agent: AgentSummary, reason: string | undefined, command: string): AgentSummary {
+	const db = getMeepoDb();
+	const now = Date.now();
+	const summary = reason?.trim() || agent.lastError || "Force stop issued by coordinator.";
+	updateAgent(db, agent.id, {
+		state: "stopped",
+		updatedAt: now,
+		finishedAt: now,
+		lastError: reason?.trim() || agent.lastError,
+	});
+	if (agent.taskId) {
+		unlinkTaskAgent(db, agent.taskId, agent.id, reason?.trim() || "force_stop");
+	}
+	markAttention(
+		db,
+		agent.id,
+		{
+			state: "cancelled",
+			updatedAt: now,
+			resolvedAt: now,
+			resolutionKind: "force_stop",
+			resolutionSummary: summary,
+		},
+		{ states: ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user"] },
+	);
+	createAgentEvent(db, {
+		id: randomUUID(),
+		agentId: agent.id,
+		eventType: "force_stopped",
+		summary,
+		payload: { command },
+	});
+	return getAgent(db, agent.id) ?? agent;
+}
+
+function inferTransportPatch(
+	agent: AgentSummary,
+	input: {
+		bridgeStatus: ReturnType<typeof readRpcBridgeStatus>;
+		bridgeReachable: boolean;
+		targetExists: boolean;
+	},
+): { patch: UpdateAgentInput; reason: string } {
+	const { bridgeStatus, bridgeReachable, targetExists } = input;
+	let patch: UpdateAgentInput = {};
+	let reason = "";
+	if (bridgeStatus && bridgeStatus.updatedAt > (agent.bridgeUpdatedAt ?? 0)) {
+		patch = {
+			transportKind: "rpc_bridge",
+			transportState: bridgeStatus.transportState,
+			bridgeSocketPath: bridgeStatus.socketPath ?? agent.bridgeSocketPath,
+			bridgePid: bridgeStatus.bridgePid,
+			bridgeConnectedAt: bridgeStatus.connectedAt ?? agent.bridgeConnectedAt,
+			bridgeUpdatedAt: bridgeStatus.updatedAt,
+			bridgeLastError: bridgeStatus.lastError ?? null,
+		};
+		reason = "bridge-status.json was newer than the registry";
+	}
+	if (bridgeReachable) {
+		return {
+			patch: {
+				...patch,
+				transportKind: "rpc_bridge",
+				transportState: "live",
+				bridgeSocketPath: getRpcBridgeSocketPath(agent),
+				bridgeConnectedAt: bridgeStatus?.connectedAt ?? agent.bridgeConnectedAt ?? Date.now(),
+				bridgeUpdatedAt: Date.now(),
+				bridgeLastError: null,
+				updatedAt: Date.now(),
+			},
+			reason: reason || "RPC bridge responded to health check",
+		};
+	}
+	if (agent.transportKind !== "rpc_bridge") return { patch, reason };
+	const transportState = !targetExists
+		? "lost"
+		: bridgeStatus?.transportState === "error" || bridgeStatus?.transportState === "stopped"
+			? bridgeStatus.transportState
+			: bridgeStatus?.transportState === "listening" || bridgeStatus?.transportState === "launching"
+				? "disconnected"
+				: "fallback";
+	return {
+		patch: {
+			...patch,
+			transportKind: "rpc_bridge",
+			transportState,
+			bridgeUpdatedAt: Date.now(),
+			bridgeLastError:
+				bridgeStatus?.lastError ??
+				agent.bridgeLastError ??
+				(targetExists ? "RPC bridge health check failed." : "host target missing during reconcile"),
+		},
+		reason:
+			reason ||
+			(targetExists
+				? `RPC bridge not reachable; using ${transportState} transport state`
+				: "host target missing during reconcile"),
+	};
+}
+
+function inferRuntimePatch(
+	agent: AgentSummary,
+	input: {
+		latestStatus: RuntimeStatusSnapshot | null;
+		bridgeStatus: ReturnType<typeof readRpcBridgeStatus>;
+		targetExists: boolean;
+		liveTransport: boolean;
+	},
+): { patch: UpdateAgentInput; reason: string } {
+	const { latestStatus, bridgeStatus, targetExists, liveTransport } = input;
+	if (latestStatus && latestStatus.updatedAt > agent.updatedAt) {
+		const patch: UpdateAgentInput = {
+			state: latestStatus.state,
+			updatedAt: latestStatus.updatedAt,
+			finishedAt: latestStatus.finishedAt ?? agent.finishedAt,
+			lastToolName: latestStatus.lastToolName,
+			lastAssistantPreview: latestStatus.lastAssistantPreview,
+			lastError: latestStatus.lastError,
+			finalSummary: latestStatus.finalSummary,
+		};
+		if (!liveTransport) {
+			patch.transportKind = latestStatus.transportKind;
+			patch.transportState = latestStatus.transportState;
+			if (latestStatus.transportKind === "rpc_bridge" && latestStatus.transportState) {
+				patch.bridgeUpdatedAt = latestStatus.updatedAt;
+			}
+		}
+		return { patch, reason: "latest-status.json was newer than the registry" };
+	}
+	if (!targetExists) {
+		if (latestStatus && ["done", "error", "stopped"].includes(latestStatus.state)) {
+			const patch: UpdateAgentInput = {
+				state: latestStatus.state,
+				updatedAt: Date.now(),
+				finishedAt: latestStatus.finishedAt ?? Date.now(),
+			};
+			if (agent.transportKind === "rpc_bridge") {
+				patch.transportState = latestStatus.state === "error" ? "error" : "stopped";
+			}
+			return { patch, reason: "host target exited after terminal latest-status update" };
+		}
+		if (["launching", "running", "idle", "waiting", "blocked"].includes(agent.state)) {
+			const patch: UpdateAgentInput = {
+				state: "lost",
+				updatedAt: Date.now(),
+				lastError: agent.lastError ?? "host target missing during reconcile",
+			};
+			if (agent.transportKind === "rpc_bridge") {
+				patch.transportState = "lost";
+				patch.bridgeUpdatedAt = Date.now();
+				patch.bridgeLastError = bridgeStatus?.lastError ?? agent.bridgeLastError ?? "host target missing during reconcile";
+			}
+			return { patch, reason: "host target missing during reconcile" };
+		}
+	} else if (agent.state === "launching" && !latestStatus) {
+		return {
+			patch: { state: "running", updatedAt: Date.now() },
+			reason: "host target exists and the child appears to be running",
+		};
+	}
+	return { patch: {}, reason: "" };
+}
+
+export function inferReconcilePatch(
+	agent: AgentSummary,
+	input: {
+		latestStatus: RuntimeStatusSnapshot | null;
+		bridgeStatus: ReturnType<typeof readRpcBridgeStatus>;
+		bridgeReachable: boolean;
+		targetExists: boolean;
+	},
+): { patch: UpdateAgentInput; reason: string } {
+	const transport = inferTransportPatch(agent, input);
+	const runtime = inferRuntimePatch(agent, {
+		latestStatus: input.latestStatus,
+		bridgeStatus: input.bridgeStatus,
+		targetExists: input.targetExists,
+		liveTransport: transport.patch.transportKind === "rpc_bridge" && transport.patch.transportState === "live",
+	});
+	const updatedAt = Math.max(transport.patch.updatedAt ?? 0, runtime.patch.updatedAt ?? 0);
+	return {
+		patch: {
+			...transport.patch,
+			...runtime.patch,
+			...(updatedAt > 0 ? { updatedAt } : {}),
+		},
+		reason: transport.reason || runtime.reason,
+	};
 }
 
 export async function focusAgentById(id: string): Promise<{
@@ -188,36 +378,8 @@ export async function stopAgentById(
 	const target = agent.host;
 	const targetExists = target ? await host.targetExists(target) : false;
 	if (!targetExists && force) {
-		updateAgent(getMeepoDb(), agent.id, {
-			state: "stopped",
-			updatedAt: Date.now(),
-			finishedAt: Date.now(),
-			lastError: reason?.trim() || agent.lastError,
-		});
-		if (agent.taskId) {
-			unlinkTaskAgent(getMeepoDb(), agent.taskId, agent.id, reason?.trim() || "force_stop_missing_host_target");
-		}
-		markAttention(
-			getMeepoDb(),
-			agent.id,
-			{
-				state: "cancelled",
-				updatedAt: Date.now(),
-				resolvedAt: Date.now(),
-				resolutionKind: "force_stop",
-				resolutionSummary: reason?.trim() || "host target missing; registry marked stopped.",
-			},
-			{ states: ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user"] },
-		);
-		createAgentEvent(getMeepoDb(), {
-			id: randomUUID(),
-			agentId: agent.id,
-			eventType: "force_stopped",
-			summary: reason?.trim() || "host target missing; registry marked stopped.",
-			payload: { command: "(host target already missing)" },
-		});
 		return {
-			agent: getAgent(getMeepoDb(), agent.id) ?? agent,
+			agent: forceStopRegistry(agent, reason?.trim() || "host target missing; registry marked stopped.", "(host target already missing)"),
 			result: {
 				stopped: true,
 				graceful: false,
@@ -265,34 +427,10 @@ export async function stopAgentById(
 	}
 	const result = await host.stop(target!, { force });
 	if (force) {
-		updateAgent(getMeepoDb(), agent.id, {
-			state: "stopped",
-			updatedAt: Date.now(),
-			finishedAt: Date.now(),
-			lastError: reason?.trim() || agent.lastError,
-		});
-		if (agent.taskId) {
-			unlinkTaskAgent(getMeepoDb(), agent.taskId, agent.id, reason?.trim() || "force_stop");
-		}
-		markAttention(
-			getMeepoDb(),
-			agent.id,
-			{
-				state: "cancelled",
-				updatedAt: Date.now(),
-				resolvedAt: Date.now(),
-				resolutionKind: "force_stop",
-				resolutionSummary: reason?.trim() || "Force stop issued by coordinator.",
-			},
-			{ states: ["open", "acknowledged", "waiting_on_coordinator", "waiting_on_user"] },
-		);
-		createAgentEvent(getMeepoDb(), {
-			id: randomUUID(),
-			agentId: agent.id,
-			eventType: "force_stopped",
-			summary: reason?.trim() || "Force stop issued by coordinator.",
-			payload: { command: result.command },
-		});
+		return {
+			agent: forceStopRegistry(agent, reason, result.command),
+			result,
+		};
 	}
 	return { agent: getAgent(getMeepoDb(), agent.id) ?? agent, result };
 }
@@ -334,118 +472,12 @@ export async function reconcileAgents(
 		const bridgeStatus = bridge?.status ?? null;
 		const bridgeReachable = Boolean(bridge?.ping?.success);
 		const targetExists = agent.host ? await host.targetExists(agent.host, inventory) : false;
-		let patch: UpdateAgentInput = {};
-		let reason = "";
-		if (bridgeStatus && bridgeStatus.updatedAt > (agent.bridgeUpdatedAt ?? 0)) {
-			patch = {
-				...patch,
-				transportKind: "rpc_bridge",
-				transportState: bridgeStatus.transportState,
-				bridgeSocketPath: bridgeStatus.socketPath ?? agent.bridgeSocketPath,
-				bridgePid: bridgeStatus.bridgePid,
-				bridgeConnectedAt: bridgeStatus.connectedAt ?? agent.bridgeConnectedAt,
-				bridgeUpdatedAt: bridgeStatus.updatedAt,
-				bridgeLastError: bridgeStatus.lastError ?? null,
-			};
-			reason = reason || "bridge-status.json was newer than the registry";
-		}
-		if (bridgeReachable) {
-			patch = {
-				...patch,
-				transportKind: "rpc_bridge",
-				transportState: "live",
-				bridgeSocketPath: getRpcBridgeSocketPath(agent),
-				bridgeConnectedAt: bridgeStatus?.connectedAt ?? agent.bridgeConnectedAt ?? Date.now(),
-				bridgeUpdatedAt: Date.now(),
-				bridgeLastError: null,
-				updatedAt: Date.now(),
-			};
-			reason = reason || "RPC bridge responded to health check";
-		} else if (agent.transportKind === "rpc_bridge") {
-			const inferredTransportState = !targetExists
-				? "lost"
-				: bridgeStatus?.transportState === "error"
-					? "error"
-					: bridgeStatus?.transportState === "stopped"
-						? "stopped"
-						: bridgeStatus?.transportState === "listening" || bridgeStatus?.transportState === "launching"
-							? "disconnected"
-							: "fallback";
-			patch = {
-				...patch,
-				transportKind: "rpc_bridge",
-				transportState: inferredTransportState,
-				bridgeUpdatedAt: Date.now(),
-				bridgeLastError:
-					bridgeStatus?.lastError ??
-					agent.bridgeLastError ??
-					(targetExists ? "RPC bridge health check failed." : "host target missing during reconcile"),
-			};
-			reason =
-				reason ||
-				(targetExists
-					? `RPC bridge not reachable; using ${inferredTransportState} transport state`
-					: "host target missing during reconcile");
-		}
-		if (latestStatus && latestStatus.updatedAt > agent.updatedAt) {
-			const preferLiveBridgeTransport = patch.transportKind === "rpc_bridge" && patch.transportState === "live";
-			patch = {
-				...patch,
-				state: latestStatus.state,
-				transportKind: preferLiveBridgeTransport ? patch.transportKind : latestStatus.transportKind ?? patch.transportKind,
-				transportState: preferLiveBridgeTransport ? patch.transportState : latestStatus.transportState ?? patch.transportState,
-				bridgeUpdatedAt: preferLiveBridgeTransport
-					? patch.bridgeUpdatedAt
-					: latestStatus.transportKind === "rpc_bridge" && latestStatus.transportState
-						? latestStatus.updatedAt
-						: patch.bridgeUpdatedAt,
-				updatedAt: Math.max(latestStatus.updatedAt, patch.updatedAt ?? 0),
-				finishedAt: latestStatus.finishedAt ?? agent.finishedAt,
-				lastToolName: latestStatus.lastToolName,
-				lastAssistantPreview: latestStatus.lastAssistantPreview,
-				lastError: latestStatus.lastError,
-				finalSummary: latestStatus.finalSummary,
-			};
-			reason = reason || "latest-status.json was newer than the registry";
-		}
-		if (!targetExists) {
-			if (latestStatus && ["done", "error", "stopped"].includes(latestStatus.state)) {
-				patch = {
-					...patch,
-					state: latestStatus.state,
-					transportState:
-						agent.transportKind === "rpc_bridge"
-							? latestStatus.state === "error"
-								? "error"
-								: "stopped"
-							: patch.transportState,
-					updatedAt: Date.now(),
-					finishedAt: latestStatus.finishedAt ?? Date.now(),
-				};
-				reason = reason || "host target exited after terminal latest-status update";
-			} else if (["launching", "running", "idle", "waiting", "blocked"].includes(agent.state)) {
-				patch = {
-					...patch,
-					state: "lost",
-					transportState: agent.transportKind === "rpc_bridge" ? "lost" : patch.transportState,
-					bridgeUpdatedAt: agent.transportKind === "rpc_bridge" ? Date.now() : patch.bridgeUpdatedAt,
-					updatedAt: Date.now(),
-					lastError: agent.lastError ?? "host target missing during reconcile",
-					bridgeLastError:
-						agent.transportKind === "rpc_bridge"
-							? (bridgeStatus?.lastError ?? agent.bridgeLastError ?? "host target missing during reconcile")
-							: patch.bridgeLastError,
-				};
-				reason = reason || "host target missing during reconcile";
-			}
-		} else if (agent.state === "launching" && !latestStatus) {
-			patch = {
-				...patch,
-				state: "running",
-				updatedAt: Date.now(),
-			};
-			reason = reason || "host target exists and the child appears to be running";
-		}
+		const { patch, reason } = inferReconcilePatch(agent, {
+			latestStatus,
+			bridgeStatus,
+			bridgeReachable,
+			targetExists,
+		});
 		if (Object.keys(patch).length > 0) {
 			updateAgent(db, agent.id, patch);
 			createAgentEvent(db, {

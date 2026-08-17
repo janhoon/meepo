@@ -20,12 +20,12 @@ import {
 	type HostInventory,
 	type HostNotifyInput,
 	type HostSpawnWindowInput,
-	type HostIdentity,
 	type HostStopResult,
 	type HostTarget,
 	type ProcessHost,
 	type ProcessHostOptions,
 } from "./process-host.js";
+import { shellQuote } from "./text-util.js";
 import { probeHerdr } from "./herdr-compat.js";
 
 export interface HerdrCliResult {
@@ -90,9 +90,6 @@ function parseEnvelope(raw: string): HerdrEnvelope {
 	}
 }
 
-function shellQuote(value: string): string {
-	return `'${value.replace(/'/g, `'"'"'`)}'`;
-}
 
 function agentInfoFromUnknown(value: unknown): HerdrAgentInfo | null {
 	if (!value || typeof value !== "object") return null;
@@ -127,8 +124,12 @@ function toHostTarget(agent: HerdrAgentInfo, displayName?: string): HostTarget {
 	};
 }
 
-function resolveFocusTarget(target: HostIdentity): string | null {
-	return target.displayName || target.primaryId || null;
+function resolveFocusTarget(target: HostTarget): string | null {
+	return target.refs.agentName || target.displayName || target.refs.paneId || target.primaryId || null;
+}
+
+function resolveStopPaneId(target: HostTarget): string | null {
+	return target.refs.paneId || null;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -348,7 +349,7 @@ export class HerdProcessHost implements ProcessHost {
 		};
 	}
 
-	async targetExists(target: HostIdentity, inventory?: HostInventory): Promise<boolean> {
+	async targetExists(target: HostTarget, inventory?: HostInventory): Promise<boolean> {
 		const inv = inventory ?? (await this.listInventory());
 		if (target.primaryId && inv.primaryIds.has(target.primaryId)) return true;
 		const name = target.displayName;
@@ -468,7 +469,7 @@ export class HerdProcessHost implements ProcessHost {
 		throw new Error(`herdr agent rename failed for all 32-char candidates near ${desiredName}`);
 	}
 
-	async focus(target: HostIdentity): Promise<HostFocusResult> {
+	async focus(target: HostTarget): Promise<HostFocusResult> {
 		const focusTarget = resolveFocusTarget(target);
 		const command = focusTarget
 			? `herdr agent focus ${shellQuote(focusTarget)}`
@@ -493,17 +494,17 @@ export class HerdProcessHost implements ProcessHost {
 		}
 	}
 
-	async stop(target: HostIdentity, options?: { force?: boolean }): Promise<HostStopResult> {
+	async stop(target: HostTarget, options?: { force?: boolean }): Promise<HostStopResult> {
 		const force = options?.force ?? false;
 		const focusTarget = resolveFocusTarget(target);
-		let resolvedPaneId: string | null = null;
-		if (focusTarget) {
+		let resolvedPaneId = resolveStopPaneId(target);
+		if (!resolvedPaneId && focusTarget) {
 			try {
 				const envelope = this.invoke(["agent", "get", focusTarget]);
 				const agent = agentInfoFromUnknown(envelope.result);
 				resolvedPaneId = agent?.pane_id ?? null;
 			} catch {
-				// fall through
+				// leftover rows without refs.paneId still resolve live.
 			}
 		}
 
@@ -561,7 +562,7 @@ export class HerdProcessHost implements ProcessHost {
 		}
 	}
 
-	async capture(target: HostIdentity, options?: { lines?: number }): Promise<HostCaptureResult> {
+	async capture(target: HostTarget, options?: { lines?: number }): Promise<HostCaptureResult> {
 		const lines = Math.max(1, options?.lines ?? 200);
 		const focusTarget = resolveFocusTarget(target);
 		const kind = "agent";

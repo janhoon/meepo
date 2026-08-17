@@ -45,13 +45,11 @@ import type {
 
 import {
 	deliverQueuedParentMessagesViaBridge,
-	formatDownwardMessage,
 	getAssistantText,
 	getDeliveryOptions,
-	getV2Payload,
 	isAssistantMessage,
-	markV2RecipientStatusForLegacyMessage,
 } from "./child-downward.js";
+import { formatDownwardMessage } from "./downward-policy.js";
 import { publishChildUpdate, recipientLabel } from "./child-publish.js";
 import {
 	appendRunEvent,
@@ -142,8 +140,6 @@ export function registerChildRuntime(
 	let downwardPoll: ReturnType<typeof setInterval> | undefined;
 	let downwardDeliveryMode: ChildDownwardDeliveryMode = environment.transportKind === "rpc_bridge" ? "rpc_bridge" : "poll_fallback";
 	const pendingAckIds = new Set<string>();
-	const pendingV2AckRecipientRowIds = new Set<string>();
-	const pendingV2AckMessageIds = new Set<string>();
 	let statusSnapshot: RuntimeStatusSnapshot = {
 		agentId: environment.childId,
 		profile: environment.profile,
@@ -214,14 +210,9 @@ export function registerChildRuntime(
 	}
 
 	function ackPendingPollFallbackDeliveries(): void {
-		const db = getMeepoDb();
-		const pending = [...pendingAckIds, ...pendingV2AckRecipientRowIds];
-		if (pending.length > 0) {
-			markInbox(db, pending, "acked", { childId: environment.childId, transportKind: "poll_fallback" });
-			pendingAckIds.clear();
-			pendingV2AckRecipientRowIds.clear();
-		}
-		pendingV2AckMessageIds.clear();
+		if (pendingAckIds.size === 0) return;
+		markInbox(getMeepoDb(), [...pendingAckIds], "acked", { childId: environment.childId, transportKind: "poll_fallback" });
+		pendingAckIds.clear();
 	}
 
 	async function drainDownwardMessages(): Promise<void> {
@@ -238,17 +229,13 @@ export function registerChildRuntime(
 					},
 					getDeliveryOptions(message),
 				);
-				const v2Payload = getV2Payload(message);
-				markInbox(db, [v2Payload?.v2RecipientRowId ?? message.id], "delivered", {
+				markInbox(db, [message.id], "delivered", {
 					childId: environment.childId,
 					transportKind: "poll_fallback",
 				});
-				if (v2Payload?.v2RecipientRowId) pendingV2AckRecipientRowIds.add(v2Payload.v2RecipientRowId);
 				pendingAckIds.add(message.id);
 				appendRunEvent(environment, "downward_delivered", `Delivered ${message.kind}`, {
 					messageId: message.id,
-					v2MessageId: v2Payload?.v2MessageId ?? null,
-					v2RecipientRowId: v2Payload?.v2RecipientRowId ?? null,
 					deliveryMode: "poll_fallback",
 				});
 			} catch (error) {
@@ -311,7 +298,7 @@ export function registerChildRuntime(
 							: "running";
 			const publishResult = publishChildUpdate(environment, params.kind, payload, nextState);
 			const parentDelivery = publishResult.recipient.kind === "agent" ? await deliverQueuedParentMessagesViaBridge(publishResult.recipient.agentId) : null;
-			const readReceiptStatus = parentDelivery?.v2AckedMessageIds.includes(publishResult.messageId) ? "acked" : "queued";
+			const readReceiptStatus = parentDelivery?.ackedMessageIds.includes(publishResult.messageId) ? "acked" : "queued";
 			const deliveryText = parentDelivery
 				? parentDelivery.delivered > 0
 					? `; delivered ${parentDelivery.delivered} parent message${parentDelivery.delivered === 1 ? "" : "s"} via RPC bridge`
@@ -348,7 +335,6 @@ export function registerChildRuntime(
 					messageId: publishResult.messageId,
 					routeKind: publishResult.routeKind,
 					readReceipt: { status: readReceiptStatus, recipientRowIds: publishResult.recipientRowIds },
-					legacyMessageIds: publishResult.legacyMessageIds,
 					parentDelivery,
 				},
 			};
@@ -553,15 +539,12 @@ export function registerChildRuntime(
 	pi.on("session_shutdown", async (_event, ctx) => {
 		if (downwardPoll) clearInterval(downwardPoll);
 		downwardPoll = undefined;
-		if (pendingAckIds.size > 0 || pendingV2AckRecipientRowIds.size > 0 || pendingV2AckMessageIds.size > 0) {
+		if (pendingAckIds.size > 0) {
 			try {
 				ackPendingPollFallbackDeliveries();
 			} catch {
 				// Best-effort: shutdown path must not throw.
 			}
-			pendingAckIds.clear();
-			pendingV2AckRecipientRowIds.clear();
-			pendingV2AckMessageIds.clear();
 		}
 		ctx.ui.setStatus("meepo-child", undefined);
 	});

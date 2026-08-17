@@ -4,7 +4,7 @@
 import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Key } from "@mariozechner/pi-tui";
-import { ATTENTION_WAKE_POLL_MS, attentionWakePoll, setAttentionWakePoll, wakeCoordinatorFromAttention } from "./attention.js";
+import { startAttentionWake, stopAttentionWake, wakeCoordinatorFromAttention } from "./attention.js";
 import type { AgentsBoardState } from "./board.js";
 import { deliverQueuedMessagesViaBridge, queueDownwardMessage } from "./bridge-delivery.js";
 import { captureAgentById, cleanupAgentTarget, focusAgentById, listCleanupCandidates, reconcileAgents, stopAgentById } from "./child-fleet.js";
@@ -703,10 +703,7 @@ export function registerMeepoCoordinatorTools(pi: ExtensionAPI, runtime: MeepoRu
 				void deliverQueuedMessagesViaBridge(agent.id);
 			}
 		}
-		if (attentionWakePoll) clearInterval(attentionWakePoll);
-		setAttentionWakePoll(setInterval(() => {
-			void wakeCoordinatorFromAttention(pi, ctx).catch(() => {});
-		}, ATTENTION_WAKE_POLL_MS));
+		startAttentionWake(pi, ctx);
 		await wakeCoordinatorFromAttention(pi, ctx).catch(() => {});
 		updateFleetUi(ctx);
 	});
@@ -718,8 +715,7 @@ export function registerMeepoCoordinatorTools(pi: ExtensionAPI, runtime: MeepoRu
 	});
 
 	pi.on("session_shutdown", async () => {
-		if (attentionWakePoll) clearInterval(attentionWakePoll);
-		setAttentionWakePoll(undefined);
+		stopAttentionWake();
 		closeMeepoDb();
 	});
 }

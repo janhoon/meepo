@@ -226,7 +226,7 @@ export const TaskNoteParams = Type.Object({
 	summary: Type.String({ description: "Short task note summary." }),
 	details: Type.Optional(Type.String({ description: "Longer task note details." })),
 	files: Type.Optional(Type.Array(Type.String(), { maxItems: 200 })),
-	resolveInteractionId: Type.Optional(Type.String({ description: "Optional structured task interaction id to resolve with this note, e.g. legacy:<id> or v2:<id>." })),
+	resolveInteractionId: Type.Optional(Type.String({ description: "Optional Attention id to resolve with this note." })),
 	resolutionKind: Type.Optional(TASK_INTERACTION_RESOLUTION_KIND),
 	resolutionSummary: Type.Optional(Type.String({ description: "Optional resolution summary for the task interaction; defaults to the note summary." })),
 });

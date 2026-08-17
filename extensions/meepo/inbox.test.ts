@@ -86,6 +86,5 @@ describe("inbox", () => {
 		assert.equal(items[0]!.kind, "question");
 		assert.equal(items[0]!.state, "waiting_on_coordinator");
 		assert.equal(items[0]!.audience, "coordinator");
-		assert.equal(items[0]!.source, "hierarchy_attention");
 	});
 });

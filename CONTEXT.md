@@ -8,13 +8,9 @@ Meepo is a Pi package that orchestrates plain child sessions on a process host. 
 The seam that places, focuses, stops, and captures Child and Service processes. Two adapters exist: tmux and herdr.
 _Avoid_: backend, substrate, runner
 
-**HostIdentity**:
-The caller-facing token for a live pane, window, or tab. `kind`, `primaryId`, and `displayName` only. A Child or Service has no host until spawn succeeds.
-_Avoid_: tmux target, pane id, host fields, HostHandle
-
 **HostTarget**:
-The live adapter token returned by ProcessHost.spawnWindow. Includes adapter refs. Callers keep HostIdentity; adapters keep refs.
-_Avoid_: exposing refs to callers
+The persistable handle for a live pane, window, or tab. `hostKind`, `primaryId`, `displayName`, and adapter `refs`. A Child or Service has no host until spawn succeeds. Callers pass this token; adapters use `refs` first and fall back to `primaryId` only for leftover rows.
+_Avoid_: HostIdentity, tmux target, pane id, host fields, HostHandle
 
 **Child**:
 A tracked Pi replica launched against a Task. The live process sits on a ProcessHost; the registry row is the source of truth for host identity.
@@ -46,7 +42,7 @@ _Avoid_: dashboard (except the existing TUI surface)
 
 ## Relationships
 
-- A Child or Service has at most one HostIdentity.
-- ProcessHost adapters resolve a HostIdentity to a live pane or window. Callers pass the token, never adapter refs.
-- Inbox and Attention share one write path. Legacy tables are a private read adapter. Callers see one Attention list.
+- A Child or Service has at most one HostTarget.
+- ProcessHost adapters take a HostTarget. Live refs stay on the token; leftover rows infer refs from primaryId.
+- Inbox and Attention share one write path. Legacy tables are a private read/mark adapter. Callers see one Attention list and mark by one id.
 - The coordinator talks to Children through Inbox, not by polling host panes.

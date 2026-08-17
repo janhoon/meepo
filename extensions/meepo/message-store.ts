@@ -14,7 +14,6 @@ import {
 import {
 	toAgentAttentionV2Record,
 	toAgentMessageRecipientRecord,
-	toAgentMessageRecord,
 	toAgentMessageRouteRecord,
 	toAgentMessageV2Record,
 	toAgentThreadRecord,
@@ -28,7 +27,9 @@ import type {
 	AgentMessageRecipientRecord,
 	AgentMessageRecipientStatus,
 	AgentMessageRouteRecord,
+	AgentMessageTransportKind,
 	AgentMessageV2Record,
+	AgentRecipientRef,
 	AgentThreadRecord,
 	AttentionItemRecord,
 	CreateAgentEventInput,
@@ -246,7 +247,24 @@ export function createAttentionItem(db: DatabaseSync, input: CreateAttentionItem
 	);
 }
 
-export function updateAttentionItem(db: DatabaseSync, id: string, patch: UpdateAttentionItemInput): void {
+type AttentionPatch = {
+	state?: string;
+	priority?: number;
+	summary?: string;
+	payload?: unknown;
+	updatedAt?: number;
+	resolvedAt?: number | null;
+	resolutionKind?: string | null;
+	resolutionSummary?: string | null;
+};
+
+function applyAttentionUpdate(
+	db: DatabaseSync,
+	table: "attention_items" | "agent_attention_items_v2",
+	patch: AttentionPatch,
+	where: { clauses: string[]; params: unknown[] },
+	options: { alwaysTouchUpdatedAt?: boolean } = {},
+): number {
 	const assignments: string[] = [];
 	const params: unknown[] = [];
 	if (patch.state !== undefined) {
@@ -268,6 +286,9 @@ export function updateAttentionItem(db: DatabaseSync, id: string, patch: UpdateA
 	if (patch.updatedAt !== undefined) {
 		assignments.push("updated_at = ?");
 		params.push(patch.updatedAt);
+	} else if (options.alwaysTouchUpdatedAt) {
+		assignments.push("updated_at = ?");
+		params.push(Date.now());
 	}
 	if (patch.resolvedAt !== undefined) {
 		assignments.push("resolved_at = ?");
@@ -281,9 +302,29 @@ export function updateAttentionItem(db: DatabaseSync, id: string, patch: UpdateA
 		assignments.push("resolution_summary = ?");
 		params.push(patch.resolutionSummary);
 	}
-	if (assignments.length === 0) return;
-	params.push(id);
-	db.prepare(`UPDATE attention_items SET ${assignments.join(", ")} WHERE id = ?`).run(...params);
+	if (assignments.length === 0) return 0;
+	params.push(...where.params);
+	const result = db.prepare(`UPDATE ${table} SET ${assignments.join(", ")} WHERE ${where.clauses.join(" AND ")}`).run(...params) as { changes?: number };
+	return Number(result.changes ?? 0);
+}
+
+export function updateAttentionItem(
+	db: DatabaseSync,
+	id: string,
+	patch: UpdateAttentionItemInput,
+	filters: { states?: AttentionItemRecord["state"][]; taskId?: string } = {},
+): number {
+	const clauses = ["id = ?"];
+	const params: unknown[] = [id];
+	if (filters.states && filters.states.length > 0) {
+		clauses.push(`state IN (${makePlaceholders(filters.states.length)})`);
+		params.push(...filters.states);
+	}
+	if (filters.taskId) {
+		clauses.push("agent_id IN (SELECT id FROM agents WHERE task_id = ?)");
+		params.push(filters.taskId);
+	}
+	return applyAttentionUpdate(db, "attention_items", patch, { clauses, params });
 }
 
 export function updateAttentionItemsForAgent(
@@ -296,56 +337,21 @@ export function updateAttentionItemsForAgent(
 		audiences?: AttentionItemRecord["audience"][];
 	} = {},
 ): number {
-	const assignments: string[] = [];
-	const params: unknown[] = [];
-	if (patch.state !== undefined) {
-		assignments.push("state = ?");
-		params.push(patch.state);
-	}
-	if (patch.priority !== undefined) {
-		assignments.push("priority = ?");
-		params.push(patch.priority);
-	}
-	if (patch.summary !== undefined) {
-		assignments.push("summary = ?");
-		params.push(patch.summary);
-	}
-	if (patch.payload !== undefined) {
-		assignments.push("payload_json = ?");
-		params.push(JSON.stringify(patch.payload));
-	}
-	assignments.push("updated_at = ?");
-	params.push(patch.updatedAt ?? Date.now());
-	if (patch.resolvedAt !== undefined) {
-		assignments.push("resolved_at = ?");
-		params.push(patch.resolvedAt);
-	}
-	if (patch.resolutionKind !== undefined) {
-		assignments.push("resolution_kind = ?");
-		params.push(patch.resolutionKind);
-	}
-	if (patch.resolutionSummary !== undefined) {
-		assignments.push("resolution_summary = ?");
-		params.push(patch.resolutionSummary);
-	}
-	const where: string[] = ["agent_id = ?"];
-	params.push(agentId);
+	const clauses = ["agent_id = ?"];
+	const params: unknown[] = [agentId];
 	if (filters.states && filters.states.length > 0) {
-		where.push(`state IN (${makePlaceholders(filters.states.length)})`);
+		clauses.push(`state IN (${makePlaceholders(filters.states.length)})`);
 		params.push(...filters.states);
 	}
 	if (filters.kinds && filters.kinds.length > 0) {
-		where.push(`kind IN (${makePlaceholders(filters.kinds.length)})`);
+		clauses.push(`kind IN (${makePlaceholders(filters.kinds.length)})`);
 		params.push(...filters.kinds);
 	}
 	if (filters.audiences && filters.audiences.length > 0) {
-		where.push(`audience IN (${makePlaceholders(filters.audiences.length)})`);
+		clauses.push(`audience IN (${makePlaceholders(filters.audiences.length)})`);
 		params.push(...filters.audiences);
 	}
-	const result = db.prepare(`UPDATE attention_items SET ${assignments.join(", ")} WHERE ${where.join(" AND ")}`).run(...params) as {
-		changes?: number;
-	};
-	return Number(result.changes ?? 0);
+	return applyAttentionUpdate(db, "attention_items", patch, { clauses, params }, { alwaysTouchUpdatedAt: true });
 }
 
 export function listAttentionItems(db: DatabaseSync, filters: ListAttentionItemsFilters = {}): AttentionItemRecord[] {
@@ -512,63 +518,65 @@ export function updateAgentAttentionItemsV2ForOwner(
 	patch: UpdateAgentAttentionItemsV2Patch,
 	filters: Pick<ListAgentAttentionItemsV2Filters, "states" | "kinds" | "subjectAgentIds"> = {},
 ): number {
-	const assignments: string[] = [];
-	const params: unknown[] = [];
-	if (patch.state !== undefined) {
-		assignments.push("state = ?");
-		params.push(patch.state);
-	}
-	if (patch.priority !== undefined) {
-		assignments.push("priority = ?");
-		params.push(patch.priority);
-	}
-	if (patch.summary !== undefined) {
-		assignments.push("summary = ?");
-		params.push(patch.summary);
-	}
-	if (patch.payload !== undefined) {
-		assignments.push("payload_json = ?");
-		params.push(JSON.stringify(patch.payload));
-	}
-	if (patch.updatedAt !== undefined) {
-		assignments.push("updated_at = ?");
-		params.push(patch.updatedAt);
-	}
-	if (patch.resolvedAt !== undefined) {
-		assignments.push("resolved_at = ?");
-		params.push(patch.resolvedAt);
-	}
-	if (patch.resolutionKind !== undefined) {
-		assignments.push("resolution_kind = ?");
-		params.push(patch.resolutionKind);
-	}
-	if (patch.resolutionSummary !== undefined) {
-		assignments.push("resolution_summary = ?");
-		params.push(patch.resolutionSummary);
-	}
-	if (assignments.length === 0) return 0;
-	const where: string[] = ["owner_kind = ?"];
-	params.push(owner.kind);
+	const clauses = ["owner_kind = ?"];
+	const params: unknown[] = [owner.kind];
 	if (owner.kind === "agent") {
-		where.push("owner_agent_id = ?");
+		clauses.push("owner_agent_id = ?");
 		params.push(owner.agentId);
 	} else {
-		where.push("owner_agent_id IS NULL");
+		clauses.push("owner_agent_id IS NULL");
 	}
 	if (filters.states && filters.states.length > 0) {
-		where.push(`state IN (${makePlaceholders(filters.states.length)})`);
+		clauses.push(`state IN (${makePlaceholders(filters.states.length)})`);
 		params.push(...filters.states);
 	}
 	if (filters.kinds && filters.kinds.length > 0) {
-		where.push(`kind IN (${makePlaceholders(filters.kinds.length)})`);
+		clauses.push(`kind IN (${makePlaceholders(filters.kinds.length)})`);
 		params.push(...filters.kinds);
 	}
 	if (filters.subjectAgentIds && filters.subjectAgentIds.length > 0) {
-		where.push(`subject_agent_id IN (${makePlaceholders(filters.subjectAgentIds.length)})`);
+		clauses.push(`subject_agent_id IN (${makePlaceholders(filters.subjectAgentIds.length)})`);
 		params.push(...filters.subjectAgentIds);
 	}
-	const result = db.prepare(`UPDATE agent_attention_items_v2 SET ${assignments.join(", ")} WHERE ${where.join(" AND ")}`).run(...params) as { changes?: number };
-	return Number(result.changes ?? 0);
+	return applyAttentionUpdate(db, "agent_attention_items_v2", patch, { clauses, params });
+}
+
+export function updateAgentAttentionItemV2(
+	db: DatabaseSync,
+	id: string,
+	patch: UpdateAgentAttentionItemsV2Patch,
+	filters: { states?: AgentAttentionV2Record["state"][]; taskId?: string } = {},
+): number {
+	const clauses = ["id = ?"];
+	const params: unknown[] = [id];
+	if (filters.states && filters.states.length > 0) {
+		clauses.push(`state IN (${makePlaceholders(filters.states.length)})`);
+		params.push(...filters.states);
+	}
+	if (filters.taskId) {
+		clauses.push("(task_id = ? OR subject_agent_id IN (SELECT id FROM agents WHERE task_id = ?))");
+		params.push(filters.taskId, filters.taskId);
+	}
+	return applyAttentionUpdate(db, "agent_attention_items_v2", patch, { clauses, params });
+}
+
+export function updateAgentAttentionItemsV2ForSubject(
+	db: DatabaseSync,
+	subjectAgentId: string,
+	patch: UpdateAgentAttentionItemsV2Patch,
+	filters: Pick<ListAgentAttentionItemsV2Filters, "states" | "kinds"> = {},
+): number {
+	const clauses = ["subject_agent_id = ?"];
+	const params: unknown[] = [subjectAgentId];
+	if (filters.states && filters.states.length > 0) {
+		clauses.push(`state IN (${makePlaceholders(filters.states.length)})`);
+		params.push(...filters.states);
+	}
+	if (filters.kinds && filters.kinds.length > 0) {
+		clauses.push(`kind IN (${makePlaceholders(filters.kinds.length)})`);
+		params.push(...filters.kinds);
+	}
+	return applyAttentionUpdate(db, "agent_attention_items_v2", patch, { clauses, params });
 }
 
 function listLegacyInboxMessages(db: DatabaseSync, filters: ListInboxFilters = {}): AgentMessageRecord[] {

@@ -7,7 +7,7 @@ import {
 	safeJsonParse,
 	toBoolean,
 } from "./sql-util.js";
-import { hostIdentityFromRecord, parseHostKind } from "./process-host.js";
+import { hostFromRecord } from "./process-host.js";
 import type {
 	AgentAccessGrantRecord,
 	AgentActiveEdgeRecord,
@@ -80,24 +80,6 @@ export const AGENT_FIELD_TO_COLUMN: Record<Exclude<keyof UpdateAgentInput, "host
 	finishedAt: "finished_at",
 };
 
-export function toAgentMessageRecord(row: Record<string, unknown> | undefined): AgentMessageRecord | null {
-	if (!row || typeof row.latest_unread_id !== "string") return null;
-	return {
-		id: row.latest_unread_id,
-		threadId: (row.latest_unread_thread_id as string) ?? "",
-		senderAgentId: (row.latest_unread_sender_agent_id as string | null) ?? null,
-		recipientAgentId: (row.latest_unread_recipient_agent_id as string | null) ?? null,
-		targetKind: row.latest_unread_target_kind as AgentMessageRecord["targetKind"],
-		kind: row.latest_unread_kind as AgentMessageRecord["kind"],
-		deliveryMode: row.latest_unread_delivery_mode as AgentMessageRecord["deliveryMode"],
-		payload: safeJsonParse(row.latest_unread_payload_json as string | null, null),
-		status: row.latest_unread_status as AgentMessageRecord["status"],
-		createdAt: Number(row.latest_unread_created_at ?? 0),
-		deliveredAt: (row.latest_unread_delivered_at as number | null) ?? null,
-		ackedAt: (row.latest_unread_acked_at as number | null) ?? null,
-	};
-}
-
 export function toAgentSummary(row: Record<string, unknown>): AgentSummary {
 	const transportKind = (row.transport_kind as AgentSummary["transportKind"] | null) ?? "direct";
 	return {
@@ -130,10 +112,11 @@ export function toAgentSummary(row: Record<string, unknown>): AgentSummary {
 		bridgeConnectedAt: (row.bridge_connected_at as number | null) ?? null,
 		bridgeUpdatedAt: (row.bridge_updated_at as number | null) ?? null,
 		bridgeLastError: (row.bridge_last_error as string | null) ?? null,
-		host: hostIdentityFromRecord({
-			hostKind: parseHostKind(row.host_kind as string | null),
+		host: hostFromRecord({
+			hostKind: row.host_kind as string | null,
 			hostPrimaryId: (row.host_primary_id as string | null) ?? null,
 			hostDisplayName: (row.host_display_name as string | null) ?? null,
+			hostTargetJson: (row.host_target_json as string | null) ?? null,
 		}),
 		runDir: row.run_dir as string,
 		sessionFile: row.session_file as string,
@@ -144,8 +127,8 @@ export function toAgentSummary(row: Record<string, unknown>): AgentSummary {
 		createdAt: Number(row.created_at),
 		updatedAt: Number(row.updated_at),
 		finishedAt: (row.finished_at as number | null) ?? null,
-		unreadCount: Number(row.unread_count ?? 0),
-		latestUnreadMessage: toAgentMessageRecord(row),
+		unreadCount: 0,
+		latestUnreadMessage: null,
 	};
 }
 
@@ -169,7 +152,6 @@ export function toMailboxRecord(row: Record<string, unknown>): AgentMessageRecor
 export function toAttentionItemRecord(row: Record<string, unknown>): AttentionItemRecord {
 	return {
 		id: row.id as string,
-		source: "legacy_attention",
 		messageId: (row.message_id as string | null) ?? null,
 		agentId: row.agent_id as string,
 		threadId: row.thread_id as string,

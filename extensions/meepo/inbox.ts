@@ -3,15 +3,20 @@
  */
 import type { DatabaseSync } from "./sqlite.js";
 import {
-	createMessageWithRecipients,
 	listAgentAttentionItemsV2,
 	listAttentionItems,
 	listInboxMessages,
 	listMessagesForRecipient,
 	markAgentMessageRecipientsByIds,
+	markAgentMessages,
+	updateAgentAttentionItemV2,
+	updateAgentAttentionItemsV2ForSubject,
+	updateAttentionItem,
 	updateAttentionItemsForAgent,
-} from "./registry.js";
+} from "./message-store.js";
+import { createMessageWithRecipients } from "./message-v2-store.js";
 import { OPEN_AGENT_ATTENTION_V2_STATES, OPEN_ATTENTION_STATES } from "./registry-shared.js";
+import { payloadObject, payloadString } from "./sql-util.js";
 import type {
 	AgentActorContext,
 	AgentAttentionV2Record,
@@ -25,6 +30,7 @@ import type {
 	DeliveryMode,
 	DownwardMessageActionPolicy,
 	DownwardMessagePayload,
+	FleetSummary,
 	InboxDirection,
 	InboxEntry,
 	ListInboxFilters,
@@ -32,15 +38,6 @@ import type {
 	MessageStatus,
 	UpdateAttentionItemInput,
 } from "./types.js";
-
-function payloadObject(payload: unknown): Record<string, unknown> {
-	return payload && typeof payload === "object" && !Array.isArray(payload) ? (payload as Record<string, unknown>) : {};
-}
-
-function payloadString(payload: unknown, key: string): string | undefined {
-	const value = payloadObject(payload)[key];
-	return typeof value === "string" && value.trim() ? value : undefined;
-}
 
 export function inboxDirectionFromRecord(message: AgentMessageRecord): InboxDirection {
 	return message.targetKind === "child" ? "downward" : "upward";
@@ -63,7 +60,7 @@ export function inboxEntryFromRecord(message: AgentMessageRecord): InboxEntry {
 				: message.senderAgentId,
 		createdAt: message.createdAt,
 		details: payloadString(message.payload, "details"),
-		actionPolicy: payload.actionPolicy as DownwardMessageActionPolicy | undefined,
+		actionPolicy: typeof payload.actionPolicy === "string" ? (payload.actionPolicy as DownwardMessageActionPolicy) : undefined,
 	};
 }
 
@@ -83,6 +80,15 @@ export function listInboxForChild(
 	}).map(inboxEntryFromRecord);
 }
 
+function recipientStatusForInbox(status: MessageStatus): "acked" | "read" | "expired" | "failed" | "notified" {
+	if (status === "acked") return "acked";
+	if (status === "delivered") return "read";
+	if (status === "expired") return "expired";
+	if (status === "failed") return "failed";
+	return "notified";
+}
+
+/** One listed id, one mark. Recipient-row first, leftover agent_messages second. */
 export function markInbox(
 	db: DatabaseSync,
 	ids: string[],
@@ -90,12 +96,14 @@ export function markInbox(
 	options: { childId?: string; transportKind?: "rpc_bridge" | "inbox" | "poll_fallback" } = {},
 ): number {
 	if (ids.length === 0) return 0;
-	const recipientStatus =
-		status === "delivered" || status === "acked" ? "acked" : status === "expired" ? "expired" : status === "failed" ? "failed" : "notified";
-	return markAgentMessageRecipientsByIds(db, ids, recipientStatus, {
-		recipientAgentId: options.childId,
-		transportKind: options.transportKind,
-	});
+	const recipientStatus = recipientStatusForInbox(status);
+	const markOptions = { recipientAgentId: options.childId, transportKind: options.transportKind };
+	let changes = 0;
+	for (const id of ids) {
+		const byRecipient = markAgentMessageRecipientsByIds(db, [id], recipientStatus, markOptions);
+		changes += byRecipient > 0 ? byRecipient : markAgentMessages(db, [id], status);
+	}
+	return changes;
 }
 
 /** Delivery queue for the RPC bridge. Inbox-owned wrap of the v2+leftover merge. */
@@ -220,10 +228,28 @@ function toV2Kinds(kinds?: AttentionItemKind[]): AgentAttentionV2Record["kind"][
 	return [...mapped];
 }
 
+function toV2PatchState(state: AttentionItemState | undefined): AgentAttentionV2Record["state"] | undefined {
+	if (!state) return undefined;
+	if (state === "waiting_on_user" || state === "waiting_on_coordinator") return "waiting_on_owner";
+	return state;
+}
+
+function toV2Patch(patch: UpdateAttentionItemInput) {
+	return {
+		state: toV2PatchState(patch.state),
+		priority: patch.priority,
+		summary: patch.summary,
+		payload: patch.payload,
+		updatedAt: patch.updatedAt,
+		resolvedAt: patch.resolvedAt,
+		resolutionKind: patch.resolutionKind,
+		resolutionSummary: patch.resolutionSummary,
+	};
+}
+
 export function attentionItemFromV2(item: AgentAttentionV2Record): AttentionItemRecord {
 	return {
 		id: item.id,
-		source: "hierarchy_attention",
 		messageId: item.messageId,
 		agentId: item.subjectAgentId ?? "unknown",
 		threadId: item.subjectAgentId ?? item.id,
@@ -243,8 +269,6 @@ export function attentionItemFromV2(item: AgentAttentionV2Record): AttentionItem
 		payload: {
 			...payloadObject(item.payload),
 			taskId: item.taskId,
-			v2MessageId: item.messageId,
-			v2RecipientRowId: item.recipientRowId,
 			ownerKind: item.ownerKind,
 			ownerAgentId: item.ownerAgentId,
 		},
@@ -289,12 +313,6 @@ export function listOpenAttention(db: DatabaseSync, filters: ListOpenAttentionFi
 	);
 }
 
-function toV2PatchState(state: AttentionItemState | undefined): AgentAttentionV2Record["state"] | undefined {
-	if (!state) return undefined;
-	if (state === "waiting_on_user" || state === "waiting_on_coordinator") return "waiting_on_owner";
-	return state;
-}
-
 /** Mark Attention for a Child. Leftover + v2 writes stay private. */
 export function markAttention(
 	db: DatabaseSync,
@@ -306,50 +324,84 @@ export function markAttention(
 		states: filters.states,
 		kinds: filters.kinds,
 	});
-	const assignments: string[] = [];
-	const params: unknown[] = [];
-	const v2State = toV2PatchState(patch.state);
-	if (v2State !== undefined) {
-		assignments.push("state = ?");
-		params.push(v2State);
+	const v2 = updateAgentAttentionItemsV2ForSubject(db, childId, toV2Patch(patch), {
+		states: toV2States(filters.states) ?? OPEN_AGENT_ATTENTION_V2_STATES,
+		kinds: toV2Kinds(filters.kinds),
+	});
+	return leftover + v2;
+}
+
+/** One Attention id, one mark. Tries v2 first, leftover second. */
+export function markAttentionById(
+	db: DatabaseSync,
+	id: string,
+	patch: UpdateAttentionItemInput,
+	filters: { states?: AttentionItemState[]; taskId?: string } = {},
+): number {
+	const v2 = updateAgentAttentionItemV2(db, id, toV2Patch(patch), {
+		states: toV2States(filters.states),
+		taskId: filters.taskId,
+	});
+	if (v2 > 0) return v2;
+	return updateAttentionItem(db, id, patch, {
+		states: filters.states,
+		taskId: filters.taskId,
+	});
+}
+
+/** Fleet unread + Attention counts. Leftover merge stays private to Inbox. */
+export function summarizeInbox(
+	db: DatabaseSync,
+	filters: { projectKey?: string; spawnSessionId?: string; spawnSessionFile?: string } = {},
+): Pick<FleetSummary, "unread" | "attentionOpen" | "attentionWaitingOnUser" | "attentionCompletions" | "userQuestions"> {
+	const items = listOpenAttention(db, {
+		projectKey: filters.projectKey,
+		states: OPEN_ATTENTION_STATES,
+		limit: 500,
+	});
+	const unread = listInbox(db, {
+		projectKey: filters.projectKey,
+		spawnSessionId: filters.spawnSessionId,
+		spawnSessionFile: filters.spawnSessionFile,
+		limit: 500,
+	}).length;
+	return {
+		unread,
+		attentionOpen: items.length,
+		attentionWaitingOnUser: items.filter((item) => item.audience === "user").length,
+		attentionCompletions: items.filter((item) => item.kind === "complete").length,
+		userQuestions: new Set(items.filter((item) => item.kind === "question_for_user").map((item) => item.agentId)).size,
+	};
+}
+
+/** Attach per-child unread from the Inbox list. Listed id is already the recipient row / leftover message id. */
+export function attachInboxUnread(
+	db: DatabaseSync,
+	agents: AgentSummary[],
+	filters: { projectKey?: string; spawnSessionId?: string; spawnSessionFile?: string } = {},
+): AgentSummary[] {
+	if (agents.length === 0) return agents;
+	const messages = listInboxMessages(db, {
+		projectKey: filters.projectKey,
+		spawnSessionId: filters.spawnSessionId,
+		spawnSessionFile: filters.spawnSessionFile,
+		agentIds: agents.map((agent) => agent.id),
+		limit: 500,
+	});
+	const byChild = new Map<string, AgentMessageRecord[]>();
+	for (const message of messages) {
+		const childId = message.senderAgentId;
+		if (!childId) continue;
+		const existing = byChild.get(childId) ?? [];
+		existing.push(message);
+		byChild.set(childId, existing);
 	}
-	if (patch.priority !== undefined) {
-		assignments.push("priority = ?");
-		params.push(patch.priority);
-	}
-	if (patch.summary !== undefined) {
-		assignments.push("summary = ?");
-		params.push(patch.summary);
-	}
-	if (patch.updatedAt !== undefined) {
-		assignments.push("updated_at = ?");
-		params.push(patch.updatedAt);
-	}
-	if (patch.resolvedAt !== undefined) {
-		assignments.push("resolved_at = ?");
-		params.push(patch.resolvedAt);
-	}
-	if (patch.resolutionKind !== undefined) {
-		assignments.push("resolution_kind = ?");
-		params.push(patch.resolutionKind);
-	}
-	if (patch.resolutionSummary !== undefined) {
-		assignments.push("resolution_summary = ?");
-		params.push(patch.resolutionSummary);
-	}
-	if (assignments.length === 0) return leftover;
-	const where = ["subject_agent_id = ?"];
-	params.push(childId);
-	const v2States = toV2States(filters.states) ?? OPEN_AGENT_ATTENTION_V2_STATES;
-	if (v2States.length > 0) {
-		where.push(`state IN (${v2States.map(() => "?").join(", ")})`);
-		params.push(...v2States);
-	}
-	const v2Kinds = toV2Kinds(filters.kinds);
-	if (v2Kinds && v2Kinds.length > 0) {
-		where.push(`kind IN (${v2Kinds.map(() => "?").join(", ")})`);
-		params.push(...v2Kinds);
-	}
-	const result = db.prepare(`UPDATE agent_attention_items_v2 SET ${assignments.join(", ")} WHERE ${where.join(" AND ")}`).run(...params) as { changes?: number };
-	return leftover + Number(result.changes ?? 0);
+	return agents.map((agent) => {
+		const unread = (byChild.get(agent.id) ?? []).sort((left, right) => right.createdAt - left.createdAt);
+		return {
+			...agent,
+			unreadCount: unread.length,
+			latestUnreadMessage: unread[0] ?? null,
+		};
+	});
 }

@@ -9,15 +9,11 @@ import { listAgents } from "./registry.js";
 import { attentionItemIcon, formatAttentionWakeup } from "./formatters.js";
 import { childRuntimeEnvironment, resolveOpenAttentionFilters } from "./session-scope.js";
 
-export const ATTENTION_WAKE_POLL_MS = 2000;
-export let attentionWakePoll: ReturnType<typeof setInterval> | undefined;
-export function setAttentionWakePoll(timer: ReturnType<typeof setInterval> | undefined): void {
-	attentionWakePoll = timer;
-}
-export const sentCoordinatorAttentionIds = new Set<string>();
-export const notifiedUserAttentionIds = new Set<string>();
-/** Attention item ids that already triggered a ProcessHost toast (herdr). */
-export const hostNotifiedAttentionIds = new Set<string>();
+const ATTENTION_WAKE_POLL_MS = 2000;
+const sentCoordinatorAttentionIds = new Set<string>();
+const notifiedUserAttentionIds = new Set<string>();
+const hostNotifiedAttentionIds = new Set<string>();
+let attentionWakePoll: ReturnType<typeof setInterval> | undefined;
 
 export async function wakeCoordinatorFromAttention(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
 	if (childRuntimeEnvironment) return;
@@ -74,4 +70,16 @@ export async function wakeCoordinatorFromAttention(pi: ExtensionAPI, ctx: Extens
 		}
 		break;
 	}
+}
+
+export function startAttentionWake(pi: ExtensionAPI, ctx: ExtensionContext): void {
+	stopAttentionWake();
+	attentionWakePoll = setInterval(() => {
+		void wakeCoordinatorFromAttention(pi, ctx).catch(() => {});
+	}, ATTENTION_WAKE_POLL_MS);
+}
+
+export function stopAttentionWake(): void {
+	if (attentionWakePoll) clearInterval(attentionWakePoll);
+	attentionWakePoll = undefined;
 }

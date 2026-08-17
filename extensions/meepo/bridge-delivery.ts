@@ -9,11 +9,11 @@ import {
 	getAgent,
 	updateAgent,
 } from "./registry.js";
-import { listChildDeliveryQueue, listInboxForChild, markAttention, markInbox, publishDownward } from "./inbox.js";
+import { listChildDeliveryQueue, markAttention, markInbox, publishDownward } from "./inbox.js";
 import { getRpcBridgeSocketPath, sendRpcBridgeCommand } from "./rpc-client.js";
 import { mapDeliveryModeToBridgeCommand } from "./rpc-bridge-control.js";
 import { collectQueuedWakeCoalescingContext } from "./wake-coalescing.js";
-import { defaultDownwardActionPolicy, formatDownwardMessageForChild } from "./formatters.js";
+import { defaultDownwardActionPolicy, formatDownwardMessage } from "./downward-policy.js";
 import type {
 	AgentActorContext,
 	AgentMessageRecord,
@@ -35,19 +35,19 @@ export function coalesceQueuedDownwardWakeMessages(
 	agent: AgentSummary,
 	kind: "answer" | "note" | "redirect" | "cancel" | "priority",
 	actionPolicy: DownwardMessageActionPolicy,
-): { expiredMessageIds: string[]; expiredV2MessageIds: string[]; expiredV2RecipientRowIds: string[]; coalescedWakeMessages: NonNullable<DownwardMessagePayload["coalescedWakeMessages"]> } {
+): { expiredMessageIds: string[]; coalescedWakeMessages: NonNullable<DownwardMessagePayload["coalescedWakeMessages"]> } {
 	if (!isCoalescableWake(kind, actionPolicy)) {
-		return { expiredMessageIds: [], expiredV2MessageIds: [], expiredV2RecipientRowIds: [], coalescedWakeMessages: [] };
+		return { expiredMessageIds: [], coalescedWakeMessages: [] };
 	}
 	const queued = listChildDeliveryQueue(db, agent.id, { limit: 100 }).filter((message) => {
 		const payload = (message.payload && typeof message.payload === "object" ? message.payload : {}) as DownwardMessagePayload;
 		return isCoalescableWake(message.kind, payload.actionPolicy ?? defaultDownwardActionPolicy(message.kind as "answer" | "note" | "redirect" | "cancel" | "priority"));
 	});
 	if (queued.length === 0) {
-		return { expiredMessageIds: [], expiredV2MessageIds: [], expiredV2RecipientRowIds: [], coalescedWakeMessages: [] };
+		return { expiredMessageIds: [], coalescedWakeMessages: [] };
 	}
-	const { expiredMessageIds, expiredV2MessageIds, expiredV2RecipientRowIds, coalescedWakeMessages } = collectQueuedWakeCoalescingContext(queued);
-	markInbox(db, [...expiredMessageIds, ...expiredV2MessageIds, ...expiredV2RecipientRowIds], "expired", {
+	const { expiredMessageIds, coalescedWakeMessages } = collectQueuedWakeCoalescingContext(queued);
+	markInbox(db, expiredMessageIds, "expired", {
 		childId: agent.id,
 		transportKind: "inbox",
 	});
@@ -56,9 +56,9 @@ export function coalesceQueuedDownwardWakeMessages(
 		agentId: agent.id,
 		eventType: "downward_wake_coalesced",
 		summary: `Coalesced ${queued.length} queued resume/wake message${queued.length === 1 ? "" : "s"}.`,
-		payload: { expiredMessageIds, expiredV2MessageIds, expiredV2RecipientRowIds, coalescedWakeMessages, replacementKind: kind, actionPolicy },
+		payload: { expiredMessageIds, coalescedWakeMessages, replacementKind: kind, actionPolicy },
 	});
-	return { expiredMessageIds, expiredV2MessageIds, expiredV2RecipientRowIds, coalescedWakeMessages };
+	return { expiredMessageIds, coalescedWakeMessages };
 }
 
 export function scheduleBridgeDeliveryRetry(agentId: string, delayMs = 250): void {
@@ -73,7 +73,7 @@ export function scheduleBridgeDeliveryRetry(agentId: string, delayMs = 250): voi
 export async function deliverQueuedMessagesViaBridge(agentId: string): Promise<{ delivered: number; deferred: number; transportState: string }> {
 	if (liveBridgeDeliveryInFlight.has(agentId)) {
 		scheduleBridgeDeliveryRetry(agentId, 300);
-		const queued = listInboxForChild(getMeepoDb(), agentId, { limit: 50 });
+		const queued = listChildDeliveryQueue(getMeepoDb(), agentId, { limit: 50 });
 		return { delivered: 0, deferred: queued.length, transportState: "busy" };
 	}
 	liveBridgeDeliveryInFlight.add(agentId);
@@ -127,7 +127,7 @@ export async function deliverQueuedMessagesViaBridge(agentId: string): Promise<{
 			// Host-agnostic: delivery modes map to bridge commands only (wayfinder #20/#24).
 			const bridgeCommand = {
 				command: mapDeliveryModeToBridgeCommand(message.deliveryMode, { isStreaming }),
-				message: formatDownwardMessageForChild(message),
+				message: formatDownwardMessage(message),
 			};
 			let response;
 			try {
@@ -140,13 +140,7 @@ export async function deliverQueuedMessagesViaBridge(agentId: string): Promise<{
 				lastFailureWasTransport = false;
 				throw new Error(response.error ?? `RPC bridge rejected ${message.kind}.`);
 			}
-			const v2Payload = (message.payload && typeof message.payload === "object" ? message.payload : null) as DownwardMessagePayload | null;
-			markInbox(
-				db,
-				[message.id, v2Payload?.v2RecipientRowId, v2Payload?.v2MessageId].filter((id): id is string => Boolean(id)),
-				"acked",
-				{ childId: agent.id, transportKind: "rpc_bridge" },
-			);
+			markInbox(db, [message.id], "acked", { childId: agent.id, transportKind: "rpc_bridge" });
 			createAgentEvent(db, {
 				id: randomUUID(),
 				agentId: agent.id,
@@ -217,28 +211,21 @@ export function queueDownwardMessage(
 	const coalescedWake = coalesceQueuedDownwardWakeMessages(db, agent, kind, fullPayload.actionPolicy!);
 	if (coalescedWake.expiredMessageIds.length > 0) {
 		fullPayload.coalescedMessageIds = coalescedWake.expiredMessageIds;
-		fullPayload.coalescedV2MessageIds = coalescedWake.expiredV2MessageIds;
-		fullPayload.coalescedV2RecipientRowIds = coalescedWake.expiredV2RecipientRowIds;
 		fullPayload.coalescedWakeMessages = coalescedWake.coalescedWakeMessages;
 	}
-	let messageId = payload.v2MessageId ?? null;
-	if (!messageId) {
-		const published = publishDownward(db, {
-			actor,
-			agent,
-			kind,
-			summary: fullPayload.summary,
-			details: fullPayload.details,
-			files: fullPayload.files,
-			actionPolicy: fullPayload.actionPolicy,
-			inReplyToMessageId: fullPayload.inReplyToMessageId,
-			deliveryMode,
-			payload: fullPayload,
-		});
-		messageId = published.messageId;
-		fullPayload.v2MessageId = published.messageId;
-		fullPayload.v2RecipientRowId = published.recipientRowId ?? undefined;
-	}
+	const published = publishDownward(db, {
+		actor,
+		agent,
+		kind,
+		summary: fullPayload.summary,
+		details: fullPayload.details,
+		files: fullPayload.files,
+		actionPolicy: fullPayload.actionPolicy,
+		inReplyToMessageId: fullPayload.inReplyToMessageId,
+		deliveryMode,
+		payload: fullPayload,
+	});
+	const messageId = published.messageId;
 	createAgentEvent(db, {
 		id: randomUUID(),
 		agentId: agent.id,

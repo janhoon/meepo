@@ -6,8 +6,8 @@ import {
 	ensureProcessHost,
 } from "./process-host-factory.js";
 import {
-	hostIdentityFromRecord,
-	hostPersistFromTarget,
+	hostFromRecord,
+	persistHostFields,
 	parseProcessHostSelection,
 	resetProcessHostForTests,
 	resolveProcessHostSelection,
@@ -149,7 +149,7 @@ describe("process host selection", () => {
 });
 
 describe("host target mapping", () => {
-	it("hostPersistFromTarget writes host_* only", () => {
+	it("persistHostFields writes host_* plus refs JSON", () => {
 		const target: HostTarget = {
 			hostKind: "tmux",
 			primaryId: "%12",
@@ -161,31 +161,50 @@ describe("host target mapping", () => {
 				paneId: "%12",
 			},
 		};
-		const fields = hostPersistFromTarget(target);
-		assert.deepEqual(fields.host, {
-			kind: "tmux",
-			primaryId: "%12",
-			displayName: "research-foo-abcdef",
-		});
+		const fields = persistHostFields(target);
 		assert.equal(fields.hostKind, "tmux");
 		assert.equal(fields.hostPrimaryId, "%12");
-		assert.equal("hostTargetJson" in fields, false);
+		assert.equal(fields.hostDisplayName, "research-foo-abcdef");
+		assert.deepEqual(JSON.parse(fields.hostTargetJson), {
+			sessionId: "$1",
+			sessionName: "pi-subagents",
+			windowId: "@3",
+			paneId: "%12",
+		});
 		assert.equal("tmuxPaneId" in fields, false);
 	});
 
-	it("hostIdentityFromRecord returns the token or null", () => {
-		const fromHost = hostIdentityFromRecord({
-			host: { kind: "tmux", primaryId: "%99", displayName: "named" },
+	it("hostFromRecord reconstructs HostTarget including leftover rows", () => {
+		const fromHost = hostFromRecord({
+			host: { hostKind: "tmux", primaryId: "%99", displayName: "named", refs: { paneId: "%99" } },
 		});
-		assert.deepEqual(fromHost, { kind: "tmux", primaryId: "%99", displayName: "named" });
+		assert.deepEqual(fromHost, { hostKind: "tmux", primaryId: "%99", displayName: "named", refs: { paneId: "%99" } });
 
-		const fromStored = hostIdentityFromRecord({
+		const fromStored = hostFromRecord({
 			hostKind: "herdr",
 			hostPrimaryId: "term_abc",
 			hostDisplayName: "research-herdr",
+			hostTargetJson: JSON.stringify({ terminalId: "term_abc", paneId: "w4:p7", agentName: "research-herdr" }),
 		});
-		assert.deepEqual(fromStored, { kind: "herdr", primaryId: "term_abc", displayName: "research-herdr" });
-		assert.equal(hostIdentityFromRecord({}), null);
+		assert.deepEqual(fromStored, {
+			hostKind: "herdr",
+			primaryId: "term_abc",
+			displayName: "research-herdr",
+			refs: { terminalId: "term_abc", paneId: "w4:p7", agentName: "research-herdr" },
+		});
+
+		const leftover = hostFromRecord({
+			hostKind: "tmux",
+			hostPrimaryId: "%12",
+			hostDisplayName: "pi-subagents",
+		});
+		assert.deepEqual(leftover, {
+			hostKind: "tmux",
+			primaryId: "%12",
+			displayName: "pi-subagents",
+			refs: { sessionName: "pi-subagents", paneId: "%12" },
+		});
+		assert.equal(hostFromRecord({}), null);
 	});
 });
 

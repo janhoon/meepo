@@ -329,7 +329,7 @@ export function register(registerTool: RegisterTool, pi: ExtensionAPI): void {
 				});
 				updateTask(getMeepoDb(), params.id, { updatedAt: Date.now(), files: params.files ? [...new Set([...task.files, ...params.files])] : task.files });
 				updateFleetUi(ctx);
-				const resolutionText = resolution ? ` and resolved ${resolution.changes} ${resolution.source} interaction(s)` : "";
+				const resolutionText = resolution ? ` and resolved ${resolution.changes} interaction(s)` : "";
 				return {
 					content: [{ type: "text", text: `Added note to ${task.id}: ${params.summary}${resolutionText}` }],
 					details: { taskId: task.id, resolution },

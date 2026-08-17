@@ -64,13 +64,11 @@ export function deliveryMessageFromInboxV2(entry: AgentInboxMessageV2Record): Ag
 		summary: entry.message.summary,
 		details: entry.message.bodyMarkdown ?? undefined,
 		actionPolicy: entry.message.actionPolicy ?? undefined,
-		v2MessageId: entry.message.id,
-		v2RecipientRowId: entry.recipient.id,
 		senderKind: entry.message.senderKind,
 		senderAgentId: entry.message.senderAgentId,
 	};
 	return {
-		// Use recipient row id so ack paths can mark v2 via payload; legacy mark is a no-op when absent.
+		// Listed id is the recipient row for v2, leftover agent_messages.id otherwise.
 		id: entry.recipient.id,
 		threadId: entry.message.threadId,
 		senderAgentId: entry.message.senderAgentId,

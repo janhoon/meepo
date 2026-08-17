@@ -1,4 +1,4 @@
-import type { HostIdentity } from "./process-host.js";
+import type { HostTarget } from "./process-host.js";
 import type { TaskState, TaskWaitingOn } from "./task-types.js";
 
 export const AGENT_STATES = [
@@ -85,7 +85,6 @@ export const TASK_INTERACTION_KINDS = [
 	"blocker",
 	"completion",
 ] as const;
-export const TASK_INTERACTION_SOURCES = ["legacy_attention", "hierarchy_attention"] as const;
 
 export type AgentState = (typeof AGENT_STATES)[number];
 export type AgentTransportKind = (typeof AGENT_TRANSPORT_KINDS)[number];
@@ -121,7 +120,6 @@ export type AgentMessageRouteDecision = (typeof AGENT_MESSAGE_ROUTE_DECISIONS)[n
 export type AgentAttentionV2Kind = (typeof AGENT_ATTENTION_V2_KINDS)[number];
 export type AgentAttentionV2State = (typeof AGENT_ATTENTION_V2_STATES)[number];
 export type TaskInteractionKind = (typeof TASK_INTERACTION_KINDS)[number];
-export type TaskInteractionSource = (typeof TASK_INTERACTION_SOURCES)[number];
 
 export interface SessionChildLinkEntryData {
 	childId: string;
@@ -176,7 +174,7 @@ export interface SpawnSubagentResult {
 	profile: string;
 	title: string;
 	taskId: string | null;
-	host: HostIdentity;
+	host: HostTarget;
 	transportState: AgentTransportState;
 	sessionLinkData: SessionChildLinkEntryData;
 }
@@ -235,11 +233,7 @@ export interface DownwardMessagePayload {
 	files?: string[];
 	actionPolicy?: DownwardMessageActionPolicy;
 	inReplyToMessageId?: string;
-	v2MessageId?: string;
-	v2RecipientRowId?: string;
 	coalescedMessageIds?: string[];
-	coalescedV2MessageIds?: string[];
-	coalescedV2RecipientRowIds?: string[];
 	coalescedWakeMessages?: Array<{
 		id: string;
 		kind: MessageKind;
@@ -247,8 +241,6 @@ export interface DownwardMessagePayload {
 		details?: string;
 		files?: string[];
 		inReplyToMessageId?: string;
-		v2MessageId?: string;
-		v2RecipientRowId?: string;
 		createdAt: number;
 	}>;
 	senderAgentId?: string | null;
@@ -313,7 +305,7 @@ export interface AgentSummary {
 	bridgeConnectedAt: number | null;
 	bridgeUpdatedAt: number | null;
 	bridgeLastError: string | null;
-	host: HostIdentity | null;
+	host: HostTarget | null;
 	runDir: string;
 	sessionFile: string;
 	lastToolName: string | null;
@@ -329,7 +321,6 @@ export interface AgentSummary {
 
 export interface AttentionItemRecord {
 	id: string;
-	source: TaskInteractionSource;
 	messageId: string | null;
 	agentId: string;
 	threadId: string;
@@ -373,8 +364,6 @@ export interface AgentAttentionV2Record {
 
 export interface TaskInteractionRecord {
 	id: string;
-	source: TaskInteractionSource;
-	sourceId: string;
 	taskId: string;
 	agentId: string | null;
 	actorLabel: string;
@@ -389,7 +378,6 @@ export interface TaskInteractionRecord {
 	recommendedNextAction: string | null;
 	files: string[];
 	messageId: string | null;
-	recipientRowId: string | null;
 	nextAction: string;
 	actions: string[];
 	payload: unknown;
@@ -620,7 +608,7 @@ export interface CreateAgentInput {
 	bridgeConnectedAt?: number | null;
 	bridgeUpdatedAt?: number | null;
 	bridgeLastError?: string | null;
-	host?: HostIdentity | null;
+	host?: HostTarget | null;
 	runDir: string;
 	sessionFile: string;
 	lastToolName?: string | null;
@@ -659,7 +647,7 @@ export interface UpdateAgentInput {
 	bridgeConnectedAt?: number | null;
 	bridgeUpdatedAt?: number | null;
 	bridgeLastError?: string | null;
-	host?: HostIdentity | null;
+	host?: HostTarget | null;
 	runDir?: string;
 	sessionFile?: string;
 	lastToolName?: string | null;

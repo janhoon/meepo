@@ -1,4 +1,4 @@
-import type { HostIdentity } from "./process-host.js";
+import type { HostTarget } from "./process-host.js";
 
 export const SERVICE_STATES = ["launching", "running", "stopped", "error", "lost"] as const;
 
@@ -25,7 +25,7 @@ export interface ServiceSummary {
 	readySubstring: string | null;
 	readyMatchedAt: number | null;
 	state: ServiceState;
-	host: HostIdentity | null;
+	host: HostTarget | null;
 	runDir: string;
 	logFile: string;
 	latestStatusFile: string;
@@ -48,7 +48,7 @@ export interface CreateServiceInput {
 	readySubstring?: string | null;
 	readyMatchedAt?: number | null;
 	state: ServiceState;
-	host?: HostIdentity | null;
+	host?: HostTarget | null;
 	runDir: string;
 	logFile: string;
 	latestStatusFile: string;
@@ -70,7 +70,7 @@ export interface UpdateServiceInput {
 	readySubstring?: string | null;
 	readyMatchedAt?: number | null;
 	state?: ServiceState;
-	host?: HostIdentity | null;
+	host?: HostTarget | null;
 	runDir?: string;
 	logFile?: string;
 	latestStatusFile?: string;
@@ -115,5 +115,5 @@ export interface SpawnServiceResult {
 	state: ServiceState;
 	statusSnapshot: ServiceStatusSnapshot | null;
 	initialOutput: string;
-	host: HostIdentity;
+	host: HostTarget;
 }

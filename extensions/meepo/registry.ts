@@ -16,9 +16,6 @@ export {
 
 export {
 	createAgentMessage,
-	markAgentMessages,
-	markAgentMessageRecipientsByMessageIds,
-	markAgentMessageRecipientsByIds,
 	createAgentEvent,
 	createArtifact,
 	createAttentionItem,
@@ -28,6 +25,8 @@ export {
 	createAgentAttentionItemV2,
 	listAgentAttentionItemsV2,
 	updateAgentAttentionItemsV2ForOwner,
+	updateAgentAttentionItemV2,
+	updateAgentAttentionItemsV2ForSubject,
 	listInboxMessages,
 	listMessagesForRecipient,
 } from "./message-store.js";

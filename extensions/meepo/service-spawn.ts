@@ -4,7 +4,8 @@ import { join, resolve } from "node:path";
 import { getMeepoDb } from "./db.js";
 import { ensureMeepoRuntimePaths } from "./paths.js";
 import { getProjectKey } from "./project.js";
-import { getProcessHost, hostPersistFromTarget } from "./process-host.js";
+import { getProcessHost } from "./process-host.js";
+import { shellQuote } from "./text-util.js";
 import { createService, updateService } from "./service-registry.js";
 import type { CreateServiceInput, ServiceStatusSnapshot, SpawnServiceInput, SpawnServiceResult } from "./service-types.js";
 
@@ -16,10 +17,6 @@ interface ServiceRunArtifacts {
 	commandFile: string;
 	logFile: string;
 	latestStatusFile: string;
-}
-
-function shellQuote(value: string): string {
-	return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
 function normalizeEnv(env: Record<string, string> | null | undefined): Record<string, string> {
@@ -241,10 +238,9 @@ export async function spawnService(input: SpawnServiceInput): Promise<SpawnServi
 		updateService(db, serviceId, { state: "error", lastError: message, updatedAt: Date.now() });
 		throw error;
 	}
-	const persisted = hostPersistFromTarget(hostTarget);
 	updateService(db, serviceId, {
 		state: "running",
-		host: persisted.host,
+		host: hostTarget,
 		updatedAt: Date.now(),
 	});
 	await sleep(READY_POLL_INTERVAL_MS);
@@ -291,6 +287,6 @@ export async function spawnService(input: SpawnServiceInput): Promise<SpawnServi
 		state: statusSnapshot?.state ?? "running",
 		statusSnapshot,
 		initialOutput,
-		host: persisted.host,
+		host: hostTarget,
 	};
 }

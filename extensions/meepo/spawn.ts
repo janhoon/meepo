@@ -31,7 +31,8 @@ import type {
 } from "./types.js";
 import { getMeepoDb } from "./db.js";
 import { getProjectKey } from "./project.js";
-import { getProcessHost, hostPersistFromTarget } from "./process-host.js";
+import { getProcessHost } from "./process-host.js";
+import { shellQuote } from "./text-util.js";
 import { buildBridgeLaunchCommand } from "./rpc-bridge-control.js";
 
 const RPC_BRIDGE_ENTRY_SCRIPT = fileURLToPath(new URL("./rpc-bridge.mjs", import.meta.url));
@@ -50,10 +51,6 @@ interface CreateRunArtifactsOptions {
 	parentAgentId: string | null;
 	spawnSessionId: string | null;
 	spawnSessionFile: string | null;
-}
-
-function shellQuote(value: string): string {
-	return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
 function resolvePiCommand(): string {
@@ -238,7 +235,6 @@ function buildLaunchScriptContent(options: CreateRunArtifactsOptions, paths: Sub
 		nodeExecutable: resolveNodeExecutable(process.execPath),
 		bridgeEntryScript: RPC_BRIDGE_ENTRY_SCRIPT,
 		bridgeConfigFile: paths.bridgeConfigFile,
-		shellQuote,
 	});
 	return ["#!/usr/bin/env bash", "set -euo pipefail", `cd ${shellQuote(options.spawnCwd)}`, launch].join("\n");
 }
@@ -634,9 +630,8 @@ export async function spawnSubagent(input: SpawnSubagentInput): Promise<SpawnSub
 		appendRunEvent(runArtifacts.runDir, "spawn_failed", message, { error: message });
 		throw error;
 	}
-	const persisted = hostPersistFromTarget(hostTarget);
 	updateAgent(db, agentId, {
-		host: persisted.host,
+		host: hostTarget,
 		transportKind: "rpc_bridge",
 		transportState: "launching",
 		bridgeUpdatedAt: Date.now(),
@@ -646,10 +641,10 @@ export async function spawnSubagent(input: SpawnSubagentInput): Promise<SpawnSub
 		id: randomUUID(),
 		agentId,
 		eventType: "host_spawned",
-		summary: `Spawned on ${persisted.host.kind} (${persisted.host.displayName ?? persisted.host.primaryId})`,
-		payload: persisted.host,
+		summary: `Spawned on ${hostTarget.hostKind} (${hostTarget.displayName ?? hostTarget.primaryId})`,
+		payload: hostTarget,
 	});
-	appendRunEvent(runArtifacts.runDir, "host_spawned", `Spawned on ${persisted.host.kind}`, persisted.host);
+	appendRunEvent(runArtifacts.runDir, "host_spawned", `Spawned on ${hostTarget.hostKind}`, hostTarget);
 	const sessionLinkData: SessionChildLinkEntryData = {
 		childId: agentId,
 		profile: input.profile.name,
@@ -661,7 +656,7 @@ export async function spawnSubagent(input: SpawnSubagentInput): Promise<SpawnSub
 		profile: input.profile.name,
 		title: input.title,
 		taskId: input.taskId,
-		host: persisted.host,
+		host: hostTarget,
 		transportState: "launching",
 		sessionLinkData,
 	};

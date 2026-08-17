@@ -373,9 +373,10 @@ describe("HerdProcessHost lifecycle (mocked CLI)", () => {
 		});
 
 		const ref = {
-			kind: "herdr" as const,
+			hostKind: "herdr" as const,
 			primaryId: "term_live",
 			displayName: "child-one",
+			refs: { terminalId: "term_live", paneId: "w4:p7", agentName: "child-one" },
 		};
 
 		assert.equal(await host.targetExists(ref), true);
@@ -394,7 +395,12 @@ describe("HerdProcessHost lifecycle (mocked CLI)", () => {
 			isAvailableProbe: () => true,
 			runHerdr: () => err("agent_not_found", "agent target gone not found"),
 		});
-		const result = await host.focus({ primaryId: "term_gone", displayName: "gone" });
+		const result = await host.focus({
+			hostKind: "herdr",
+			primaryId: "term_gone",
+			displayName: "gone",
+			refs: { terminalId: "term_gone", agentName: "gone" },
+		});
 		assert.equal(result.focused, false);
 		assert.match(result.command, /herdr agent focus/);
 		assert.match(result.reason ?? "", /not found/i);
@@ -411,7 +417,7 @@ describe("HerdProcessHost lifecycle (mocked CLI)", () => {
 			},
 		});
 		const result = await host.stop(
-			{ kind: "herdr", primaryId: "term_x", displayName: null },
+			{ hostKind: "herdr", primaryId: "term_x", displayName: undefined, refs: { terminalId: "term_x" } },
 			{ force: true },
 		);
 		assert.equal(result.stopped, true);

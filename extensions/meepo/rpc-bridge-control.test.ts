@@ -6,7 +6,7 @@ import {
 	mapDeliveryModeToBridgeCommand,
 	missingHostTargetMessage,
 } from "./rpc-bridge-control.js";
-import { hostIdentityFromRecord } from "./process-host.js";
+import { hostFromRecord } from "./process-host.js";
 
 describe("rpc bridge control plane (host-agnostic, wayfinder #20/#24)", () => {
 	it("maps delivery modes to bridge commands only (no host PTY path)", () => {
@@ -48,15 +48,16 @@ describe("rpc bridge control plane (host-agnostic, wayfinder #20/#24)", () => {
 	});
 
 	it("resolves herdr registry fields for message/stop targetExists gates", () => {
-		const ref = hostIdentityFromRecord({
+		const ref = hostFromRecord({
 			hostKind: "herdr",
 			hostPrimaryId: "term_abc",
 			hostDisplayName: "research-herdr",
 		});
 		assert.deepEqual(ref, {
-			kind: "herdr",
+			hostKind: "herdr",
 			primaryId: "term_abc",
 			displayName: "research-herdr",
+			refs: { terminalId: "term_abc", agentName: "research-herdr" },
 		});
 	});
 
