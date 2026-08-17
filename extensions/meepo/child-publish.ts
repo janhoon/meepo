@@ -12,6 +12,7 @@ import {
 	resolveAgentActorContext,
 	updateAgent,
 } from "./registry.js";
+import { touchAttentionWakeFile } from "./paths.js";
 import { applyChildPublishToLinkedTask } from "./task-registry.js";
 import { truncateText } from "./text-util.js";
 import { appendRunEvent, readLatestStatusFromDisk } from "./child-status.js";
@@ -136,6 +137,7 @@ export function publishChildUpdate(
 			summary: payload.summary,
 			payload: publishedPayload,
 		});
+		touchAttentionWakeFile();
 	}
 	appendRunEvent(environment, kind, payload.summary, { ...publishedPayload, recipient });
 	const dbAgent = getAgent(db, environment.childId);

@@ -9,6 +9,7 @@ import {
 	createAgentEvent,
 	createAgentHierarchyEdge,
 	createArtifact,
+	deleteAgent,
 	ensureAgentHierarchySelfClosure,
 	getAgent,
 	getAgentOrg,
@@ -19,7 +20,7 @@ import {
 import type { HierarchyPolicyMode } from "./config.js";
 import { evaluateHierarchySpawn } from "./hierarchy-policy.js";
 import { resolveProfileRoleKey } from "./profile-metadata.js";
-import { assertTaskLeaseAvailable, getTask, linkTaskAgent, unlinkTaskAgent } from "./task-registry.js";
+import { assertTaskLeaseAvailable, getTask, linkTaskAgent } from "./task-registry.js";
 import type { TaskRecord } from "./task-types.js";
 import type {
 	CreateAgentInput,
@@ -31,7 +32,9 @@ import type {
 } from "./types.js";
 import { getMeepoDb } from "./db.js";
 import { getProjectKey } from "./project.js";
-import { getProcessHost } from "./process-host.js";
+import { getProcessHost, type ProcessHost } from "./process-host.js";
+import { runImmediateTransaction } from "./sql-util.js";
+import type { DatabaseSync } from "./sqlite.js";
 import { shellQuote } from "./text-util.js";
 import { buildBridgeLaunchCommand } from "./rpc-bridge-control.js";
 
@@ -213,17 +216,17 @@ function buildBridgeConfig(options: CreateRunArtifactsOptions, paths: SubagentRu
 		latestStatusFile: paths.latestStatusFile,
 		debugLogFile: paths.debugLogFile,
 		childEnv: {
-			PI_TMUX_AGENTS_CHILD: "1",
-			PI_TMUX_AGENTS_CHILD_ID: options.agentId,
-			PI_TMUX_AGENTS_RUN_DIR: paths.runDir,
-			PI_TMUX_AGENTS_PROFILE: options.profile.name,
-			PI_TMUX_AGENTS_ALLOWED_TOOLS: options.tools.join(","),
-			PI_TMUX_AGENTS_TASK_ID: options.taskId ?? "",
-			PI_TMUX_AGENTS_PARENT_AGENT_ID: options.parentAgentId ?? "",
-			PI_TMUX_AGENTS_SPAWN_SESSION_ID: options.spawnSessionId ?? "",
-			PI_TMUX_AGENTS_SPAWN_SESSION_FILE: options.spawnSessionFile ?? "",
-			PI_TMUX_AGENTS_TRANSPORT_KIND: "rpc_bridge",
-			PI_TMUX_AGENTS_BRIDGE_STATUS_FILE: paths.bridgeStatusFile,
+			MEEPO_CHILD: "1",
+			MEEPO_CHILD_ID: options.agentId,
+			MEEPO_RUN_DIR: paths.runDir,
+			MEEPO_PROFILE: options.profile.name,
+			MEEPO_ALLOWED_TOOLS: options.tools.join(","),
+			MEEPO_TASK_ID: options.taskId ?? "",
+			MEEPO_PARENT_AGENT_ID: options.parentAgentId ?? "",
+			MEEPO_SPAWN_SESSION_ID: options.spawnSessionId ?? "",
+			MEEPO_SPAWN_SESSION_FILE: options.spawnSessionFile ?? "",
+			MEEPO_TRANSPORT_KIND: "rpc_bridge",
+			MEEPO_BRIDGE_STATUS_FILE: paths.bridgeStatusFile,
 		},
 		createdAt: Date.now(),
 	};
@@ -239,8 +242,14 @@ function buildLaunchScriptContent(options: CreateRunArtifactsOptions, paths: Sub
 	return ["#!/usr/bin/env bash", "set -euo pipefail", `cd ${shellQuote(options.spawnCwd)}`, launch].join("\n");
 }
 
-function writeRunArtifacts(options: CreateRunArtifactsOptions): SubagentRunPaths {
-	const { runsDir } = ensureMeepoRuntimePaths();
+export interface SpawnSubagentDeps {
+	db?: DatabaseSync;
+	host?: ProcessHost;
+	runsDir?: string;
+}
+
+function writeRunArtifacts(options: CreateRunArtifactsOptions, runsDirOverride?: string): SubagentRunPaths {
+	const runsDir = runsDirOverride ?? ensureMeepoRuntimePaths().runsDir;
 	const runDir = join(runsDir, options.agentId);
 	mkdirSync(runDir, { recursive: true });
 	const paths = getSubagentRunPaths(runDir);
@@ -314,8 +323,11 @@ function roleKeyForProfile(profileName: string, metadataRoleKey?: string | null)
 	return resolveProfileRoleKey(profileName, metadataRoleKey);
 }
 
-function existingRoleKeyForProfile(profileName: string, metadataRoleKey?: string | null): string | null {
-	const db = getMeepoDb();
+function existingRoleKeyForProfile(
+	db: DatabaseSync,
+	profileName: string,
+	metadataRoleKey?: string | null,
+): string | null {
 	const roleKey = roleKeyForProfile(profileName, metadataRoleKey);
 	return getAgentRole(db, roleKey) ? roleKey : null;
 }
@@ -324,8 +336,12 @@ function deterministicOrgId(projectKey: string, spawnSessionId: string | null, s
 	return `org:spawn:${projectKey}:session:${spawnSessionId ?? ""}:file:${spawnSessionFile ?? ""}`;
 }
 
-function ensureSpawnOrg(input: SpawnSubagentInput, projectKey: string, parentAgentId: string | null): string {
-	const db = getMeepoDb();
+function ensureSpawnOrg(
+	db: DatabaseSync,
+	input: SpawnSubagentInput,
+	projectKey: string,
+	parentAgentId: string | null,
+): string {
 	const parent = parentAgentId ? getAgent(db, parentAgentId) : null;
 	const orgId = parent?.orgId ?? deterministicOrgId(projectKey, input.spawnSessionId, input.spawnSessionFile);
 	const existingOrg = getAgentOrg(db, orgId);
@@ -341,22 +357,21 @@ function ensureSpawnOrg(input: SpawnSubagentInput, projectKey: string, parentAge
 	return orgId;
 }
 
-function ensureAgentRoleKey(agentId: string): string | null {
-	const db = getMeepoDb();
+function ensureAgentRoleKey(db: DatabaseSync, agentId: string): string | null {
 	const agent = getAgent(db, agentId);
 	if (!agent) throw new Error(`Unknown parent agent id "${agentId}".`);
 	if (agent.roleKey) return agent.roleKey;
-	const inferredRoleKey = existingRoleKeyForProfile(agent.profile);
+	const inferredRoleKey = existingRoleKeyForProfile(db, agent.profile);
 	if (!inferredRoleKey) return null;
 	updateAgent(db, agent.id, { roleKey: inferredRoleKey, updatedAt: Date.now() });
 	return inferredRoleKey;
 }
 
 function lookupReportsToEdgePolicy(
+	db: DatabaseSync,
 	parentRoleKey: string,
 	childRoleKey: string,
 ): { id: string; allowSpawn: boolean } | null {
-	const db = getMeepoDb();
 	const row = db
 		.prepare(
 			`SELECT id, allow_spawn
@@ -376,13 +391,14 @@ function lookupReportsToEdgePolicy(
  * Returns advisory notes for operator-visible logging when mode is advisory.
  */
 function assertSpawnEdgePolicy(
+	db: DatabaseSync,
 	parentAgentId: string,
 	childRoleKey: string | null,
-	mode: HierarchyPolicyMode = "enforce",
+	mode: HierarchyPolicyMode = "off",
 ): string | null {
-	const parentRoleKey = ensureAgentRoleKey(parentAgentId);
+	const parentRoleKey = ensureAgentRoleKey(db, parentAgentId);
 	const edgePolicy =
-		parentRoleKey && childRoleKey ? lookupReportsToEdgePolicy(parentRoleKey, childRoleKey) : null;
+		parentRoleKey && childRoleKey ? lookupReportsToEdgePolicy(db, parentRoleKey, childRoleKey) : null;
 	const decision = evaluateHierarchySpawn({
 		mode,
 		parentAgentId,
@@ -397,20 +413,168 @@ function assertSpawnEdgePolicy(
 	return decision.note ?? null;
 }
 
-export async function spawnSubagent(input: SpawnSubagentInput): Promise<SpawnSubagentResult> {
+const SPAWN_ARTIFACTS = [
+	"task",
+	"runtime_appendix",
+	"launch_script",
+	"session",
+	"latest_status",
+	"events",
+	"debug_log",
+	"bridge_config",
+	"bridge_status",
+	"bridge_events",
+	"bridge_log",
+	"bridge_pid",
+	"bridge_socket",
+] as const;
+
+function persistSpawnRegistry(
+	db: DatabaseSync,
+	input: {
+		agentRecord: CreateAgentInput;
+		spawnInput: SpawnSubagentInput;
+		projectKey: string;
+		hierarchyMode: HierarchyPolicyMode;
+		hierarchyAdvisory: string | null;
+		childRoleKey: string | null;
+		runArtifacts: SubagentRunPaths;
+		now: number;
+	},
+): string | null {
+	const spawned = input.spawnInput;
+	return runImmediateTransaction(db, () => {
+		const orgId =
+			input.hierarchyMode === "off"
+				? null
+				: ensureSpawnOrg(db, spawned, input.projectKey, spawned.parentAgentId);
+		createAgent(db, { ...input.agentRecord, orgId });
+		if (spawned.taskId) {
+			linkTaskAgent(db, {
+				taskId: spawned.taskId,
+				agentId: input.agentRecord.id,
+				role: spawned.profile.name,
+				isActive: true,
+				summary: spawned.title,
+				allowDuplicateOwner: spawned.allowDuplicateOwner,
+				linkedAt: input.now,
+			});
+		}
+		createAgentEvent(db, {
+			id: randomUUID(),
+			agentId: input.agentRecord.id,
+			eventType: "spawn_requested",
+			summary: `Spawn requested for ${spawned.profile.name}`,
+			payload: {
+				title: spawned.title,
+				task: input.agentRecord.task,
+				spawnCwd: input.agentRecord.spawnCwd,
+				hierarchyMode: input.hierarchyMode,
+			},
+			createdAt: input.now,
+		});
+		if (input.hierarchyAdvisory) {
+			createAgentEvent(db, {
+				id: randomUUID(),
+				agentId: input.agentRecord.id,
+				eventType: "hierarchy_policy_advisory",
+				summary: input.hierarchyAdvisory,
+				payload: {
+					mode: input.hierarchyMode,
+					parentAgentId: spawned.parentAgentId,
+					childRoleKey: input.childRoleKey,
+				},
+				createdAt: input.now,
+			});
+		}
+		const artifactPaths: Record<(typeof SPAWN_ARTIFACTS)[number], string> = {
+			task: input.runArtifacts.taskFile,
+			runtime_appendix: input.runArtifacts.runtimeAppendixFile,
+			launch_script: input.runArtifacts.launchScript,
+			session: input.runArtifacts.sessionFile,
+			latest_status: input.runArtifacts.latestStatusFile,
+			events: input.runArtifacts.eventsFile,
+			debug_log: input.runArtifacts.debugLogFile,
+			bridge_config: input.runArtifacts.bridgeConfigFile,
+			bridge_status: input.runArtifacts.bridgeStatusFile,
+			bridge_events: input.runArtifacts.bridgeEventsFile,
+			bridge_log: input.runArtifacts.bridgeLogFile,
+			bridge_pid: input.runArtifacts.bridgePidFile,
+			bridge_socket: input.runArtifacts.bridgeSocketPath,
+		};
+		for (const kind of SPAWN_ARTIFACTS) {
+			createArtifact(db, {
+				id: randomUUID(),
+				agentId: input.agentRecord.id,
+				kind,
+				path: artifactPaths[kind],
+				createdAt: input.now,
+			});
+		}
+		createAgentEvent(db, {
+			id: randomUUID(),
+			agentId: input.agentRecord.id,
+			eventType: "host_spawned",
+			summary: `Spawned on ${input.agentRecord.host?.hostKind} (${input.agentRecord.host?.displayName ?? input.agentRecord.host?.primaryId})`,
+			payload: input.agentRecord.host,
+		});
+		if (input.hierarchyMode !== "off" && orgId) {
+			const spawnedByAgentId = spawned.spawnedByAgentId ?? spawned.parentAgentId;
+			if (spawned.parentAgentId) {
+				createAgentHierarchyEdge(db, {
+					orgId,
+					parentAgentId: spawned.parentAgentId,
+					childAgentId: input.agentRecord.id,
+					edgeType: "reports_to",
+					taskId: spawned.taskId,
+					createdByAgentId: spawnedByAgentId,
+					createdByKind: spawned.createdByKind ?? (spawnedByAgentId ? "agent" : "root"),
+					reason: spawnedByAgentId ? "Spawned by child session delegation." : "Spawned by root/main session.",
+					metadata: { source: "spawnSubagent", profile: spawned.profile.name },
+					allowPolicyless: input.hierarchyMode !== "enforce",
+					createdAt: input.now,
+					updatedAt: input.now,
+				});
+			} else {
+				ensureAgentHierarchySelfClosure(db, orgId, input.agentRecord.id, input.now);
+				const org = getAgentOrg(db, orgId);
+				if (org && !org.rootAgentId) {
+					upsertAgentOrg(db, {
+						id: org.id,
+						projectKey: org.projectKey,
+						rootAgentId: input.agentRecord.id,
+						title: org.title,
+						state: org.state,
+						metadata: org.metadata,
+						createdAt: org.createdAt,
+						updatedAt: input.now,
+						archivedAt: org.archivedAt,
+					});
+				}
+			}
+		}
+		return orgId;
+	});
+}
+
+export async function spawnSubagent(
+	input: SpawnSubagentInput,
+	deps: SpawnSubagentDeps = {},
+): Promise<SpawnSubagentResult> {
 	const now = Date.now();
 	const agentId = input.agentId ?? `sa_${now.toString(36)}_${randomUUID().slice(0, 8)}`;
 	const spawnCwd = resolve(input.spawnCwd);
 	const tools = [...input.tools];
-	const db = getMeepoDb();
+	const db = deps.db ?? getMeepoDb();
+	const host = deps.host ?? getProcessHost();
 	const projectKey = getProjectKey(spawnCwd);
-	const childRoleKey = existingRoleKeyForProfile(input.profile.name, input.profile.roleKey);
-	const hierarchyMode: HierarchyPolicyMode = input.hierarchyMode ?? "enforce";
+	const hierarchyMode: HierarchyPolicyMode = input.hierarchyMode ?? "off";
+	const childRoleKey =
+		hierarchyMode === "off" ? null : existingRoleKeyForProfile(db, input.profile.name, input.profile.roleKey);
 	let hierarchyAdvisory: string | null = null;
-	if (input.parentAgentId) {
-		hierarchyAdvisory = assertSpawnEdgePolicy(input.parentAgentId, childRoleKey, hierarchyMode);
+	if (hierarchyMode !== "off" && input.parentAgentId) {
+		hierarchyAdvisory = assertSpawnEdgePolicy(db, input.parentAgentId, childRoleKey, hierarchyMode);
 	}
-	const orgId = ensureSpawnOrg(input, projectKey, input.parentAgentId);
 	const createRunOptions: CreateRunArtifactsOptions = {
 		agentId,
 		title: input.title,
@@ -427,7 +591,7 @@ export async function spawnSubagent(input: SpawnSubagentInput): Promise<SpawnSub
 		spawnSessionFile: input.spawnSessionFile,
 	};
 	if (input.taskId && !createRunOptions.taskRecord) {
-		throw new Error(`Unknown task id \"${input.taskId}\".`);
+		throw new Error(`Unknown task id "${input.taskId}".`);
 	}
 	if (input.taskId) {
 		assertTaskLeaseAvailable(db, {
@@ -437,14 +601,33 @@ export async function spawnSubagent(input: SpawnSubagentInput): Promise<SpawnSub
 			allowDuplicateOwner: input.allowDuplicateOwner,
 		});
 	}
-	const runArtifacts = writeRunArtifacts(createRunOptions);
+	const runArtifacts = writeRunArtifacts(createRunOptions, deps.runsDir);
+	appendRunEvent(runArtifacts.runDir, "spawn_requested", `Spawn requested for ${input.profile.name}`, {
+		title: input.title,
+		task: input.task,
+		spawnCwd,
+	});
+	if (hierarchyAdvisory) {
+		appendRunEvent(runArtifacts.runDir, "hierarchy_policy_advisory", hierarchyAdvisory, {
+			mode: hierarchyMode,
+			parentAgentId: input.parentAgentId,
+			childRoleKey,
+		});
+	}
+	const hostTarget = await host.spawnWindow({
+		title: input.title,
+		entityId: agentId,
+		launchCommand: `exec ${shellQuote(runArtifacts.launchScript)}`,
+		pool: "agents",
+		cwd: spawnCwd,
+	});
 	const agentRecord: CreateAgentInput = {
 		id: agentId,
 		parentAgentId: input.parentAgentId,
-		orgId,
+		orgId: null,
 		roleKey: childRoleKey,
 		spawnedByAgentId: input.spawnedByAgentId ?? input.parentAgentId,
-		hierarchyState: "attached",
+		hierarchyState: hierarchyMode === "off" ? "detached" : "attached",
 		spawnSessionId: input.spawnSessionId,
 		spawnSessionFile: input.spawnSessionFile,
 		spawnCwd,
@@ -463,194 +646,35 @@ export async function spawnSubagent(input: SpawnSubagentInput): Promise<SpawnSub
 		bridgeLogFile: runArtifacts.bridgeLogFile,
 		bridgeEventsFile: runArtifacts.bridgeEventsFile,
 		bridgeUpdatedAt: now,
+		host: hostTarget,
 		runDir: runArtifacts.runDir,
 		sessionFile: runArtifacts.sessionFile,
 		createdAt: now,
 		updatedAt: now,
 	};
-	createAgent(db, agentRecord);
-	let taskLeaseClaimed = false;
 	try {
-		if (input.taskId) {
-			linkTaskAgent(db, {
-				taskId: input.taskId,
-				agentId,
-				role: input.profile.name,
-				isActive: true,
-				summary: input.title,
-				allowDuplicateOwner: input.allowDuplicateOwner,
-				linkedAt: now,
-			});
-			taskLeaseClaimed = true;
-		}
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		updateAgent(db, agentId, {
-			state: "error",
-			transportKind: "rpc_bridge",
-			transportState: "error",
-			bridgeLastError: message,
-			bridgeUpdatedAt: Date.now(),
-			lastError: message,
-			updatedAt: Date.now(),
-		});
-		createAgentEvent(db, {
-			id: randomUUID(),
-			agentId,
-			eventType: "spawn_rejected",
-			summary: message,
-			payload: { error: message, taskId: input.taskId, profile: input.profile.name },
-		});
-		throw error;
-	}
-	if (input.parentAgentId) {
-		createAgentHierarchyEdge(db, {
-			orgId,
-			parentAgentId: input.parentAgentId,
-			childAgentId: agentId,
-			edgeType: "reports_to",
-			taskId: input.taskId,
-			createdByAgentId: input.spawnedByAgentId ?? null,
-			createdByKind: input.createdByKind ?? (input.spawnedByAgentId ? "agent" : "root"),
-			reason: input.spawnedByAgentId ? "Spawned by child session delegation." : "Spawned by root/main session.",
-			metadata: { source: "spawnSubagent", profile: input.profile.name },
-			createdAt: now,
-			updatedAt: now,
-		});
-	} else {
-		ensureAgentHierarchySelfClosure(db, orgId, agentId, now);
-		const org = getAgentOrg(db, orgId);
-		if (org && !org.rootAgentId) {
-			upsertAgentOrg(db, {
-				id: org.id,
-				projectKey: org.projectKey,
-				rootAgentId: agentId,
-				title: org.title,
-				state: org.state,
-				metadata: org.metadata,
-				createdAt: org.createdAt,
-				updatedAt: now,
-				archivedAt: org.archivedAt,
-			});
-		}
-	}
-	createAgentEvent(db, {
-		id: randomUUID(),
-		agentId,
-		eventType: "spawn_requested",
-		summary: `Spawn requested for ${input.profile.name}`,
-		payload: {
-			title: input.title,
-			task: input.task,
-			spawnCwd,
-			priority: input.priority,
+		persistSpawnRegistry(db, {
+			agentRecord,
+			spawnInput: input,
+			projectKey,
 			hierarchyMode,
-		},
-		createdAt: now,
-	});
-	if (hierarchyAdvisory) {
-		createAgentEvent(db, {
-			id: randomUUID(),
-			agentId,
-			eventType: "hierarchy_policy_advisory",
-			summary: hierarchyAdvisory,
-			payload: {
-				mode: hierarchyMode,
-				parentAgentId: input.parentAgentId,
-				childRoleKey,
-			},
-			createdAt: now,
-		});
-		appendRunEvent(runArtifacts.runDir, "hierarchy_policy_advisory", hierarchyAdvisory, {
-			mode: hierarchyMode,
-			parentAgentId: input.parentAgentId,
+			hierarchyAdvisory,
 			childRoleKey,
-		});
-	}
-	for (const artifact of [
-		{ kind: "task", path: runArtifacts.taskFile },
-		{ kind: "runtime_appendix", path: runArtifacts.runtimeAppendixFile },
-		{ kind: "launch_script", path: runArtifacts.launchScript },
-		{ kind: "session", path: runArtifacts.sessionFile },
-		{ kind: "latest_status", path: runArtifacts.latestStatusFile },
-		{ kind: "events", path: runArtifacts.eventsFile },
-		{ kind: "debug_log", path: runArtifacts.debugLogFile },
-		{ kind: "bridge_config", path: runArtifacts.bridgeConfigFile },
-		{ kind: "bridge_status", path: runArtifacts.bridgeStatusFile },
-		{ kind: "bridge_events", path: runArtifacts.bridgeEventsFile },
-		{ kind: "bridge_log", path: runArtifacts.bridgeLogFile },
-		{ kind: "bridge_pid", path: runArtifacts.bridgePidFile },
-		{ kind: "bridge_socket", path: runArtifacts.bridgeSocketPath },
-	]) {
-		createArtifact(db, {
-			id: randomUUID(),
-			agentId,
-			kind: artifact.kind,
-			path: artifact.path,
-			createdAt: now,
-		});
-	}
-	appendRunEvent(runArtifacts.runDir, "spawn_requested", `Spawn requested for ${input.profile.name}`, {
-		title: input.title,
-		task: input.task,
-		spawnCwd,
-	});
-	const host = getProcessHost();
-	let hostTarget;
-	try {
-		hostTarget = await host.spawnWindow({
-			title: input.title,
-			entityId: agentId,
-			launchCommand: `exec ${shellQuote(runArtifacts.launchScript)}`,
-			pool: "agents",
-			cwd: spawnCwd,
+			runArtifacts,
+			now,
 		});
 	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		if (taskLeaseClaimed && input.taskId) {
-			unlinkTaskAgent(db, input.taskId, agentId, "spawn_failed");
-			taskLeaseClaimed = false;
+		await host.stop(hostTarget, { force: true }).catch(() => {});
+		try {
+			deleteAgent(db, agentId);
+		} catch {
+			// Persist may have rolled back before createAgent committed.
 		}
-		updateAgent(db, agentId, {
-			state: "error",
-			transportKind: "rpc_bridge",
-			transportState: "error",
-			bridgeLastError: message,
-			bridgeUpdatedAt: Date.now(),
-			lastError: message,
-			updatedAt: Date.now(),
-		});
-		createAgentEvent(db, {
-			id: randomUUID(),
-			agentId,
-			eventType: "spawn_failed",
-			summary: message,
-			payload: { error: message },
-		});
+		const message = error instanceof Error ? error.message : String(error);
 		appendRunEvent(runArtifacts.runDir, "spawn_failed", message, { error: message });
 		throw error;
 	}
-	updateAgent(db, agentId, {
-		host: hostTarget,
-		transportKind: "rpc_bridge",
-		transportState: "launching",
-		bridgeUpdatedAt: Date.now(),
-		updatedAt: Date.now(),
-	});
-	createAgentEvent(db, {
-		id: randomUUID(),
-		agentId,
-		eventType: "host_spawned",
-		summary: `Spawned on ${hostTarget.hostKind} (${hostTarget.displayName ?? hostTarget.primaryId})`,
-		payload: hostTarget,
-	});
 	appendRunEvent(runArtifacts.runDir, "host_spawned", `Spawned on ${hostTarget.hostKind}`, hostTarget);
-	const sessionLinkData: SessionChildLinkEntryData = {
-		childId: agentId,
-		profile: input.profile.name,
-		taskId: input.taskId,
-		createdAt: now,
-	};
 	return {
 		childId: agentId,
 		profile: input.profile.name,
@@ -658,6 +682,11 @@ export async function spawnSubagent(input: SpawnSubagentInput): Promise<SpawnSub
 		taskId: input.taskId,
 		host: hostTarget,
 		transportState: "launching",
-		sessionLinkData,
+		sessionLinkData: {
+			childId: agentId,
+			profile: input.profile.name,
+			taskId: input.taskId,
+			createdAt: now,
+		},
 	};
 }

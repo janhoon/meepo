@@ -203,7 +203,7 @@ In other words: split the work, keep the replicas coordinated, and avoid the cla
 
 - Child agents report upward proactively through the registry instead of relying on status polling.
 - Bridge-backed children expose transport state in operator-facing surfaces. The full vocabulary is `legacy`, `launching`, `listening`, `live`, `fallback`, `disconnected`, `stopped`, `error`, and `lost`. A healthy launch progresses `launching → listening → live`.
-- The coordinator can now attempt live downward child delivery through the RPC bridge before falling back to the child-side mailbox poll path.
+- The coordinator can now attempt live downward child delivery through the RPC bridge before falling back to the child-side Inbox poll path.
 - Specialist acceptance (browser QA, design, security, harsh maintainability review, …) is entirely defined by **your** profiles and skills — not by Meepo core.
 - The task board is task-first. Agents are linked executors, not the board cards themselves.
 - Task health/liveness is derived separately from the Kanban lane: `task.status` controls columns and workflow state, while health flags such as `owner_active`, `stale`, `blocked_external`, `approval_required`, `empty_or_no_progress`, and `needs_review` explain operational liveness and next action.

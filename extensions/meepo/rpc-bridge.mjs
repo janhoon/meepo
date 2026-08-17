@@ -178,7 +178,7 @@ function main() {
 		const next = {
 			...existing,
 			agentId: config.agentId,
-			profile: existing.profile ?? config.childEnv?.PI_TMUX_AGENTS_PROFILE ?? null,
+			profile: existing.profile ?? config.childEnv?.MEEPO_PROFILE ?? config.childEnv?.PI_TMUX_AGENTS_PROFILE ?? null,
 			state: chooseNormalizedState(existing.state, patch.state),
 			updatedAt: patch.updatedAt ?? now(),
 			lastToolName: hasOwn(patch, "lastToolName") ? patch.lastToolName ?? null : existing.lastToolName ?? null,

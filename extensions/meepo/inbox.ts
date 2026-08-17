@@ -220,12 +220,7 @@ function toLegacyAudiences(filters: ListOpenAttentionFilters): AttentionItemAudi
 
 function toV2Kinds(kinds?: AttentionItemKind[]): AgentAttentionV2Record["kind"][] | undefined {
 	if (!kinds || kinds.length === 0) return undefined;
-	const mapped = new Set<AgentAttentionV2Record["kind"]>(kinds);
-	if (kinds.includes("question")) {
-		mapped.add("approval");
-		mapped.add("change_request");
-	}
-	return [...mapped];
+	return [...new Set(kinds)];
 }
 
 function toV2PatchState(state: AttentionItemState | undefined): AgentAttentionV2Record["state"] | undefined {
@@ -254,10 +249,11 @@ export function attentionItemFromV2(item: AgentAttentionV2Record): AttentionItem
 		agentId: item.subjectAgentId ?? "unknown",
 		threadId: item.subjectAgentId ?? item.id,
 		projectKey: item.projectKey,
+		taskId: item.taskId,
 		spawnSessionId: null,
 		spawnSessionFile: null,
 		audience: item.ownerKind === "user" ? "user" : "coordinator",
-		kind: (item.kind === "approval" || item.kind === "change_request" ? "question" : item.kind) as AttentionItemRecord["kind"],
+		kind: item.kind,
 		priority: item.priority,
 		state:
 			item.state === "waiting_on_owner"
@@ -280,6 +276,20 @@ export function attentionItemFromV2(item: AgentAttentionV2Record): AttentionItem
 	};
 }
 
+function leftoverToAttention(item: AttentionItemRecord): AttentionItemRecord {
+	const payload = payloadObject(item.payload);
+	const taskId = item.taskId ?? (typeof payload.taskId === "string" ? payload.taskId : null);
+	return {
+		...item,
+		taskId,
+		payload: {
+			...payload,
+			taskId,
+			ownerKind: item.audience === "user" ? "user" : "root",
+		},
+	};
+}
+
 /** Attention list. Leftover legacy rows stay a private read adapter. */
 export function listOpenAttention(db: DatabaseSync, filters: ListOpenAttentionFilters = {}): AttentionItemRecord[] {
 	if (filters.childIds && filters.childIds.length === 0 && (!filters.taskIds || filters.taskIds.length === 0)) {
@@ -297,6 +307,7 @@ export function listOpenAttention(db: DatabaseSync, filters: ListOpenAttentionFi
 	const rawLegacy = listAttentionItems(db, {
 		projectKey: filters.projectKey,
 		agentIds: filters.childIds,
+		taskIds: filters.taskIds,
 		states: filters.states ?? OPEN_ATTENTION_STATES,
 		audiences: toLegacyAudiences(filters),
 		kinds: filters.kinds,
@@ -308,7 +319,7 @@ export function listOpenAttention(db: DatabaseSync, filters: ListOpenAttentionFi
 		v2MessageIds.size === 0 && v2RecipientRowIds.size === 0
 			? rawLegacy
 			: rawLegacy.filter((item) => !leftoverAttentionDuplicatesV2(item, v2MessageIds, v2RecipientRowIds));
-	return [...v2.map(attentionItemFromV2), ...leftover].sort(
+	return [...v2.map(attentionItemFromV2), ...leftover.map(leftoverToAttention)].sort(
 		(left, right) => right.priority - left.priority || left.createdAt - right.createdAt,
 	);
 }

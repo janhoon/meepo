@@ -6,6 +6,7 @@ import {
 	ensureProcessHost,
 } from "./process-host-factory.js";
 import {
+	getProcessHost,
 	hostFromRecord,
 	persistHostFields,
 	parseProcessHostSelection,
@@ -225,6 +226,6 @@ describe("MeepoRuntime freezes process host on start", () => {
 			}),
 		});
 		runtime.start(pi);
-		assert.equal(runtime.getProcessHost().hostKind, "tmux");
+		assert.equal(getProcessHost().hostKind, "tmux");
 	});
 });

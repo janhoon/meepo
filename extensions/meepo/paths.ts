@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
 import { basename, join } from "node:path";
 import { getAgentDir } from "@mariozechner/pi-coding-agent";
 
@@ -30,6 +30,7 @@ export interface MeepoRuntimePaths {
 	runsDir: string;
 	servicesDir: string;
 	serviceRunsDir: string;
+	attentionWakeFile: string;
 }
 
 export function getMeepoRuntimePaths(agentDir = getAgentDir()): MeepoRuntimePaths {
@@ -40,6 +41,7 @@ export function getMeepoRuntimePaths(agentDir = getAgentDir()): MeepoRuntimePath
 		runsDir: join(agentDir, "subagents", "runs"),
 		servicesDir: join(agentDir, "services"),
 		serviceRunsDir: join(agentDir, "services", "runs"),
+		attentionWakeFile: join(agentDir, "subagents", "attention.wake"),
 	};
 }
 
@@ -51,6 +53,12 @@ export function ensureMeepoRuntimePaths(agentDir = getAgentDir()): MeepoRuntimeP
 	mkdirSync(paths.servicesDir, { recursive: true });
 	mkdirSync(paths.serviceRunsDir, { recursive: true });
 	return paths;
+}
+
+/** Signal the coordinator that Attention changed. Safe from any process. */
+export function touchAttentionWakeFile(agentDir?: string): void {
+	const { attentionWakeFile } = ensureMeepoRuntimePaths(agentDir);
+	appendFileSync(attentionWakeFile, `${Date.now()}\n`);
 }
 
 function resolveBridgeSocketPath(runDir: string): string {

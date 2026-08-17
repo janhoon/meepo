@@ -66,7 +66,7 @@ export function buildHostNotifyInput(input: HostNotifyAttentionInput): HostNotif
  */
 export async function maybeNotifyHostAttention(input: HostNotifyAttentionInput): Promise<void> {
 	const host = getFrozenProcessHost();
-	if (!host?.notify) return;
+	if (!host) return;
 	const payload = buildHostNotifyInput(input);
 	if (!payload) return;
 	try {

@@ -15,7 +15,6 @@ import {
 import { applyFullOrgPresetSeeds, shouldApplyFullOrgPreset } from "./org-preset.js";
 import { registerFullMeepoProfileCompat } from "./profile-metadata.js";
 import { setActiveProfileLoadOptions } from "./profile-load-options.js";
-import type { ProcessHost } from "./process-host.js";
 import { ensureProcessHost } from "./process-host-factory.js";
 
 export type RegisterCoordinatorTools = (pi: ExtensionAPI, runtime: MeepoRuntime) => void;
@@ -119,20 +118,11 @@ export class MeepoRuntime {
 	private started = false;
 	private lastFilter: RegistrationFilterResult | null = null;
 	private orgPresetApplied = false;
-	private processHost: ProcessHost | null = null;
 
 	constructor(options: MeepoRuntimeOptions = {}) {
 		this.config = options.config ?? loadMeepoConfig(options.loadOptions ?? {});
 		this.registerCoordinatorTools = options.registerCoordinatorTools;
 		this.getDb = options.getDb;
-	}
-
-	/** Frozen process host for this primary session (set during start()). */
-	getProcessHost(): ProcessHost {
-		if (!this.processHost) {
-			throw new Error("ProcessHost not frozen; call MeepoRuntime.start() first.");
-		}
-		return this.processHost;
 	}
 
 	/** Planned coordinator tool names for the active config (no side effects). */
@@ -187,7 +177,7 @@ export class MeepoRuntime {
 		}
 		this.started = true;
 		// Freeze process host once for this primary session (env > config > auto).
-		this.processHost = ensureProcessHost({
+		ensureProcessHost({
 			env: process.env,
 			configSelection: this.config.runtime.processHost,
 			hostOptions: {

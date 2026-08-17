@@ -1,12 +1,9 @@
 /**
  * Derived task health (read-time liveness, not Kanban lane).
  */
+import { listOpenAttention } from "./inbox.js";
 import type { DatabaseSync } from "./sqlite.js";
-import {
-	ACTIVE_AGENT_STATES,
-	OPEN_AGENT_ATTENTION_V2_STATES,
-	OPEN_ATTENTION_STATES,
-} from "./registry-shared.js";
+import { ACTIVE_AGENT_STATES, OPEN_ATTENTION_STATES } from "./registry-shared.js";
 import { addSessionScopeFilter, makePlaceholders } from "./sql-util.js";
 import { listTaskEvents, listTasks } from "./task-store.js";
 import { listTaskAgentLinks } from "./task-leases.js";
@@ -24,9 +21,6 @@ import type {
 	TaskHealthSignal,
 	TaskRecord,
 } from "./task-types.js";
-import type { AgentAttentionV2State, AgentState, AttentionItemState } from "./types.js";
-
-// Note: listTaskHealth may query attention via raw SQL; keep self-contained where possible.
 
 interface TaskHealthMetrics {
 	activeAgentCount: number;
@@ -211,59 +205,17 @@ export function listTaskHealth(
 		metric.latestAgentUpdateAt = row.latest_agent_update_at == null ? null : Number(row.latest_agent_update_at);
 		metric.latestActiveAgentUpdateAt = row.latest_active_agent_update_at == null ? null : Number(row.latest_active_agent_update_at);
 	}
-	const attentionStatePlaceholders = makePlaceholders(OPEN_ATTENTION_STATES.length);
-	const attentionRows = db
-		.prepare(
-			`SELECT
-				tal.task_id,
-				COUNT(DISTINCT ai.id) AS open_attention_count,
-				COUNT(DISTINCT CASE WHEN ai.kind = 'complete' THEN ai.id ELSE NULL END) AS open_completion_attention_count
-			 FROM task_agent_links tal
-			 JOIN attention_items ai ON ai.agent_id = tal.agent_id
-			 WHERE tal.task_id IN (${taskIdPlaceholders})
-				AND ai.state IN (${attentionStatePlaceholders})
-			 GROUP BY tal.task_id`,
-		)
-		.all(...taskIds, ...OPEN_ATTENTION_STATES) as Array<Record<string, unknown>>;
-	for (const row of attentionRows) {
-		const metric = metrics.get(row.task_id as string);
+	const attentionItems = listOpenAttention(db, {
+		taskIds,
+		states: OPEN_ATTENTION_STATES,
+		limit: 500,
+	});
+	for (const item of attentionItems) {
+		if (!item.taskId) continue;
+		const metric = metrics.get(item.taskId);
 		if (!metric) continue;
-		metric.openAttentionCount = Number(row.open_attention_count ?? 0);
-		metric.openCompletionAttentionCount = Number(row.open_completion_attention_count ?? 0);
-	}
-	const v2AttentionStatePlaceholders = makePlaceholders(OPEN_AGENT_ATTENTION_V2_STATES.length);
-	const v2AttentionRows = db
-		.prepare(
-			`SELECT
-				task_id,
-				COUNT(DISTINCT id) AS open_attention_count,
-				COUNT(DISTINCT CASE WHEN kind IN ('complete', 'approval') THEN id ELSE NULL END) AS open_completion_attention_count
-			 FROM (
-				SELECT
-					aiv2.task_id AS task_id,
-					aiv2.id AS id,
-					aiv2.kind AS kind
-				 FROM agent_attention_items_v2 aiv2
-				 WHERE aiv2.task_id IN (${taskIdPlaceholders})
-					AND aiv2.state IN (${v2AttentionStatePlaceholders})
-				UNION
-				SELECT
-					tal.task_id AS task_id,
-					aiv2.id AS id,
-					aiv2.kind AS kind
-				 FROM task_agent_links tal
-				 JOIN agent_attention_items_v2 aiv2 ON aiv2.subject_agent_id = tal.agent_id
-				 WHERE tal.task_id IN (${taskIdPlaceholders})
-					AND aiv2.state IN (${v2AttentionStatePlaceholders})
-			 ) v2_attention
-			 GROUP BY task_id`,
-		)
-		.all(...taskIds, ...OPEN_AGENT_ATTENTION_V2_STATES, ...taskIds, ...OPEN_AGENT_ATTENTION_V2_STATES) as Array<Record<string, unknown>>;
-	for (const row of v2AttentionRows) {
-		const metric = metrics.get(row.task_id as string);
-		if (!metric) continue;
-		metric.openAttentionCount += Number(row.open_attention_count ?? 0);
-		metric.openCompletionAttentionCount += Number(row.open_completion_attention_count ?? 0);
+		metric.openAttentionCount += 1;
+		if (item.kind === "complete" || item.kind === "approval") metric.openCompletionAttentionCount += 1;
 	}
 	const dependencyRows = db
 		.prepare(

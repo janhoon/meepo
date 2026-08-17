@@ -99,13 +99,17 @@ const PublishParams = Type.Object({
 	finalSummary: Type.Optional(Type.String({ description: "Optional linked-task final summary." })),
 });
 
+function childEnv(name: "CHILD" | "CHILD_ID" | "RUN_DIR" | "PROFILE" | "ALLOWED_TOOLS" | "TASK_ID" | "PARENT_AGENT_ID" | "SPAWN_SESSION_ID" | "SPAWN_SESSION_FILE" | "TRANSPORT_KIND" | "BRIDGE_STATUS_FILE"): string | undefined {
+	return process.env[`MEEPO_${name}`] ?? process.env[`PI_TMUX_AGENTS_${name}`];
+}
+
 export function getChildRuntimeEnvironment(): ChildRuntimeEnvironment | null {
-	if (process.env.PI_TMUX_AGENTS_CHILD !== "1") return null;
-	const childId = process.env.PI_TMUX_AGENTS_CHILD_ID?.trim();
-	const runDir = process.env.PI_TMUX_AGENTS_RUN_DIR?.trim();
-	const profile = process.env.PI_TMUX_AGENTS_PROFILE?.trim();
+	if (childEnv("CHILD") !== "1") return null;
+	const childId = childEnv("CHILD_ID")?.trim();
+	const runDir = childEnv("RUN_DIR")?.trim();
+	const profile = childEnv("PROFILE")?.trim();
 	if (!childId || !runDir || !profile) return null;
-	const allowedTools = (process.env.PI_TMUX_AGENTS_ALLOWED_TOOLS ?? "")
+	const allowedTools = (childEnv("ALLOWED_TOOLS") ?? "")
 		.split(",")
 		.map((value) => value.trim())
 		.filter(Boolean);
@@ -114,12 +118,12 @@ export function getChildRuntimeEnvironment(): ChildRuntimeEnvironment | null {
 		runDir,
 		profile,
 		allowedTools,
-		taskId: process.env.PI_TMUX_AGENTS_TASK_ID?.trim() || null,
-		parentAgentId: process.env.PI_TMUX_AGENTS_PARENT_AGENT_ID?.trim() || null,
-		spawnSessionId: process.env.PI_TMUX_AGENTS_SPAWN_SESSION_ID?.trim() || null,
-		spawnSessionFile: process.env.PI_TMUX_AGENTS_SPAWN_SESSION_FILE?.trim() || null,
-		transportKind: process.env.PI_TMUX_AGENTS_TRANSPORT_KIND?.trim() === "rpc_bridge" ? "rpc_bridge" : "direct",
-		bridgeStatusFile: process.env.PI_TMUX_AGENTS_BRIDGE_STATUS_FILE?.trim() || null,
+		taskId: childEnv("TASK_ID")?.trim() || null,
+		parentAgentId: childEnv("PARENT_AGENT_ID")?.trim() || null,
+		spawnSessionId: childEnv("SPAWN_SESSION_ID")?.trim() || null,
+		spawnSessionFile: childEnv("SPAWN_SESSION_FILE")?.trim() || null,
+		transportKind: childEnv("TRANSPORT_KIND")?.trim() === "rpc_bridge" ? "rpc_bridge" : "direct",
+		bridgeStatusFile: childEnv("BRIDGE_STATUS_FILE")?.trim() || null,
 	};
 }
 

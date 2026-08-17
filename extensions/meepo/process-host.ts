@@ -94,8 +94,8 @@ export interface ProcessHost {
 	capture(target: HostTarget, options?: { lines?: number }): Promise<HostCaptureResult>;
 	listInventory(): Promise<HostInventory>;
 	targetExists(target: HostTarget, inventory?: HostInventory): Promise<boolean>;
-	/** Optional; TmuxProcessHost no-ops. HerdProcessHost → notification show + sound map. */
-	notify?(input: HostNotifyInput): Promise<void>;
+	/** Required. TmuxProcessHost no-ops. HerdProcessHost → notification show + sound map. */
+	notify(input: HostNotifyInput): Promise<void>;
 }
 
 export interface ProcessHostOptions {

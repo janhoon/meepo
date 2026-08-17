@@ -150,12 +150,18 @@ export function toMailboxRecord(row: Record<string, unknown>): AgentMessageRecor
 }
 
 export function toAttentionItemRecord(row: Record<string, unknown>): AttentionItemRecord {
+	const payload = safeJsonParse(row.payload_json as string | null, null);
+	const payloadTaskId =
+		payload && typeof payload === "object" && !Array.isArray(payload) && typeof (payload as { taskId?: unknown }).taskId === "string"
+			? ((payload as { taskId: string }).taskId)
+			: null;
 	return {
 		id: row.id as string,
 		messageId: (row.message_id as string | null) ?? null,
 		agentId: row.agent_id as string,
 		threadId: row.thread_id as string,
 		projectKey: row.project_key as string,
+		taskId: payloadTaskId,
 		spawnSessionId: (row.spawn_session_id as string | null) ?? null,
 		spawnSessionFile: (row.spawn_session_file as string | null) ?? null,
 		audience: row.audience as AttentionItemRecord["audience"],
@@ -163,7 +169,7 @@ export function toAttentionItemRecord(row: Record<string, unknown>): AttentionIt
 		priority: Number(row.priority ?? 0),
 		state: row.state as AttentionItemRecord["state"],
 		summary: row.summary as string,
-		payload: safeJsonParse(row.payload_json as string | null, null),
+		payload,
 		createdAt: Number(row.created_at),
 		updatedAt: Number(row.updated_at),
 		resolvedAt: (row.resolved_at as number | null) ?? null,

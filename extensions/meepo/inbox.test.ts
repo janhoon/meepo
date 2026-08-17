@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { describe, it } from "node:test";
 import { bootstrapMeepoDatabase } from "./db.js";
 import { inboxEntryFromRecord, listInboxForChild, listOpenAttention, markInbox, publishDownward } from "./inbox.js";
-import { createAgent, createAgentAttentionItemV2, createRootActorContext, getAgent, listMessagesForRecipient } from "./registry.js";
+import { createAgent, createAgentAttentionItemV2, createAttentionItem, createRootActorContext, getAgent, listMessagesForRecipient } from "./registry.js";
 import { DatabaseSync } from "./sqlite.js";
 
 function seedAgent(db: DatabaseSync, id: string, projectKey = "test-project"): void {
@@ -86,5 +86,66 @@ describe("inbox", () => {
 		assert.equal(items[0]!.kind, "question");
 		assert.equal(items[0]!.state, "waiting_on_coordinator");
 		assert.equal(items[0]!.audience, "coordinator");
+	});
+
+	it("maps leftover Attention into the public shape without smashing kinds", () => {
+		const db = new DatabaseSync(":memory:");
+		bootstrapMeepoDatabase(db);
+		const childId = `child_${randomUUID().slice(0, 8)}`;
+		const projectKey = `proj_${randomUUID().slice(0, 8)}`;
+		seedAgent(db, childId, projectKey);
+		createAttentionItem(db, {
+			id: "att_legacy_q",
+			agentId: childId,
+			threadId: childId,
+			projectKey,
+			audience: "user",
+			kind: "question_for_user",
+			priority: 0,
+			state: "waiting_on_user",
+			summary: "ask the user",
+			payload: { taskId: "task_1" },
+		});
+		const items = listOpenAttention(db, { projectKey, childIds: [childId] });
+		assert.equal(items.length, 1);
+		assert.equal(items[0]!.kind, "question_for_user");
+		assert.equal(items[0]!.audience, "user");
+		assert.equal(items[0]!.taskId, "task_1");
+		assert.equal((items[0]!.payload as { ownerKind?: string }).ownerKind, "user");
+	});
+
+	it("leftover Attention honors taskIds", () => {
+		const db = new DatabaseSync(":memory:");
+		bootstrapMeepoDatabase(db);
+		const childId = `child_${randomUUID().slice(0, 8)}`;
+		const projectKey = `proj_${randomUUID().slice(0, 8)}`;
+		seedAgent(db, childId, projectKey);
+		createAttentionItem(db, {
+			id: "att_keep",
+			agentId: childId,
+			threadId: childId,
+			projectKey,
+			audience: "coordinator",
+			kind: "question",
+			priority: 1,
+			state: "waiting_on_coordinator",
+			summary: "keep",
+			payload: { taskId: "task_keep" },
+		});
+		createAttentionItem(db, {
+			id: "att_drop",
+			agentId: childId,
+			threadId: childId,
+			projectKey,
+			audience: "coordinator",
+			kind: "question",
+			priority: 1,
+			state: "waiting_on_coordinator",
+			summary: "drop",
+			payload: { taskId: "task_drop" },
+		});
+		const items = listOpenAttention(db, { projectKey, childIds: [childId], taskIds: ["task_keep"] });
+		assert.equal(items.length, 1);
+		assert.equal(items[0]!.taskId, "task_keep");
 	});
 });

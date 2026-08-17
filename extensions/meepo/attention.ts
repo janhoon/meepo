@@ -1,19 +1,21 @@
 /**
  * Attention: inbox snapshot → notify / wake.
+ * Coordinator watches attention.wake; publishers touch that file after a write.
  */
+import { appendFileSync, watch, type FSWatcher } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { getMeepoDb } from "./db.js";
 import { maybeNotifyHostAttention } from "./host-notify.js";
 import { listOpenAttention } from "./inbox.js";
+import { ensureMeepoRuntimePaths } from "./paths.js";
 import { listAgents } from "./registry.js";
 import { attentionItemIcon, formatAttentionWakeup } from "./formatters.js";
 import { childRuntimeEnvironment, resolveOpenAttentionFilters } from "./session-scope.js";
 
-const ATTENTION_WAKE_POLL_MS = 2000;
 const sentCoordinatorAttentionIds = new Set<string>();
 const notifiedUserAttentionIds = new Set<string>();
 const hostNotifiedAttentionIds = new Set<string>();
-let attentionWakePoll: ReturnType<typeof setInterval> | undefined;
+let attentionWakeWatcher: FSWatcher | undefined;
 
 export async function wakeCoordinatorFromAttention(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
 	if (childRuntimeEnvironment) return;
@@ -74,12 +76,18 @@ export async function wakeCoordinatorFromAttention(pi: ExtensionAPI, ctx: Extens
 
 export function startAttentionWake(pi: ExtensionAPI, ctx: ExtensionContext): void {
 	stopAttentionWake();
-	attentionWakePoll = setInterval(() => {
+	const { attentionWakeFile } = ensureMeepoRuntimePaths();
+	try {
+		appendFileSync(attentionWakeFile, "");
+	} catch {
+		return;
+	}
+	attentionWakeWatcher = watch(attentionWakeFile, () => {
 		void wakeCoordinatorFromAttention(pi, ctx).catch(() => {});
-	}, ATTENTION_WAKE_POLL_MS);
+	});
 }
 
 export function stopAttentionWake(): void {
-	if (attentionWakePoll) clearInterval(attentionWakePoll);
-	attentionWakePoll = undefined;
+	attentionWakeWatcher?.close();
+	attentionWakeWatcher = undefined;
 }

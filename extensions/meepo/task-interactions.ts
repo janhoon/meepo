@@ -103,7 +103,7 @@ export function buildTaskInteractionActions(
 }
 
 export function taskInteractionFromAttention(item: AttentionItemRecord, agent: AgentSummary | undefined): TaskInteractionRecord | null {
-	const taskId = payloadString(item.payload, "taskId") ?? agent?.taskId ?? null;
+	const taskId = item.taskId ?? payloadString(item.payload, "taskId") ?? agent?.taskId ?? null;
 	if (!taskId) return null;
 	const ownerKind: AgentRecipientKind =
 		(payloadString(item.payload, "ownerKind") as AgentRecipientKind | undefined) ??

@@ -10,7 +10,7 @@ export const COORDINATION_NO_WAIT_PROMPT = [
 	"- Never use `sleep`, `watch`, `tail -f`, shell polling loops, or retry loops to wait for subagent progress.",
 	"- Treat `subagent_attention`, `subagent_inbox`, `subagent_get`, `task_attention`, `task_get`, and pane captures as snapshot reads. Take one pass, then act or yield.",
 	"- If no published update is available, do one of: act on another ready task, answer/resolve an existing blocker, publish or return a concise pending-status summary, or end the turn.",
-	"- For service readiness, prefer `tmux_service_start` with `readySubstring`; for one-off commands, use the command's own bounded timeout rather than an agent-level wait loop.",
+	"- For service readiness, prefer `service_start` with `readySubstring`; for one-off commands, use the command's own bounded timeout rather than an agent-level wait loop.",
 ].join("\n");
 
 const SHELL_COMMAND_PREFIX = String.raw`(?:^|[;&|()\n]\s*|\b(?:do|then)\s+)`;
@@ -112,7 +112,7 @@ export function classifyNoWaitBashCommand(command: string): NoWaitPolicyViolatio
 		return {
 			kind: "tail-follow",
 			reason: "`tail -f` is not allowed for passive monitoring in an agent turn.",
-			guidance: "Capture a bounded tail of logs once, then act or yield. Use a tracked tmux service for long-running processes.",
+			guidance: "Capture a bounded tail of logs once, then act or yield. Use a tracked service for long-running processes.",
 		};
 	}
 

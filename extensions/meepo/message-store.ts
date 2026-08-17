@@ -367,6 +367,13 @@ export function listAttentionItems(db: DatabaseSync, filters: ListAttentionItems
 		where.push(`agent_id IN (${makePlaceholders(filters.agentIds.length)})`);
 		params.push(...filters.agentIds);
 	}
+	if (filters.taskIds && filters.taskIds.length === 0) return [];
+	if (filters.taskIds && filters.taskIds.length > 0) {
+		where.push(
+			`json_extract(payload_json, '$.taskId') IN (${makePlaceholders(filters.taskIds.length)})`,
+		);
+		params.push(...filters.taskIds);
+	}
 	if (filters.states && filters.states.length > 0) {
 		where.push(`state IN (${makePlaceholders(filters.states.length)})`);
 		params.push(...filters.states);

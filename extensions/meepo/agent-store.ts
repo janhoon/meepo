@@ -213,6 +213,13 @@ export function getAgent(db: DatabaseSync, id: string): AgentSummary | null {
 	return listAgents(db, { ids: [id], limit: 1 })[0] ?? null;
 }
 
+/** Delete a Child row and dependent registry rows. Used to roll back a failed spawn. */
+export function deleteAgent(db: DatabaseSync, id: string): void {
+	db.prepare("DELETE FROM artifacts WHERE agent_id = ?").run(id);
+	db.prepare("DELETE FROM agent_events WHERE agent_id = ?").run(id);
+	db.prepare("DELETE FROM agents WHERE id = ?").run(id);
+}
+
 export function getFleetSummary(
 	db: DatabaseSync,
 	filters: Pick<ListAgentsFilters, "projectKey" | "spawnSessionId" | "spawnSessionFile"> = {},

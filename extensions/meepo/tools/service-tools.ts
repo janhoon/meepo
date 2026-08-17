@@ -38,8 +38,8 @@ export function register(registerTool: RegisterTool, pi: ExtensionAPI): void {
 	registerTool({
 			name: "service_start",
 			label: "Service Start",
-			description: "Launch a long-running command in a tracked tmux window and keep it available for focus, capture, and stop operations.",
-			promptSnippet: "Launch a long-running API, dev server, watcher, or other shell command in a tracked tmux window.",
+			description: "Launch a long-running command in a tracked ProcessHost window and keep it available for focus, capture, and stop operations.",
+			promptSnippet: "Launch a long-running API, dev server, watcher, or other shell command in a tracked host window.",
 			promptGuidelines: [
 				"Use service_start for API servers, frontend dev servers, file watchers, and other long-running commands you may need again later.",
 				"Pass the foreground command, not a shell command that immediately backgrounds itself and exits.",
@@ -63,8 +63,8 @@ export function register(registerTool: RegisterTool, pi: ExtensionAPI): void {
 	registerTool({
 			name: "service_list",
 			label: "Service List",
-			description: "List tracked tmux services from the global registry.",
-			promptSnippet: "List tracked tmux services by project/session scope and active state.",
+			description: "List tracked services from the global registry.",
+			promptSnippet: "List tracked services by project/session scope and active state.",
 			promptGuidelines: [
 				"Use service_list before starting another server when you are unsure whether one is already running.",
 				"Prefer current_project or current_session scope unless the user explicitly asks for a global list.",
@@ -86,10 +86,10 @@ export function register(registerTool: RegisterTool, pi: ExtensionAPI): void {
 	registerTool({
 			name: "service_get",
 			label: "Service Get",
-			description: "Get detailed state for one or more tracked tmux services.",
-			promptSnippet: "Inspect detailed state for specific tracked tmux service windows.",
+			description: "Get detailed state for one or more tracked services.",
+			promptSnippet: "Inspect detailed state for specific tracked service windows.",
 			promptGuidelines: [
-				"Use service_get after tmux_service_list when you need the full command, cwd, log file, or tmux ids for a specific service.",
+				"Use service_get after service_list when you need the full command, cwd, log file, or host ids for a specific service.",
 			],
 			parameters: TmuxServiceGetParams,
 			prepareArguments(args) {
@@ -117,7 +117,7 @@ export function register(registerTool: RegisterTool, pi: ExtensionAPI): void {
 			name: "service_focus",
 			label: "Service Focus",
 			description: "Focus a tracked service window/pane on the frozen ProcessHost, or return the exact manual host command when automatic focus is not possible.",
-			promptSnippet: "Focus a tracked tmux service window using its stored tmux ids.",
+			promptSnippet: "Focus a tracked service window using its stored host ids.",
 			promptGuidelines: [
 				"Use service_focus when you want to jump directly into a running service window.",
 			],
@@ -134,8 +134,8 @@ export function register(registerTool: RegisterTool, pi: ExtensionAPI): void {
 	registerTool({
 			name: "service_stop",
 			label: "Service Stop",
-			description: "Stop a tracked tmux service gracefully, or force-kill its host target.",
-			promptSnippet: "Stop a tracked tmux service gracefully or with force=true.",
+			description: "Stop a tracked service gracefully, or force-kill its host target.",
+			promptSnippet: "Stop a tracked service gracefully or with force=true.",
 			promptGuidelines: [
 				"Use graceful stop first for dev servers and watchers so they can shut down cleanly.",
 				"Use force=true only when the process is hung or the user explicitly wants an immediate kill.",
@@ -153,8 +153,8 @@ export function register(registerTool: RegisterTool, pi: ExtensionAPI): void {
 	registerTool({
 			name: "service_capture",
 			label: "Service Capture",
-			description: "Capture recent output from a tracked tmux service pane, or fall back to the persisted log file if the pane already exited.",
-			promptSnippet: "Capture recent logs from a tracked tmux service for debugging or readiness checks.",
+			description: "Capture recent output from a tracked service pane, or fall back to the persisted log file if the pane already exited.",
+			promptSnippet: "Capture recent logs from a tracked service for debugging or readiness checks.",
 			promptGuidelines: [
 				"Use service_capture when you need recent startup output, error logs, or the current URL/port from a running service.",
 			],
@@ -171,8 +171,8 @@ export function register(registerTool: RegisterTool, pi: ExtensionAPI): void {
 	registerTool({
 			name: "service_reconcile",
 			label: "Service Reconcile",
-			description: "Reconcile tracked tmux service state against ProcessHost inventory and persisted status snapshots.",
-			promptSnippet: "Reconcile tracked tmux service registry state against tmux and run-directory snapshots.",
+			description: "Reconcile tracked service state against ProcessHost inventory and persisted status snapshots.",
+			promptSnippet: "Reconcile tracked service registry state against the ProcessHost and run-directory snapshots.",
 			promptGuidelines: [
 				"Use service_reconcile when service windows disappear, status looks stale, or after restarting the primary session.",
 			],

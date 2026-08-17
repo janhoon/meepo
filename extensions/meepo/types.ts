@@ -45,7 +45,14 @@ export const MESSAGE_KINDS = [
 export const DELIVERY_MODES = ["immediate", "steer", "follow_up", "idle_only"] as const;
 export const DOWNWARD_ACTION_POLICIES = ["fyi", "resume_if_blocked", "replan", "interrupt_and_replan", "stop"] as const;
 export const MESSAGE_STATUSES = ["queued", "delivered", "acked", "failed", "expired"] as const;
-export const ATTENTION_ITEM_KINDS = ["question", "question_for_user", "blocked", "complete"] as const;
+export const ATTENTION_ITEM_KINDS = [
+	"question",
+	"question_for_user",
+	"blocked",
+	"complete",
+	"approval",
+	"change_request",
+] as const;
 export const ATTENTION_ITEM_AUDIENCES = ["coordinator", "user"] as const;
 export const ATTENTION_ITEM_STATES = [
 	"open",
@@ -325,6 +332,7 @@ export interface AttentionItemRecord {
 	agentId: string;
 	threadId: string;
 	projectKey: string;
+	taskId: string | null;
 	spawnSessionId: string | null;
 	spawnSessionFile: string | null;
 	audience: AttentionItemAudience;
@@ -751,6 +759,7 @@ export interface ListAttentionItemsFilters {
 	spawnSessionId?: string;
 	spawnSessionFile?: string;
 	agentIds?: string[];
+	taskIds?: string[];
 	states?: AttentionItemState[];
 	audiences?: AttentionItemAudience[];
 	kinds?: AttentionItemKind[];

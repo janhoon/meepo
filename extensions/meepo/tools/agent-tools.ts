@@ -77,8 +77,8 @@ export function register(registerTool: RegisterTool, pi: ExtensionAPI): void {
 	registerTool({
 			name: "subagent_spawn",
 			label: "Subagent Spawn",
-			description: "Spawn a tracked tmux-backed child pi session with a run directory, session file, and global registry entry.",
-			promptSnippet: "Spawn a tracked child agent on the frozen ProcessHost (tmux or herdr) using a named profile, task, and optional cwd/model/tools overrides.",
+			description: "Spawn a tracked ProcessHost child pi session with a run directory, session file, and global registry entry.",
+			promptSnippet: "Spawn a tracked child on the frozen ProcessHost (tmux or herdr) using a named profile, task, and optional cwd/model/tools overrides.",
 			promptGuidelines: [
 				"Use subagent_spawn when work should be delegated into an isolated child context.",
 				"Prefer attaching the child to an existing taskId. If taskId is omitted, a new task is auto-created.",
@@ -105,7 +105,7 @@ export function register(registerTool: RegisterTool, pi: ExtensionAPI): void {
 			description: "Focus a tracked child agent window/pane on the frozen ProcessHost, or return the exact manual host command when automatic focus is not possible.",
 			promptSnippet: "Focus a tracked subagent window/pane using stored host ids.",
 			promptGuidelines: [
-				"Use subagent_focus when the user wants to jump directly into a child tmux window.",
+				"Use subagent_focus when the user wants to jump directly into a child host window.",
 			],
 			parameters: SubagentFocusParams,
 			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -235,9 +235,9 @@ export function register(registerTool: RegisterTool, pi: ExtensionAPI): void {
 			name: "subagent_reconcile",
 			label: "Subagent Reconcile",
 			description: "Reconcile registry state against ProcessHost inventory and latest child status snapshots.",
-			promptSnippet: "Reconcile tracked tmux subagent registry state against tmux and run-directory snapshots.",
+			promptSnippet: "Reconcile tracked child registry state against the ProcessHost and run-directory snapshots.",
 			promptGuidelines: [
-				"Use subagent_reconcile when tmux windows disappear, status looks stale, or after restarting the primary session.",
+				"Use subagent_reconcile when host windows disappear, status looks stale, or after restarting the primary session.",
 			],
 			parameters: SubagentReconcileParams,
 			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -255,8 +255,8 @@ export function register(registerTool: RegisterTool, pi: ExtensionAPI): void {
 	registerTool({
 			name: "subagent_list",
 			label: "Subagent List",
-			description: "List tracked tmux-backed subagents from the global registry.",
-			promptSnippet: "List tracked tmux subagents by project/session/state/unread filters.",
+			description: "List tracked ProcessHost children from the global registry.",
+			promptSnippet: "List tracked children by project/session/state/unread filters.",
 			promptGuidelines: [
 				"Use subagent_list to inspect already tracked child agents before delegating new work.",
 				"Prefer current_project or current_session scope unless the user explicitly asks for a global fleet view.",
@@ -283,10 +283,10 @@ export function register(registerTool: RegisterTool, pi: ExtensionAPI): void {
 	registerTool({
 			name: "subagent_get",
 			label: "Subagent Get",
-			description: "Get detailed state for one or more tracked tmux-backed subagents.",
-			promptSnippet: "Inspect detailed state for specific tracked tmux subagents.",
+			description: "Get detailed state for one or more tracked children.",
+			promptSnippet: "Inspect detailed state for specific tracked children.",
 			promptGuidelines: [
-				"Use subagent_get after subagent_list when you need the full state, tmux ids, last preview, or latest unread message for a specific child.",
+				"Use subagent_get after subagent_list when you need the full state, host ids, last preview, or latest unread message for a specific child.",
 			],
 			parameters: SubagentGetParams,
 			prepareArguments(args) {
@@ -323,9 +323,9 @@ export function register(registerTool: RegisterTool, pi: ExtensionAPI): void {
 			name: "subagent_cleanup",
 			label: "Subagent Cleanup",
 			description: "Remove finished child host targets after their work has been completed and synthesized.",
-			promptSnippet: "Clean up terminal child tmux windows that no longer need to remain open.",
+			promptSnippet: "Clean up terminal child host windows that no longer need to remain open.",
 			promptGuidelines: [
-				"Use subagent_cleanup after completion has been reviewed or synthesized so old tmux windows do not accumulate.",
+				"Use subagent_cleanup after completion has been reviewed or synthesized so old host windows do not accumulate.",
 				"Prefer dryRun=true first when you are unsure which agents are eligible.",
 				"Do not clean blocked or question-bearing agents unless force=true is intentional.",
 			],
@@ -362,7 +362,7 @@ export function register(registerTool: RegisterTool, pi: ExtensionAPI): void {
 	registerTool({
 			name: "subagent_inbox",
 			label: "Subagent Inbox",
-			description: "Read unread child-originated mailbox messages that are already stored in the global registry.",
+			description: "Read unread child-originated Inbox messages that are already stored in the global registry.",
 			promptSnippet: "Read unread child-originated questions, blockers, milestones, and completion handoffs from the subagent inbox.",
 			promptGuidelines: [
 				"Use subagent_inbox to read proactive child updates that were already published. Do not use it to poll children for status generation.",
@@ -415,7 +415,7 @@ export function register(registerTool: RegisterTool, pi: ExtensionAPI): void {
 			promptSnippet: "List open attention items for coordinator or user triage.",
 			promptGuidelines: [
 				"Use subagent_attention before spawning more work or giving a confident status answer when child questions, blockers, or completions may be pending.",
-				"Prefer this over raw inbox reads when you need the unresolved queue rather than low-level mailbox rows.",
+				"Prefer this over raw inbox reads when you need the unresolved queue rather than low-level Inbox rows.",
 				"Treat this as a one-shot snapshot, not a long-poll or monitor loop.",
 			],
 			parameters: SubagentAttentionParams,

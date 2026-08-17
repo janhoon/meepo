@@ -8,6 +8,7 @@ export { ACTIVE_STATES, AGENT_FIELD_TO_COLUMN } from "./registry-shared.js";
 export {
 	createAgent,
 	updateAgent,
+	deleteAgent,
 	listDescendantAgentIds,
 	listAgents,
 	getAgent,

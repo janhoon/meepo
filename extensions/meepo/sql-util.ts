@@ -73,19 +73,32 @@ export function addSessionScopeFilter(
 	}
 }
 
-/** BEGIN IMMEDIATE helper with rollback on error. */
+const transactionDepth = new WeakMap<object, number>();
+
+/** BEGIN IMMEDIATE helper. Nested calls use SAVEPOINT so one outer rollback covers them. */
 export function runImmediateTransaction<T>(db: DatabaseSync, callback: () => T): T {
-	db.exec("BEGIN IMMEDIATE;");
+	const depth = transactionDepth.get(db) ?? 0;
+	if (depth === 0) {
+		db.exec("BEGIN IMMEDIATE;");
+	} else {
+		db.exec(`SAVEPOINT meepo_tx_${depth};`);
+	}
+	transactionDepth.set(db, depth + 1);
 	try {
 		const result = callback();
-		db.exec("COMMIT;");
+		if (depth === 0) db.exec("COMMIT;");
+		else db.exec(`RELEASE SAVEPOINT meepo_tx_${depth};`);
 		return result;
 	} catch (error) {
 		try {
-			db.exec("ROLLBACK;");
+			if (depth === 0) db.exec("ROLLBACK;");
+			else db.exec(`ROLLBACK TO SAVEPOINT meepo_tx_${depth};`);
 		} catch {
 			// Preserve the original error.
 		}
 		throw error;
+	} finally {
+		if (depth === 0) transactionDepth.delete(db);
+		else transactionDepth.set(db, depth);
 	}
 }

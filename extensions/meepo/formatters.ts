@@ -250,6 +250,10 @@ export function attentionItemLabel(item: AttentionItemRecord): string {
 			return "blocker";
 		case "complete":
 			return "completion";
+		case "approval":
+			return "approval";
+		case "change_request":
+			return "change request";
 		default:
 			return item.kind;
 	}
@@ -265,6 +269,10 @@ export function attentionItemIcon(item: AttentionItemRecord): string {
 			return "⛔";
 		case "complete":
 			return "✓";
+		case "approval":
+			return "☑";
+		case "change_request":
+			return "✎";
 		default:
 			return "•";
 	}
